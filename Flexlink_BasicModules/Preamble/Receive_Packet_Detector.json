@@ -1,0 +1,6 @@
+{
+  "Comment": "thresh_hi 0.4 to 0.45",
+  "sa_len": 256,
+  "thresh_lo": 0.2,
+  "thresh_hi": 0.45
+}

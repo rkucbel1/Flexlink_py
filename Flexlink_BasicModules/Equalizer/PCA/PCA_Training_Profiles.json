@@ -1,0 +1,22 @@
+{
+  "Comment": "Channel models for Train_PCA_Basis.py. Delays in ns, powers in dB. Each class is trained on the average correlation of its profiles; the equalizer picks the class per packet from the measured delay spread (last delay with channel energy, in 20 MHz samples).",
+  "TimingJitter_samples": 2,
+  "TimingJitter_comment": "training includes a uniform timing error of +/- this many samples (packet-detector timing, fractional delays)",
+  "UniformFloor_dB": -30,
+  "UniformFloor_comment": "power spread evenly over 0..MaxDelay of each class, relative to the profile power; keeps the basis from collapsing onto the exact tap delays of the models",
+  "EnergyKept": 0.99999,
+  "EnergyKept_comment": "rank r = smallest number of principal components holding this fraction of the pilot correlation energy",
+  "Classes": [
+    {"Name": "Short",  "MaxDelay_samples": 16,  "Profiles": ["EPA"]},
+    {"Name": "Medium", "MaxDelay_samples": 64,  "Profiles": ["EPA", "EVA"]},
+    {"Name": "Long",   "MaxDelay_samples": 116, "Profiles": ["EPA", "EVA", "ETU"]}
+  ],
+  "Profiles": {
+    "EPA": {"Delays_ns": [0, 30, 70, 90, 110, 190, 410],
+            "Power_dB":  [0.0, -1.0, -2.0, -3.0, -8.0, -17.2, -20.8]},
+    "EVA": {"Delays_ns": [0, 30, 150, 310, 370, 710, 1090, 1730, 2510],
+            "Power_dB":  [0.0, -1.5, -1.4, -3.6, -0.6, -9.1, -7.0, -12.0, -16.9]},
+    "ETU": {"Delays_ns": [0, 50, 120, 200, 230, 500, 1600, 2300, 5000],
+            "Power_dB":  [-1.0, -1.0, -1.0, 0.0, 0.0, 0.0, -3.0, -5.0, -7.0]}
+  }
+}

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flexlink"
+version = "0.1"
+description = "FlexLink OFDM datalink simulation: Tx and Rx chains, channel defects and a GUI"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "h5py>=3.9",
+    "matplotlib>=3.8",
+    "FreeSimpleGUI>=5.0",
+]
+
+[tool.setuptools]
+py-modules = ["flexlink_paths"]

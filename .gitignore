@@ -1,0 +1,31 @@
+# Python and the virtual environment
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Private or third-party documents: check before publishing
+Docs/Password*.txt
+Docs/*.pdf
+
+# Logs
+*.log
+
+# Outputs of simulation runs (recreated by Initialize_Tx/Rx.py and the Tx/Rx chains)
+/Tx/*.h5
+/Tx/ControlSignals/*.h5
+/Tx/Generate_RandomPacketOfData/*.h5
+/Rx/*.h5
+App/Sweeps/
+
+# File transfer: received files, partly received state, worker copies, test files
+Rx/FileTransfer_State/
+Rx/Received_Files/
+App/FileTransfer_Workers/
+App/Test_Files_For_Transfer/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
