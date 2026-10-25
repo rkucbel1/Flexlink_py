@@ -20,6 +20,21 @@ For each sample i (all delay lines start at zero, as in the MATLAB code):
 When Variance_Est is 0 (e.g. leading zeros) the ratio is NaN, exactly as in
 MATLAB; NaN fails both comparisons, so the flag holds its previous value.
 
+Options (Defined_Rx/PacketDetNormaliser and PacketDetQualifier when called from
+Rx/Packet_Detector.py; --normaliser / --qualifier here). The defaults give the MATLAB
+behaviour above.
+    normaliser "Original" : Comparison_Ratio = |AutoCorrEst| / Variance_Est (MATLAB).
+    normaliser "Bounded"  : Comparison_Ratio = |AutoCorrEst| / sqrt(Variance_Est * Variance_Est_D),
+                            Variance_Est_D = the same average over x(i-k-32). By Cauchy-Schwarz the
+                            ratio never exceeds 1, which removes the false trigger ~SA_Len samples
+                            after a strong signal ends. Also blanks the first SA_Len + 32 samples
+                            (flag held at 0) while the averaging windows fill.
+    qualifier Q           : 0 (or 1) = the flag sets on the first sample above Thresh_Hi (MATLAB).
+                            Q > 1 = the flag sets only once Q samples above Thresh_Hi have been
+                            counted; a sample below Thresh_Lo resets the count, samples in between
+                            hold it. Noise rarely stays high that long, so Thresh_Hi can be lowered
+                            (e.g. 0.35 with Q = 128 for -12 dB). Adds Q samples of latency.
+
 The sliding sums are computed with convolutions (same result as the MATLAB
 shift-register loop, much faster); only the hysteresis is a sample loop.
 
@@ -58,6 +73,10 @@ import numpy as np
 
 FS_DEFAULT = 20e6
 DELAY = 32                      # autocorrelation lag, samples (Delay32 in MATLAB)
+NORMALISERS = ("Original", "Bounded")
+DEFAULT_NORMALISER = NORMALISERS[0]
+DEFAULT_QUALIFIER = 0
+QUALIFIER_MAX = 512             # detection + qualifier + 2048-sample CFO window must fit in Preamble A
 
 # Detector parameter defaults are read from Receive_Packet_Detector.json in the
 # same folder as this script. These values are used only if that file is missing.
@@ -106,8 +125,34 @@ def read_rx_input(path, dataset=None):
         return x, (float(fs) if fs is not None else None), dataset
 
 
-def packet_detector_flexlink(rx_input, sa_len, thresh_lo, thresh_hi, delay=DELAY):
-    """Return (PacketDetFlag, Comparison_Ratio, AutoCorrEst, Variance_Est)."""
+def normalize_normaliser(value):
+    """Accept the PacketDetNormaliser string with any case/extra spaces; return the canonical name."""
+    if value is None:
+        return DEFAULT_NORMALISER
+    key = " ".join(str(value).split()).lower()
+    for m in NORMALISERS:
+        if m.lower() == key:
+            return m
+    raise ValueError(f"PacketDetNormaliser {value!r} must be one of {', '.join(NORMALISERS)}")
+
+
+def check_qualifier(value):
+    """PacketDetQualifier: whole number of samples, 0..QUALIFIER_MAX (0 = off)."""
+    try:
+        q = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"PacketDetQualifier {value!r} must be a whole number of samples") from None
+    if not q.is_integer() or not 0 <= q <= QUALIFIER_MAX:
+        raise ValueError(f"PacketDetQualifier {value!r} must be a whole number 0..{QUALIFIER_MAX}")
+    return int(q)
+
+
+def packet_detector_flexlink(rx_input, sa_len, thresh_lo, thresh_hi, delay=DELAY,
+                             normaliser=DEFAULT_NORMALISER, qualifier=DEFAULT_QUALIFIER):
+    """Return (PacketDetFlag, Comparison_Ratio, AutoCorrEst, Variance_Est).
+    Defaults (normaliser "Original", qualifier 0) reproduce the MATLAB detector exactly."""
+    normaliser = normalize_normaliser(normaliser)
+    qualifier = check_qualifier(qualifier)
     x = np.asarray(rx_input, dtype=np.complex128)
     n = len(x)
 
@@ -120,16 +165,27 @@ def packet_detector_flexlink(rx_input, sa_len, thresh_lo, thresh_hi, delay=DELAY
     variance = np.convolve(np.abs(x) ** 2, win)[:n] / sa_len
 
     with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.abs(autocorr) / variance
+        if normaliser == "Bounded":
+            variance_d = np.concatenate([np.zeros(delay), variance])[:n]   # same average over x(i-k-32)
+            ratio = np.abs(autocorr) / np.sqrt(variance * variance_d)
+            blank = sa_len + delay                                          # windows still filling
+        else:
+            ratio = np.abs(autocorr) / variance
+            blank = 0
 
-    # Hysteresis detection flag
+    # Hysteresis detection flag (+ qualifier count when qualifier > 1)
+    need = max(qualifier, 1)
     flag = np.zeros(n, dtype=np.int8)
-    state = 0
+    state, count = 0, 0
     for i, r in enumerate(ratio):
+        if i < blank:
+            continue
         if r > thresh_hi:
-            state = 1
+            count += 1
+            if count >= need:
+                state = 1
         elif r < thresh_lo:
-            state = 0
+            state, count = 0, 0
         flag[i] = state
     return flag, ratio, autocorr, variance
 
@@ -191,6 +247,9 @@ def main(argv=None):
     p.add_argument("--sa-len", type=int, default=SA_LEN_DEFAULT, help=f"sliding average length (default {SA_LEN_DEFAULT}, from JSON)")
     p.add_argument("--thresh-lo", type=float, default=THRESH_LO_DEFAULT, help=f"low threshold (default {THRESH_LO_DEFAULT}, from JSON)")
     p.add_argument("--thresh-hi", type=float, default=THRESH_HI_DEFAULT, help=f"high threshold (default {THRESH_HI_DEFAULT}, from JSON)")
+    p.add_argument("--normaliser", default=DEFAULT_NORMALISER, help=f"{' or '.join(NORMALISERS)} (default {DEFAULT_NORMALISER})")
+    p.add_argument("--qualifier", type=int, default=DEFAULT_QUALIFIER,
+                   help=f"samples above Thresh_Hi before the flag sets, 0..{QUALIFIER_MAX} (default 0 = off)")
     p.add_argument("--pad-front", type=int, default=0, help="zeros to add before the input (default 0)")
     p.add_argument("--pad-end", type=int, default=0, help="zeros to add after the input (default 0)")
     p.add_argument("--plot", action="store_true", help="plot comparison ratio and detection flag")
@@ -204,9 +263,11 @@ def main(argv=None):
     fs = fs or FS_DEFAULT
     x = np.concatenate([np.zeros(a.pad_front, complex), x0, np.zeros(pad_end, complex)])
 
-    flag, ratio, autocorr, variance = packet_detector_flexlink(x, a.sa_len, a.thresh_lo, a.thresh_hi)
+    flag, ratio, autocorr, variance = packet_detector_flexlink(x, a.sa_len, a.thresh_lo, a.thresh_hi,
+                                                               normaliser=a.normaliser, qualifier=a.qualifier)
 
-    params = dict(SA_Len=a.sa_len, Comparison_Ratio_Thresh_Lo=a.thresh_lo,
+    params = dict(Normaliser=normalize_normaliser(a.normaliser), Qualifier=a.qualifier,
+                  SA_Len=a.sa_len, Comparison_Ratio_Thresh_Lo=a.thresh_lo,
                   Comparison_Ratio_Thresh_Hi=a.thresh_hi, delay_samples=DELAY,
                   pad_front=a.pad_front, pad_end=pad_end, input_length=len(x0))
     write_output(a.output, flag, ratio, autocorr, variance, x, fs, params, a.Rx_Input)

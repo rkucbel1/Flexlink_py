@@ -66,6 +66,31 @@ def read_rx_input(path, dataset=None):
         return x, (float(fs) if fs is not None else None), dataset
 
 
+# --------------------------------------------------------------------------- #
+# DC blocker (ahead of the LP filter and the preamble processing)
+#
+#   y[n] = x[n] - x[n-1] + alpha * y[n-1],   alpha = 1 - 2^-DC_BLOCKER_SHIFT
+#
+# A notch at 0 Hz with a -3 dB corner of about (1 - alpha) * Fs / (2 pi) = 3.1 kHz at
+# 20 Msps (shift 10). Preamble A has no energy at DC (tones at +-625 kHz and +-1.875 MHz),
+# and the payload's DC subcarrier is empty, so nothing wanted is lost. In hardware it is two
+# adders and a shift. Without it, a DC offset 10 dB below the noise triggers the detector.
+# --------------------------------------------------------------------------- #
+DC_BLOCKER_SHIFT = 10
+
+
+def dc_blocker(x, shift=DC_BLOCKER_SHIFT, settle=256):
+    """DC-blocking filter. The state starts as if the input had held its mean over the first
+    'settle' samples, so a record that starts with a DC offset has no start-up transient
+    (the hardware filter runs continuously and is always settled)."""
+    x = np.asarray(x, dtype=np.complex128)
+    alpha = 1.0 - 2.0 ** (-shift)
+    b, a = [1.0, -1.0], [1.0, -alpha]
+    zi = signal.lfilter_zi(b, a) * np.mean(x[:max(1, min(settle, x.size))])
+    y, _ = signal.lfilter(b, a, x, zi=zi)
+    return y
+
+
 def lp_filter_flexlink(rx_input):
     """Rx_Output = filter(h, 1, Rx_Input)  — identical to the MATLAB function."""
     return signal.lfilter(H_LP, [1.0], rx_input)

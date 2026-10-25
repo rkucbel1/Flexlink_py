@@ -18,11 +18,17 @@ Steps:
         TimingOffset  Cause_Timing_Offset   (Settings/Sample_Offset)
         TimingDrift   Cause_Timing_Drift    (Settings/Drift_ppm)
         Freq_Offset   Cause_Frequency_Offset (Settings/FrequencyOffset)
+        CW_Interferer Add_CW_Interferer     (Settings/CW_Frequency, CW_Level_dBc):
+                      a continuous tone at a fixed baseband frequency, level
+                      relative to the transmitted power. Random phase per ray.
         PhaseNoise    Cause_Phase_Noise     (Settings/PhaseNoise_*). One
                       phase noise realization is shared by all rays, as the
                       branches of one receiver share the same oscillator.
         ThermalNoise  Generate_AWGN with Settings/SNR<k>_dB for ray k. Each
                       ray gets independent noise.
+        DC_Offset     Cause_DC_Offset       (Settings/DCOffset_dBc): receiver DC
+                      offset, level relative to the transmitted power. Random
+                      phase per ray.
         IQ_Imbalance  Cause_IQ_Imbalance    (PhaseImbalance,
                       AmplitudeImbalance_dB)
      Timing offset, drift, frequency offset and IQ imbalance use the same
@@ -51,7 +57,8 @@ The output .h5 file contains:
            SNR_dB (per ray, NaN when ThermalNoise is off), SNR_Reference,
            MeasuredSNR_dB (per ray), RayPower (per ray), MultipathModel,
            FrequencyOffset, Sample_Offset, Drift_ppm, PhaseImbalance,
-           AmplitudeImbalance_dB, PhaseNoiseRMS_deg, RandomSeed (-1 if none),
+           AmplitudeImbalance_dB, PhaseNoiseRMS_deg, DCOffset_dBc, CW_Frequency,
+           CW_Level_dBc (NaN when off), RandomSeed (-1 if none),
            DefectsSourceFile, DefectsSettingsFile.
     PayloadStart and PreambleLength are copied from the input unchanged;
     timing offset, drift and the multipath filter shift where the packet
@@ -78,6 +85,8 @@ from flexlink_paths import TX, CHANNEL_DEFECTS  # noqa: E402
 
 # The defect modules import each other by plain name.
 sys.path.insert(0, str(CHANNEL_DEFECTS))
+from Add_CW_Interferer import add_cw_interferer  # noqa: E402
+from Cause_DC_Offset import cause_dc_offset  # noqa: E402
 from Cause_Frequency_Offset import cause_frequency_offset  # noqa: E402
 from Cause_IQ_Imbalance import cause_iq_imbalance, iq_gains_from_db  # noqa: E402
 from Cause_Phase_Noise import cause_phase_noise, integrated_phase_error_deg  # noqa: E402
@@ -100,7 +109,7 @@ VALID_SNR_REFERENCES = ("Transmit", "Received")
 
 # Mode name -> processing order
 DEFECT_ORDER = ("Multipath", "TimingOffset", "TimingDrift", "Freq_Offset",
-                "PhaseNoise", "ThermalNoise", "IQ_Imbalance")
+                "CW_Interferer", "PhaseNoise", "ThermalNoise", "DC_Offset", "IQ_Imbalance")
 
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +271,9 @@ def model_defects(x: np.ndarray, fs: float, defects: dict[str, Any],
                 y = cause_timing_drift(y, setting(s, "Drift_ppm"))
             elif name == "Freq_Offset":
                 y = cause_frequency_offset(y, float(setting(s, "FrequencyOffset")), fs)
+            elif name == "CW_Interferer":
+                y = add_cw_interferer(y, float(setting(s, "CW_Frequency")),
+                                      float(setting(s, "CW_Level_dBc")), p_tx, fs, rng=r)
             elif name == "PhaseNoise":
                 if shared_phase is None or shared_phase.size < y.size:
                     _, shared_phase = cause_phase_noise(
@@ -277,6 +289,8 @@ def model_defects(x: np.ndarray, fs: float, defects: dict[str, Any],
                     noise *= np.sqrt(p_tx / signal_power)
                 noise_power = float(np.mean(np.abs(noise) ** 2))
                 y = y + noise
+            elif name == "DC_Offset":
+                y = cause_dc_offset(y, float(setting(s, "DCOffset_dBc")), p_tx, rng=r)
             elif name == "IQ_Imbalance":
                 i_gain, q_gain = iq_gains_from_db(float(setting(s, "AmplitudeImbalance_dB")))
                 y = cause_iq_imbalance(y, float(setting(s, "PhaseImbalance")), i_gain, q_gain)
@@ -314,6 +328,9 @@ def model_defects(x: np.ndarray, fs: float, defects: dict[str, Any],
         "AmplitudeImbalance_dB": (float(s.get("AmplitudeImbalance_dB", 0))
                                   if "IQ_Imbalance" in active else 0.0),
         "PhaseNoiseRMS_deg": pn_rms,
+        "DCOffset_dBc": float(s.get("DCOffset_dBc", 0)) if "DC_Offset" in active else float("nan"),
+        "CW_Frequency": float(s.get("CW_Frequency", 0)) if "CW_Interferer" in active else float("nan"),
+        "CW_Level_dBc": float(s.get("CW_Level_dBc", 0)) if "CW_Interferer" in active else float("nan"),
         "RandomSeed": -1 if seed is None else int(seed),
     }
     return out, info

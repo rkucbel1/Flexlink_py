@@ -121,6 +121,8 @@ defect_names = [
     ("Timing Offset", "-CB_TOFFSET-"),
     ("Timing Drift", "-CB_TDRIFT-"),
     ("Phase Noise", "-CB_PHASENOISE-"),
+    ("DC Offset", "-CB_DCOFFSET-"),
+    ("CW Interferer", "-CB_CW-"),
 ]
 
 checkbox_col = [[sg.Text("Turn On/Off Defects", font=H2)]]
@@ -197,6 +199,9 @@ right_col = sg.Column([
     num_row("Phase Imbalance (rad)", "-PHASE_IMB-", "0.00157"),
     int_row("Sample Offset", "-SAMPLE_OFFSET-", -1),
     int_row("Drift (ppm)", "-DRIFT-", 10),
+    num_row("DC Offset (dBc)", "-DC_OFFSET-", "-30"),
+    num_row("CW Frequency (Hz)", "-CW_FREQ-", "1100000"),
+    num_row("CW Level (dBc)", "-CW_LEVEL-", "-20"),
     [sg.Text("")],
     [sg.Text("Phase Noise Mask (read only, set in Channel_Defects.json)",
              font=("Helvetica", 10, "bold"))],
@@ -251,11 +256,15 @@ tx_tab = [
 # ---------- Tab 3: Set Rx ----------
 RX_LABEL_W = 22
 EQ_MODES = ["LMMSE", "LMMSE_LinearTime", "PCA", "Linear", "None"]
+TIMING_METHODS = ["Full Precision Taps", "1-bit Taps", "FFT method"]
+CFO_METHODS = ["FFT", "Lag cascade"]
+DET_NORMALISERS = ["Original", "Bounded"]
+DET_QUALIFIERS = [0, 32, 64, 128, 256]
 
 
 def rx_combo(label, key, options, default):
     return [sg.Text(label, size=(RX_LABEL_W, 1), justification="right"),
-            sg.Combo(options, default_value=default, key=key, size=16,
+            sg.Combo(options, default_value=default, key=key, size=19,
                      readonly=True, pad=(5, 8),
                      background_color="white", text_color="black")]
 
@@ -268,6 +277,25 @@ rx_tab = [
         [sg.Text("FFT Start Time", size=(RX_LABEL_W, 1), justification="right"),
          sg.Input("-12", key="-RX_FFT_START-", size=10, justification="right"),
          sg.Text("Samples into CP")],
+        [sg.Text("")],
+        [sg.Text("Preamble", font=H2)],
+        rx_combo("DC Blocker", "-RX_DCBLOCK-", [1, 0], 1),
+        [sg.Text("Packet Det. Thresh Lo", size=(RX_LABEL_W, 1), justification="right"),
+         sg.Input("0.2", key="-RX_DET_LO-", size=10, justification="right"),
+         sg.Text("flag clears below")],
+        [sg.Text("Packet Det. Thresh Hi", size=(RX_LABEL_W, 1), justification="right"),
+         sg.Input("0.45", key="-RX_DET_HI-", size=10, justification="right"),
+         sg.Text("flag sets above")],
+        rx_combo("Packet Det. Normaliser", "-RX_DET_NORM-", DET_NORMALISERS, "Original"),
+        rx_combo("Packet Det. Qualifier", "-RX_DET_QUAL-", DET_QUALIFIERS, 0),
+        rx_combo("CFO Method", "-RX_CFO-", CFO_METHODS, "FFT"),
+        [sg.Text("Tone Check (dB)", size=(RX_LABEL_W, 1), justification="right"),
+         sg.Input("13", key="-RX_TONE_CHK-", size=10, justification="right"),
+         sg.Text("0 = off; rejects DC / tone interference")],
+        rx_combo("Timing Method", "-RX_TIMING-", TIMING_METHODS, "Full Precision Taps"),
+        [sg.Text("Timing Peak/Mean Min", size=(RX_LABEL_W, 1), justification="right"),
+         sg.Input("18", key="-RX_TIMING_PK-", size=10, justification="right"),
+         sg.Text("0 = off; 1-bit / FFT only")],
         [sg.Text("")],
         [sg.Text("Equalizer", font=H2)],
         rx_combo("Equalizer Mode", "-RX_EQ_MODE-", EQ_MODES, "LMMSE"),
@@ -383,7 +411,7 @@ RUN_STEPS = [
     # Run_Tx_Chain just made the defects waveform, so the Rx chain must not remake it
     ("Run_Rx_Chain", [RX / "Run_Rx_Chain.py", "--no-model", "--log", RX_LOG], {0, 1, 2, 4}),
 ]
-RX_STATUS = {0: "every CRC passed", 1: "a block failed", 2: "no packet detected",
+RX_STATUS = {0: "every CRC passed", 1: "a block failed", 2: "no packet detected or packet aborted",
              4: "bad packet, control field CRC failed"}
 
 
@@ -584,6 +612,8 @@ LINKS = {
         ("-CB_TOFFSET-", ("Mode", "TimingOffset"), "bool"),
         ("-CB_TDRIFT-", ("Mode", "TimingDrift"), "bool"),
         ("-CB_PHASENOISE-", ("Mode", "PhaseNoise"), "bool"),
+        ("-CB_DCOFFSET-", ("Mode", "DC_Offset"), "bool"),
+        ("-CB_CW-", ("Mode", "CW_Interferer"), "bool"),
         ("-NUM_RAYS-", ("Settings", "NumberOfRays"), "int"),
         ("-SNR1-", ("Settings", "SNR1_dB"), "int"),
         ("-SNR2-", ("Settings", "SNR2_dB"), "int"),
@@ -594,6 +624,9 @@ LINKS = {
         ("-PHASE_IMB-", ("Settings", "PhaseImbalance"), "float"),
         ("-SAMPLE_OFFSET-", ("Settings", "Sample_Offset"), "int"),
         ("-DRIFT-", ("Settings", "Drift_ppm"), "int"),
+        ("-DC_OFFSET-", ("Settings", "DCOffset_dBc"), "number"),
+        ("-CW_FREQ-", ("Settings", "CW_Frequency"), "number"),
+        ("-CW_LEVEL-", ("Settings", "CW_Level_dBc"), "number"),
         ("-DOPPLER-", ("Settings", "DopplerFreq"), "number"),
         (MP_KEYS, ("Settings", "MultipathModel"), "radio"),
         ("-PN_OFFSETS-", ("Settings", "PhaseNoise_Offsets_Hz"), "ro_list"),
@@ -612,6 +645,15 @@ LINKS = {
     ],
     "rx": [
         ("-RX_NUM_ANT-", ("Defined_Rx", "NumberOfAntennas"), "int"),
+        ("-RX_TIMING-", ("Defined_Rx", "TimingMethod"), "text"),
+        ("-RX_TIMING_PK-", ("Defined_Rx", "TimingPeakThresh"), "number"),
+        ("-RX_DCBLOCK-", ("Defined_Rx", "DCBlocker"), "int"),
+        ("-RX_TONE_CHK-", ("Defined_Rx", "ToneCheckThresh"), "number"),
+        ("-RX_CFO-", ("Defined_Rx", "CFOMethod"), "text"),
+        ("-RX_DET_NORM-", ("Defined_Rx", "PacketDetNormaliser"), "text"),
+        ("-RX_DET_QUAL-", ("Defined_Rx", "PacketDetQualifier"), "int"),
+        ("-RX_DET_LO-", ("Defined_Rx", "PacketDetThreshLo"), "float"),
+        ("-RX_DET_HI-", ("Defined_Rx", "PacketDetThreshHi"), "float"),
         ("-RX_FFT_START-", ("Defined_Rx", "FFT_StartTime"), "int"),
         ("-RX_EQ_MODE-", ("Defined_Rx", "EqualizerMode"), "text"),
         ("-RX_EQ_DOPPLER-", ("Defined_Rx", "EqualizerMaxDoppler"), "number"),
@@ -637,7 +679,10 @@ GUI_LABELS.update({k: label for k, (label, _, _) in {**INT_LIMITS, **TX_INT_LIMI
 GUI_LABELS.update({
     "-FREQ_OFFSET-": "Frequency Offset", "-AMP_IMB-": "Amp. Imbalance",
     "-PHASE_IMB-": "Phase Imbalance", "-DOPPLER-": "Doppler",
+    "-DC_OFFSET-": "DC Offset", "-CW_FREQ-": "CW Frequency", "-CW_LEVEL-": "CW Level",
     "-RX_FFT_START-": "FFT Start Time", "-RX_EQ_DOPPLER-": "Max Doppler",
+    "-RX_DET_LO-": "Packet Det. Thresh Lo", "-RX_DET_HI-": "Packet Det. Thresh Hi",
+    "-RX_TIMING_PK-": "Timing Peak/Mean Min", "-RX_TONE_CHK-": "Tone Check (dB)",
 })
 
 
@@ -762,6 +807,18 @@ def save_from_window(values, names):
         for key in TX_RX_SHARED:
             if key in tx_def:
                 rx_def[key] = tx_def[key]
+
+    if "rx" in pending:  # packet detector thresholds: 0 <= Lo < Hi <= 1
+        rx_def = pending["rx"].get("Defined_Rx", {})
+        lo, hi = rx_def.get("PacketDetThreshLo"), rx_def.get("PacketDetThreshHi")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and not 0 <= lo < hi <= 1:
+            errors.append(f"Packet Det. Thresh: need 0 <= Lo < Hi <= 1 (got Lo {lo:g}, Hi {hi:g})")
+        tc = rx_def.get("ToneCheckThresh")
+        if isinstance(tc, (int, float)) and tc < 0:
+            errors.append(f"Tone Check (dB): must be 0 (off) or positive (got {tc:g})")
+        pk = rx_def.get("TimingPeakThresh")
+        if isinstance(pk, (int, float)) and pk < 0:
+            errors.append(f"Timing Peak/Mean Min: must be 0 (off) or positive (got {pk:g})")
 
     if errors:
         raise ValueError("\n".join(errors))

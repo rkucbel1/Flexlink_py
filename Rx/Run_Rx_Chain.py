@@ -38,7 +38,7 @@ Usage
     python Rx/Run_Rx_Chain.py --out-dir my_run --input other_waveform.h5
     python Rx/Run_Rx_Chain.py --dry-run             # print the commands only
 
-Exit status: 0 all blocks pass, 1 a block failed, 2 no packet on any antenna, 3 a step
+Exit status: 0 all blocks pass, 1 a block failed, 2 no packet (or packet aborted) on any antenna, 3 a step
 stopped with an error, 4 bad packet (the control field CRC failed or it held an invalid value).
 """
 from __future__ import annotations
@@ -196,13 +196,14 @@ class Chain:
                                                              "--ray", r])
             info["cfo_khz"] = find(r"total ([+-]?[\d.]+) kHz", out)
             if rc == 2:
-                info["error"] = "no packet"
+                info["error"] = "packet aborted (late trigger)" if "Packet aborted" in out else "no packet"
             elif rc:
                 info["error"] = "Packet_Detector"
             else:
                 found.append(r)
         if not found:
-            res["status"] = 2 if all(v.get("error") == "no packet" for v in res["rays"].values()) else 3
+            res["status"] = 2 if all(v.get("error") in ("no packet", "packet aborted (late trigger)")
+                                     for v in res["rays"].values()) else 3
             return res
 
         # Step 4a: the control field, from every antenna that found the packet
