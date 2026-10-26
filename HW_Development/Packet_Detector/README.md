@@ -11,6 +11,7 @@ throw-away build output.
 | `FW/pd_server.c` | Board firmware: lwIP TCP server (port 5001) implementing `PC/pd_protocol.py` |
 | `FW/build_firmware.py` | Vitis 2025.2: platform + lwIP + app from the echo-server template, with `pd_server.c` |
 | `FW/run_board.tcl` | XSDB: program the FPGA over JTAG and start the firmware |
+| `BITTRUE.md` | Bit-true model: word lengths, spec changes, verification against the simulator |
 | `TestVectors/` | Output of `PC/pd_make_vector.py` |
 
 ## Phase 1: plumbing (this version)
@@ -81,6 +82,11 @@ Two harmless left-overs from the search: lwIP's Marvell auto-negotiation wait is
 speed leaves lwIP waiting for an auto-negotiation flag that never comes).
 
 ## Phase 2: the detector
+
+Step 1 done: **bit-true model** (`BITTRUE.md`, `PC/pd_reference.py`, `PC/pd_bittrue_check.py`).
+The test bench now compares exactly, and test vectors come in two forms: LPF output
+(`input_stage 0`) and decimated input (`input_stage 1`, the board runs the DC blocker and LPF).
+
 
 The AXIS FIFO in `build_hw.tcl` (`pl_core`) is replaced by the detector RTL with the same stream
 ports plus an AXI-Lite port for the registers (spec 5.2) and the event FIFO. The firmware

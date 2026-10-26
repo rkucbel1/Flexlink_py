@@ -15,11 +15,12 @@ compares them with the expected events in the vector's .json.
 
 Steps: PING, RESET, SET_PARAMS, LOAD_SAMPLES (64k-sample messages), READ_SAMPLES back and
 compare (loopback), RUN (all at once or in --chunk pieces, state carries over), optional
-GET_DEBUG, then compare:
-    t_trig and status       exact
-    cfo_inc                 within --cfo-tol LSB (1 LSB = 1.19 Hz; CORDIC not yet bit-true)
-    lag angles              within --angle-tol LSB
-    ToneCheck               within --tone-tol dB (computed in floating point in the reference)
+GET_DEBUG, then compare with the bit-true model's expected events:
+    t_trig, status, cfo_inc, lag angles     exact (--cfo-tol / --angle-tol to relax)
+    ToneCheck dB                            within --tone-tol (0.01 dB): the decision is exact
+                                            integer; the dB value is the firmware's log10
+--input-stage 0 sends the LPF output (<vector>.bin, PC did the front end); 1 sends the
+decimated input (<vector>_dec.bin) and the board runs the DC blocker and LPF itself.
 Exit status 0 = PASS, 1 = FAIL, 2 = communication error.
 Results are saved to <vector>_result.json (and <vector>_debug.png with --plot).
 """
@@ -31,6 +32,7 @@ import socket
 import struct
 import sys
 import time
+from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
@@ -172,19 +174,35 @@ def main(argv=None) -> int:
                     help="stream the samples through the PL and back (DMA path check, no detector)")
     ap.add_argument("--debug", action="store_true", help="capture dbg_metric and flag bits")
     ap.add_argument("--plot", action="store_true", help="plot the debug capture (implies --debug)")
-    ap.add_argument("--cfo-tol", type=int, default=4, help="cfo_inc tolerance, LSB")
-    ap.add_argument("--angle-tol", type=int, default=2, help="CORDIC angle tolerance, LSB")
-    ap.add_argument("--tone-tol", type=float, default=0.5, help="ToneCheck tolerance, dB")
+    ap.add_argument("--input-stage", type=int, choices=(0, 1), default=0,
+                    help="0: send the LPF output (default); 1: send the decimated input, board runs the front end")
+    ap.add_argument("--cfo-tol", type=int, default=0, help="cfo_inc tolerance, LSB (bit-true: 0)")
+    ap.add_argument("--angle-tol", type=int, default=0, help="CORDIC angle tolerance, LSB (bit-true: 0)")
+    ap.add_argument("--tone-tol", type=float, default=0.01, help="ToneCheck dB tolerance")
     a = ap.parse_args(argv)
     a.debug |= a.plot
 
     meta = json.loads(a.vector.with_suffix(".json").read_text())
-    iq = np.fromfile(a.vector.with_suffix(".bin"), dtype=pr.SAMPLE_DTYPE).reshape(-1, 2)
+    if a.input_stage == 1:
+        name = meta.get("files", {}).get("decimated")
+        if not name:
+            print("Error: this vector has no decimated input - rebuild it with pd_make_vector.py")
+            return 2
+        bin_path = a.vector.with_name(name)
+    else:
+        bin_path = a.vector.with_suffix(".bin")
+    iq = np.fromfile(bin_path, dtype=pr.SAMPLE_DTYPE).reshape(-1, 2)
     if iq.shape[0] != meta["samples"]:
-        print(f"Error: {a.vector.with_suffix('.bin').name} has {iq.shape[0]} samples, json says {meta['samples']}")
+        print(f"Error: {bin_path.name} has {iq.shape[0]} samples, json says {meta['samples']}")
         return 2
-    params = pr.Params(**meta["params"])
-    print(f"Vector {a.vector.stem}: {iq.shape[0]} samples, {len(meta['expected_events'])} expected event(s)")
+    known = {f.name for f in fields(pr.Params)}
+    params = pr.Params(**{k: v for k, v in meta["params"].items() if k in known})
+    params.input_stage = a.input_stage
+    if "files" not in meta:
+        print("Note: vector built before the bit-true model - rebuild it with pd_make_vector.py "
+              "for exact comparisons")
+    print(f"Vector {a.vector.stem} ({bin_path.name}, input_stage {a.input_stage}): {iq.shape[0]} samples, "
+          f"{len(meta['expected_events'])} expected event(s)")
     print(f"Params {params.describe()}")
 
     try:

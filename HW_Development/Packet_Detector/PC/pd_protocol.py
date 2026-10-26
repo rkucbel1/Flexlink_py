@@ -115,7 +115,10 @@ class Params:
     arm_holdoff: int = 131072          # samples from t_trig until the trigger re-arms; stands in
     #                                    for the Rx FSM's arm pulse (spec 6), must exceed a packet
     input_stage: int = 0               # 0 = samples are the LPF output (DC blocker + LPF on PC)
-    reserved: int = 0
+    #                                    1 = samples are the decimated 12-bit stream; the board runs
+    #                                        the DC blocker and LPF (pd_reference.front_end)
+    dc_shift: int = 10                 # DC blocker alpha = 1 - 2^-dc_shift, 0 = bypass (spec 5.2);
+    #                                    used with input_stage 1 (was "reserved", same position)
 
     FMT = struct.Struct("<9I")
 

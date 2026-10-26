@@ -112,8 +112,10 @@ class Board:
             return b""
         if cmd == pr.SET_PARAMS:
             p = pr.Params.unpack(payload)
-            if p.input_stage != 0:
-                raise BoardError(pr.ST_BAD_ARG, "input_stage must be 0 (LPF output) in this version")
+            if not 0 <= p.tone_thresh <= ref.TONE_THRESH_MAX_Q8:
+                raise BoardError(pr.ST_BAD_ARG, "tone_thresh must be 0..24 dB (Q8.8 0..6144)")
+            if p.input_stage not in (0, 1):
+                raise BoardError(pr.ST_BAD_ARG, "input_stage must be 0 (LPF output) or 1 (decimated input)")
             self.params = p
             return b""
         if cmd == pr.LOAD_SAMPLES:

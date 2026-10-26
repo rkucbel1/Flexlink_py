@@ -9,16 +9,17 @@ Turns a simulator waveform (.h5) into a test vector for the Zedboard packet dete
      packet --repeat times so re-arming is exercised. The idle noise power is taken from
      the file's SNR attributes (or --idle-noise-power); continuous defects (DC, CW) are not
      extended into the idle samples.
-  3. Front end, as the simulator does it (Rx/Decimate_Payload_Rx.decimate_payload and
-     Flexlink_BasicModules/Preamble/Receive_LP_Filter): decimate to 20 Msps, DC blocker
-     (Defined_Rx/DCBlocker), 2.75 MHz LPF. The board receives this LPF output (spec 5.1).
+  3. Decimate to 20 Msps as the simulator does (Rx/Decimate_Payload_Rx.decimate_payload).
   4. Quantise to 12-bit signed I/Q: the whole record is scaled so its rms sits --backoff dB
-     below full scale (AGC-normalised input with headroom), then rounded and clipped.
-  5. Run the golden reference (pd_reference.py) on the 12-bit samples -> expected events,
-     and the simulator's own detector + lag cascade + tone check on the floating-point
-     LPF output -> a cross-check of the reference.
-  6. Write <out>.bin (int16 I,Q interleaved, little-endian) and <out>.json (metadata,
-     parameters, expected events).
+     below full scale (AGC-normalised radio samples with headroom), rounded and clipped.
+  5. Bit-true front end (pd_reference.front_end): integer DC blocker (Defined_Rx/DCBlocker)
+     and 17-tap LPF -> 12-bit LPF output, which is what the detector port receives (spec 5.1).
+  6. Expected events from the bit-true model (pd_reference.detect), plus a cross-check with
+     the simulator's own floating-point chain on the unquantised samples.
+  7. Write (int16 I,Q interleaved, little-endian):
+       <out>.bin      LPF output       (board input_stage 0: the PC did the front end)
+       <out>_dec.bin  decimated input  (board input_stage 1: the board runs the front end)
+     and <out>.json (metadata, parameters, expected events). Both inputs give the same events.
 
 Usage
     python pd_make_vector.py                                   # default Tx test file
@@ -189,22 +190,24 @@ def main(argv=None) -> int:
         pos += a.idle_post * up
     x_in = np.concatenate(parts)
 
-    # 3. Front end (simulator code)
+    # 3. Decimate (simulator code)
     dec = load_module(root / "Rx" / "Decimate_Payload_Rx.py")
     lpf = load_module(root / "Flexlink_BasicModules" / "Preamble" / "Receive_LP_Filter.py")
     defects = bool(attrs.get("DefectsApplied")) or pn > 0
     x20, dinfo = dec.decimate_payload(x_in, fs, "filter" if defects else "simple")
     dc_on = a.dc_blocker if a.dc_blocker is not None else int(dr.get("DCBlocker", 1))
-    if dc_on:
-        x20 = lpf.dc_blocker(x20)
-    x_lpf = lpf.lp_filter_flexlink(x20)
+    dc_shift = 10 if dc_on else 0
 
-    # 4. Quantise to 12 bits
-    rms = float(np.sqrt(np.mean(np.abs(x_lpf) ** 2)))
+    # 4. Quantise the decimated stream to 12 bits
+    rms = float(np.sqrt(np.mean(np.abs(x20) ** 2)))
     scale = FULL_SCALE * 10 ** (-a.backoff / 20) / rms if rms > 0 else 1.0
-    iq_f = np.stack([x_lpf.real, x_lpf.imag], axis=1) * scale
+    iq_f = np.stack([x20.real, x20.imag], axis=1) * scale
     clipped = int(np.count_nonzero(np.abs(iq_f) > FULL_SCALE))
-    iq = np.clip(np.round(iq_f), -FULL_SCALE - 1, FULL_SCALE).astype(np.int16)
+    iq_dec = np.clip(np.round(iq_f), -FULL_SCALE - 1, FULL_SCALE).astype(np.int16)
+
+    # 5. Bit-true front end -> detector input; float version for the simulator cross-check
+    iq = ref.front_end(iq_dec, dc_shift).astype(np.int16)
+    x_lpf = lpf.lp_filter_flexlink(lpf.dc_blocker(x20) if dc_on else x20)
 
     # 5. Expected results
     pkt20 = int(np.ceil(x.size / up))
@@ -213,7 +216,7 @@ def main(argv=None) -> int:
                qual_len=int(a.qualifier if a.qualifier is not None else dr.get("PacketDetQualifier", 128)),
                n_cfo=a.n_cfo,
                tone_thresh=q8(a.tone_thresh if a.tone_thresh is not None else float(dr.get("ToneCheckThresh", 13))),
-               arm_holdoff=pkt20 + 1024)
+               arm_holdoff=pkt20 + 1024, input_stage=0, dc_shift=dc_shift)
     res = ref.detect(iq, p)
     truth = [{"preamble_a_start": int(s // up) + PREAMBLE_A_OFFSET + LPF_DELAY,
               "packet_end": int((s + x.size) // up) + LPF_DELAY} for s in starts]
@@ -227,12 +230,15 @@ def main(argv=None) -> int:
     # 6. Write
     out.parent.mkdir(parents=True, exist_ok=True)
     iq.tofile(out.with_suffix(".bin"))
+    dec_path = out.with_name(out.name + "_dec.bin")
+    iq_dec.tofile(dec_path)
     meta = {
-        "format": "int16 I,Q interleaved, little-endian, 12-bit values; LPF output at 20 Msps",
+        "format": "int16 I,Q interleaved, little-endian, 12-bit values, 20 Msps",
+        "files": {"lpf_out": out.with_suffix(".bin").name, "decimated": dec_path.name},
         "source": str(in_path.name), "ray": a.ray, "samples": int(iq.shape[0]),
-        "sample_rate": 20e6, "input_stage": "lpf_out",
-        "front_end": {"decimator": "filter" if defects else "simple", "dc_blocker": dc_on,
-                      "lpf": "Receive_LP_Filter.H_LP (17 taps, 2.75 MHz)"},
+        "sample_rate": 20e6,
+        "front_end": {"decimator": "filter" if defects else "simple", "dc_shift": dc_shift,
+                      "model": "pd_reference.front_end (bit-true DC blocker + 17-tap LPF)"},
         "quantisation": {"backoff_db": a.backoff, "scale": scale, "clipped_values": clipped},
         "idle": {"pre": a.idle_pre, "post": a.idle_post, "repeat": a.repeat, "noise_power": pn,
                  "note": "idle samples hold noise only; DC and CW defects are not extended into them"},
@@ -250,8 +256,9 @@ def main(argv=None) -> int:
 
     # Report
     print(f"Input  {in_path.name}: {x.size} samples at {fs / 1e6:g} Msps, ray {a.ray}")
-    print(f"Vector {out.with_suffix('.bin')}: {iq.shape[0]} samples ({iq.shape[0] / 20e6 * 1e3:.2f} ms), "
-          f"{a.repeat} packet(s), rms {-a.backoff:.1f} dBFS, {clipped} clipped values")
+    print(f"Vector {out.with_suffix('.bin')} (+ {dec_path.name}): {iq.shape[0]} samples "
+          f"({iq.shape[0] / 20e6 * 1e3:.2f} ms), {a.repeat} packet(s), input rms {-a.backoff:.1f} dBFS, "
+          f"{clipped} clipped values")
     print(f"Params {p.describe()}")
     true_cfo = attrs.get("FrequencyOffset")
     for i, (e, xx) in enumerate(zip(res.events, res.extra)):

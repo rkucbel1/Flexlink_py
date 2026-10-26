@@ -1,18 +1,21 @@
 {
-  "format": "int16 I,Q interleaved, little-endian, 12-bit values; LPF output at 20 Msps",
+  "format": "int16 I,Q interleaved, little-endian, 12-bit values, 20 Msps",
+  "files": {
+    "lpf_out": "Waveform_Payload_DefectsModeled_Tx.bin",
+    "decimated": "Waveform_Payload_DefectsModeled_Tx_dec.bin"
+  },
   "source": "Waveform_Payload_DefectsModeled_Tx.h5",
   "ray": 1,
   "samples": 100020,
   "sample_rate": 20000000.0,
-  "input_stage": "lpf_out",
   "front_end": {
     "decimator": "filter",
-    "dc_blocker": 1,
-    "lpf": "Receive_LP_Filter.H_LP (17 taps, 2.75 MHz)"
+    "dc_shift": 10,
+    "model": "pd_reference.front_end (bit-true DC blocker + 17-tap LPF)"
   },
   "quantisation": {
     "backoff_db": 12.0,
-    "scale": 574.7204156704605,
+    "scale": 300.5561485427124,
     "clipped_values": 0
   },
   "idle": {
@@ -25,19 +28,13 @@
   "defects": {
     "DefectsApplied": "Multipath,TimingOffset,TimingDrift,Freq_Offset,CW_Interferer,PhaseNoise,ThermalNoise,DC_Offset,IQ_Imbalance",
     "FrequencyOffset": 12000.0,
-    "SNR_dB": [
-      -8.0
-    ],
-    "MeasuredSNR_dB": [
-      -7.290189597167203
-    ],
-    "Sample_Offset": -1,
-    "Drift_ppm": 10,
+    "SNR_dB": -8.0,
+    "MeasuredSNR_dB": -7.290189597167203,
+    "Sample_Offset": -1.0,
+    "Drift_ppm": 10.0,
     "DCOffset_dBc": -30.0,
     "CW_Frequency": 1100000.0,
-    "CW_Level_dBc": -20.0,
-    "MultipathModel": "ETU",
-    "RandomSeed": -1
+    "CW_Level_dBc": -20.0
   },
   "truth": [
     {
@@ -54,26 +51,28 @@
     "tone_thresh": 3328,
     "arm_holdoff": 95044,
     "input_stage": 0,
-    "reserved": 0
+    "dc_shift": 10
   },
   "expected_events": [
     {
       "t_trig": 3410,
-      "cfo_inc": -10190,
+      "cfo_inc": -10084,
       "cfo_valid_cnt": 5458,
-      "tone_db_q8": 6397,
+      "tone_db_q8": 6383,
       "status": 1,
-      "ang16": 341,
-      "ang32": 1251,
-      "ang128": 5356,
-      "ang256": 10190,
-      "f_hat_hz": 12147.42660522461,
-      "tone_db": 24.988349591161366,
+      "ang16": 325,
+      "ang32": 1260,
+      "ang128": 5350,
+      "ang256": 10084,
+      "f_hat_hz": 12021.064758300781,
+      "tone_db": 24.93398741380346,
+      "tone_num": 71965991115,
+      "tone_den": 231062022,
       "lag_estimates_hz": {
-        "16": 6504.058837890625,
-        "32": 11930.465698242188,
-        "128": 12769.699096679688,
-        "256": 12147.42660522461
+        "16": 6198.883056640625,
+        "32": 12016.29638671875,
+        "128": 12755.393981933594,
+        "256": 12021.064758300781
       }
     }
   ],
