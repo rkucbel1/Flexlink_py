@@ -1,0 +1,9 @@
+HW/build/
+FW/workspace/
+TestVectors/*_result.json
+TestVectors/*_debug.png
+__pycache__/
+.Xil/
+*.jou
+*.log
+FW/debug/

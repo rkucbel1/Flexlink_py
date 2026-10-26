@@ -1,0 +1,88 @@
+{
+  "format": "int16 I,Q interleaved, little-endian, 12-bit values; LPF output at 20 Msps",
+  "source": "Waveform_Payload_DefectsModeled_Tx.h5",
+  "ray": 1,
+  "samples": 100020,
+  "sample_rate": 20000000.0,
+  "input_stage": "lpf_out",
+  "front_end": {
+    "decimator": "filter",
+    "dc_blocker": 1,
+    "lpf": "Receive_LP_Filter.H_LP (17 taps, 2.75 MHz)"
+  },
+  "quantisation": {
+    "backoff_db": 12.0,
+    "scale": 574.7204156704605,
+    "clipped_values": 0
+  },
+  "idle": {
+    "pre": 3000,
+    "post": 3000,
+    "repeat": 1,
+    "noise_power": 2.235042619144757,
+    "note": "idle samples hold noise only; DC and CW defects are not extended into them"
+  },
+  "defects": {
+    "DefectsApplied": "Multipath,TimingOffset,TimingDrift,Freq_Offset,CW_Interferer,PhaseNoise,ThermalNoise,DC_Offset,IQ_Imbalance",
+    "FrequencyOffset": 12000.0,
+    "SNR_dB": [
+      -8.0
+    ],
+    "MeasuredSNR_dB": [
+      -7.290189597167203
+    ],
+    "Sample_Offset": -1,
+    "Drift_ppm": 10,
+    "DCOffset_dBc": -30.0,
+    "CW_Frequency": 1100000.0,
+    "CW_Level_dBc": -20.0,
+    "MultipathModel": "ETU",
+    "RandomSeed": -1
+  },
+  "truth": [
+    {
+      "preamble_a_start": 3108,
+      "packet_end": 97027
+    }
+  ],
+  "params": {
+    "eta_hi_sq": 8028,
+    "eta_lo_sq": 2621,
+    "qual_len": 128,
+    "n_cfo": 2048,
+    "blank_len": 288,
+    "tone_thresh": 3328,
+    "arm_holdoff": 95044,
+    "input_stage": 0,
+    "reserved": 0
+  },
+  "expected_events": [
+    {
+      "t_trig": 3410,
+      "cfo_inc": -10190,
+      "cfo_valid_cnt": 5458,
+      "tone_db_q8": 6397,
+      "status": 1,
+      "ang16": 341,
+      "ang32": 1251,
+      "ang128": 5356,
+      "ang256": 10190,
+      "f_hat_hz": 12147.42660522461,
+      "tone_db": 24.988349591161366,
+      "lag_estimates_hz": {
+        "16": 6504.058837890625,
+        "32": 11930.465698242188,
+        "128": 12769.699096679688,
+        "256": 12147.42660522461
+      }
+    }
+  ],
+  "simulator_crosscheck": [
+    {
+      "t_trig": 3410,
+      "f_hat_hz": 12020.642173922104,
+      "tone_db": 24.936756650919595
+    }
+  ],
+  "seed": 1
+}
