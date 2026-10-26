@@ -7,3 +7,5 @@ __pycache__/
 *.jou
 *.log
 FW/debug/
+SIM/work/
+SIM/sim.log

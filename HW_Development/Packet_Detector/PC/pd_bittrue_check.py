@@ -20,7 +20,8 @@ its word lengths:
     python pd_bittrue_check.py --quick         # fewer trials (~1 minute)
     python pd_bittrue_check.py --only sweeps   # or: mc, noise, interferers
 
-Results: printed, and written to ../BITTRUE_results.json.
+Results: printed, and written to ../BITTRUE_results.json (the numbers in ../BITTRUE.md);
+--quick writes ../BITTRUE_results_quick.json instead, so it never replaces the full run.
 """
 from __future__ import annotations
 
@@ -390,8 +391,11 @@ def main(argv=None) -> int:
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--only", choices=("sweeps", "mc", "noise", "interferers"))
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--out", type=Path, default=HERE.parent / "BITTRUE_results.json")
+    ap.add_argument("--out", type=Path,
+                    help="results file (default ../BITTRUE_results.json; with --quick ../BITTRUE_results_quick.json)")
     a = ap.parse_args(argv)
+    if a.out is None:
+        a.out = HERE.parent / ("BITTRUE_results_quick.json" if a.quick else "BITTRUE_results.json")
     rng = np.random.default_rng(a.seed)
     root = find_root(HERE)
     sim = load_sim(root)

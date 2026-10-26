@@ -12,6 +12,9 @@ throw-away build output.
 | `FW/build_firmware.py` | Vitis 2025.2: platform + lwIP + app from the echo-server template, with `pd_server.c` |
 | `FW/run_board.tcl` | XSDB: program the FPGA over JTAG and start the firmware |
 | `BITTRUE.md` | Bit-true model: word lengths, spec changes, verification against the simulator |
+| `RTL/` | Verilog of the detector (step 1: DC blocker, LPF, detection core → `t_trig`, debug stream); see `RTL/README.md` |
+| `SIM/` | Testbench against the bit-true model, `run_sim.sh` (xsim or Verilator); see `SIM/README.md` |
+| `HW/synth_detect.tcl` | Out-of-context synthesis + place & route of `RTL/` at 100 MHz: timing and resources |
 | `TestVectors/` | Output of `PC/pd_make_vector.py` |
 
 ## Phase 1: plumbing (this version)
@@ -86,6 +89,14 @@ speed leaves lwIP waiting for an auto-negotiation flag that never comes).
 Step 1 done: **bit-true model** (`BITTRUE.md`, `PC/pd_reference.py`, `PC/pd_bittrue_check.py`).
 The test bench now compares exactly, and test vectors come in two forms: LPF output
 (`input_stage 0`) and decimated input (`input_stage 1`, the board runs the DC blocker and LPF).
+
+Step 2 done: **detection lane RTL** (`RTL/`), from the decimated samples to `t_trig` and the
+per-sample debug stream. It matches the bit-true model on every sample in Verilator: rep3, the
+Tx defect file and a full-scale stress vector; both input stages; random `tvalid` gaps of up to 7
+clocks; up to 532 triggers per run. Three injected faults were caught. xsim (Vivado 2025.2): stress vector
+PASS. Out-of-context place & route on the Zynq-7020 (`HW/synth_detect.tcl`): **100 MHz met, WNS
++1.299 ns**; 2834 LUT (5%), 3026 FF (3%), 33 DSP48 (15%; 18 of them in the LPF), 1 BRAM tile.
+Next: the CFO lane and the tone check, then the AXI wrapper that replaces `pl_core`.
 
 
 The AXIS FIFO in `build_hw.tcl` (`pl_core`) is replaced by the detector RTL with the same stream
