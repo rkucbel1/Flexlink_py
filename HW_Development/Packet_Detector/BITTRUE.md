@@ -107,11 +107,21 @@ packet. No CFO error reached 5 kHz at any SNR (the §4.5 requirement). At −12 
 | DC, after reset (front end from zero) | – | 50 / 50 triggered | 0 (all rejected) |
 | CW 1.1 MHz −10 … +30 dB | 50 / 50 triggered | 50 / 50 triggered | 0 (all rejected) |
 
-**Open point:** the measured false-trigger rate is about 1/s at η_hi 0.35, where spec §3.3
-reports < 0.2/s. Float and bit-true agree exactly, so this comes from different test conditions
-than the earlier study, not from the model. It stays within the 1/s accepted in §7, and every one
-of these triggers fails the tone check. A false trigger therefore costs the receiver only the
-2048-sample CFO window (0.1 ms). Worth re-measuring once noise comes from the full channel model.
+**Resolved on the board (27 Oct 2026).** The false-trigger rate was the open point: about 1/s
+at η_hi 0.35 here, against "< 0.2/s" in spec §3.3. `PC/pd_noise_rate.py` measured it on the
+Zedboard, 20 s of the same decimated noise per threshold, streamed continuously:
+
+| η_hi | Board | 95% interval | Passing the tone check |
+| --- | --- | --- | --- |
+| 0.33 | 3.5/s | 2.7 – 4.4 | 0 |
+| 0.35 | 0.5/s | 0.24 – 0.92 | 0 |
+| 0.40 | 0.05/s | 0.001 – 0.28 | 0 |
+
+The spec's figure came from 0 triggers in 5 s, which only bounds the rate below about 0.74/s.
+The board confirms this study's rates (0.33: 4/s here). Every false trigger fails the tone
+check and costs one 2048-sample window (0.1 ms, 0.005% of the time at 0.5/s), so η_hi stays
+0.35: 0.40 would cut Pd at −13 dB from 0.975 to 0.675. Proposed spec change: "about 0.5/s at
+η_hi 0.35, all rejected by the tone check".
 
 ## Rerunning
 

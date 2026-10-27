@@ -138,6 +138,7 @@ python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json     
 python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json --input-stage 1 --debug --plot
 python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 --chunk 50000
 python pd_board_regression.py          # 21 cases vs the bit-true model, a few minutes
+python pd_noise_rate.py --seconds 20   # false-trigger rate on noise (spec 3.3)
 ```
 
 **Board regression** (`PC/pd_board_regression.py`): the RTL simulation's coverage on the board.
