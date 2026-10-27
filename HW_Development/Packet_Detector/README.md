@@ -137,7 +137,17 @@ python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json --pl
 python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json                   # detector
 python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json --input-stage 1 --debug --plot
 python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 --chunk 50000
+python pd_board_regression.py          # 21 cases vs the bit-true model, a few minutes
 ```
+
+**Board regression** (`PC/pd_board_regression.py`): the RTL simulation's coverage on the board.
+Each case runs on the board and, with the same commands, through `pd_board_emulator`'s logic
+in-process; every RUN reply and every debug record must match. Cases: rep3 and the defects
+file (both input stages), the 40-packet CFO sweep (N_CFO 2048 and 4096), the full-scale stress
+vector (holdoff 1, N_CFO 128 / 4096, tone check off / 24 dB, DC blocker off / shift 4), uneven
+RUNs with windows split across them, a window cut by the end of the data, and 1 s of noise
+(false-trigger rate). Report in `TestVectors/regression_result.json`. Checked against the
+co-simulation (all pass) and against the emulator's injected faults (both caught).
 
 
 The AXIS FIFO in `build_hw.tcl` (`pl_core`) is replaced by the detector RTL with the same stream

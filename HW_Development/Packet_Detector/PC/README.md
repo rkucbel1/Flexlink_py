@@ -20,6 +20,7 @@ pd_make_vector.py  ──►  TestVectors/<name>.bin,        ──►  pd_hw_te
 | `pd_make_vector.py` | `.h5` → idle padding → decimate (simulator code) → 12-bit I/Q → bit-true front end → expected events, plus a cross-check against the simulator's float chain. Writes `<name>.bin` (LPF output) and `<name>_dec.bin` (decimated input). |
 | `pd_board_emulator.py` | TCP server that behaves like the board, running `pd_reference.py`. Use it until the board exists; it also defines what the firmware must do. |
 | `pd_hw_test.py` | Client: PING, RESET, SET_PARAMS, LOAD, read-back check, RUN (optionally in chunks), GET_DEBUG, compare, plot. Exit 0 = PASS, 1 = FAIL, 2 = no connection. |
+| `pd_board_regression.py` | Board regression: 21 cases (real packets, CFO sweep, stress vector with parameter variants, split RUNs, noise), each compared reply by reply and record by record with the emulator's logic run in-process. `--list`, `--only`, `--quick`. Exit 0 = all PASS. |
 
 ## Quick start (no board needed)
 
