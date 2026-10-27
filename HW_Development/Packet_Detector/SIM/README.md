@@ -44,6 +44,25 @@ It covers saturation of the DC blocker and LPF, the largest products and running
 
 The **cfo** vector is 40 real packets from `Tx/Waveform_Payload_Tx.h5`, each with its own CFO (±600 kHz) and SNR. Its 4000-sample holdoff re-arms inside Preamble A, so the second window of each packet runs into Preamble B. That gives a wide spread of angles. Building it needs the simulator project and h5py, as `pd_bittrue_check.py` does.
 
-Windows that end within the last 32 samples of a vector aren't expected: the RTL lane runs 32 samples behind its input.
+At the end the testbench waits until `busy` is low, then checks the window still open (the model's truncated event, if any). Every window that ends inside the vector gives a CFO result and an event.
 
 Typical xsim run time is about 1 minute for rep3 (300k samples). Use `MAX=20000` for a quick check.
+
+## Firmware + RTL co-simulation (`cosim/`)
+
+`cosim/build.sh` compiles the board firmware `FW/pd_server.c` against small stand-ins for lwIP
+(a real TCP socket) and links it with the Verilated `RTL/pd_axi.v` and an AXI DMA model
+(`pl_model.cpp`): register accesses become AXI-Lite transactions, DMA transfers stream through
+the RTL clock by clock, with random gaps on MM2S and random `tready` on S2MM. The PC scripts then
+talk to it exactly as to the board. Needs Verilator 5.
+
+```bash
+cd SIM/cosim && ./build.sh
+./obj/fw_cosim 5101 &                                   # the "board" on port 5101
+python ../../PC/pd_hw_test.py ../../TestVectors/rep3.json --host 127.0.0.1 --port 5101 --input-stage 1 --debug
+python ../../PC/pd_board_emulator.py --port 5102 &      # reference behaviour
+python compare_with_emulator.py                         # six sequences, every reply must match
+```
+
+Environment for `fw_cosim`: `MM2S_P` / `S2MM_P` (stream duty, default 0.8 / 0.7), `BUSY_TICKS`
+(clocks per DMA poll, default 64; 20000 lets the event FIFO fill up), `SEED`.

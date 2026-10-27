@@ -14,10 +14,11 @@ testbench, with the bit-true model's expected outputs for every sample:
   work/<name>_s<stage>/exp_trig.txt  t_trig of each trigger (decimal)
   work/<name>_s<stage>/exp_cfo.txt   per completed CFO window (hex): t, A16 re im, A32 re im,
                                      A128 re im, A256 re im (37-bit), ang16 ang32 ang128 ang256,
-                                     cfo_inc (32-bit). Windows ending in the last LANE_DELAY
-                                     samples are left out (the RTL lane needs those samples).
+                                     cfo_inc (32-bit). Every window that ends inside the vector.
   work/<name>_s<stage>/exp_tone.txt  per event, same windows (hex): t, cfo_inc, the four angles,
                                      tone num, tone den (40-bit), fail (0/1)
+  work/<name>_s<stage>/exp_open.txt  "n t": windows still open at the end (truncated, 0 or 1)
+                                     and the t_trig of the first
 
     python make_tb_vectors.py ../TestVectors/rep3.json --input-stage 1
     python make_tb_vectors.py ../TestVectors/rep3.json --input-stage 0 --max-samples 50000
@@ -216,7 +217,7 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     cfo_lines, tone_lines = [], []
     lin = ref.tone_thresh_lin(p.tone_thresh) if p.tone_thresh > 0 else 0
     for e, x in zip(res.events, res.extra):
-        if not e.status & pr.EV_CFO_VALID or e.t_trig + p.n_cfo + ref.LANE_DELAY > n:
+        if not e.status & pr.EV_CFO_VALID:
             continue
         acc = ref.cfo_accumulators(xi, xq, e.t_trig, p.n_cfo)
         m37 = (1 << 37) - 1
@@ -244,6 +245,8 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     (out / "exp_trig.txt").write_text("".join(f"{t}\n" for t in trig))
     (out / "exp_cfo.txt").write_text("".join(cfo_lines))
     (out / "exp_tone.txt").write_text("".join(tone_lines))
+    trunc = [e.t_trig for e in res.events if e.status & pr.EV_TRUNCATED]
+    (out / "exp_open.txt").write_text(f"{len(trunc)} {trunc[0] if trunc else 0}\n")
     n_fail = sum(int(l.split()[-1]) for l in tone_lines)
     shown = trig if len(trig) <= 12 else trig[:12] + ["..."]
     print(f"{out}: {iq.shape[0]} samples, input_stage {stage}, {len(trig)} trigger(s) at {shown}, "

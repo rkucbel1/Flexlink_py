@@ -9,17 +9,18 @@
 //       f_l = ang_l * 256 / l;  k = (f - f_l + step/2) >>> log2(step);  f = f_l + k * step
 //     (step = 2^24 / l = 2^19, 2^17, 2^16);  cfo_inc = -f
 //
-// The lane works on the LPF sample stream delayed by LANE_DELAY samples, so the trigger for
-// sample t (which the detection core decides about 12 clocks after sample t) is known before
-// sample t reaches the lane. Consequence: a window is only complete once LANE_DELAY further
-// samples have arrived after it. One window at a time; the detection core guarantees
+// The lane takes each LPF sample from a small FIFO only when the detection core releases it
+// (`rel` = the core's dbg_valid, one per sample, which comes after the core's trigger decision
+// for that sample). So the trigger for sample t is known before sample t reaches the lane, and
+// the lane keeps up with the core even when no new samples arrive: a window is complete as soon
+// as the core has processed its last sample. One window at a time; the detection core guarantees
 // t_next >= t + N (holdoff >= n_cfo). Results: cfo_valid pulse with cfo_t (= t_trig), cfo_inc
 // (sign-extended to 32 bits), the four angles and, for verification, the four accumulators.
 `timescale 1ns / 1ps
 `default_nettype none
 
 module pd_cfo_lane #(
-    parameter integer LANE_DELAY = 32
+    parameter integer FIFO_BITS = 6          // 64 samples: more than the core's latency
 ) (
     input  wire               clk,
     input  wire               rst_n,
@@ -28,6 +29,7 @@ module pd_cfo_lane #(
     input  wire               in_valid,
     input  wire signed [11:0] in_i,
     input  wire signed [11:0] in_q,
+    input  wire               rel,          // release the oldest sample (core's dbg_valid)
     // trigger from the detection core
     input  wire               trig,
     input  wire [31:0]        t_trig,
@@ -40,35 +42,47 @@ module pd_cfo_lane #(
     output reg  signed [15:0] ang128,
     output reg  signed [15:0] ang256,
     output reg  signed [36:0] a16_re, a16_im, a32_re, a32_im,
-    output reg  signed [36:0] a128_re, a128_im, a256_re, a256_im
+    output reg  signed [36:0] a128_re, a128_im, a256_re, a256_im,
+    output wire               busy          // a sample, window result or CFO result in flight
 );
     integer k;
 
-    // ------------------------------------------------------------------ input delay
-    // Sample m leaves the delay when sample m + LANE_DELAY arrives. No reset (SRLs): a sample is
-    // only used once LANE_DELAY real samples have passed (fill counter).
-    reg signed [11:0] dl_i [0:LANE_DELAY-1];
-    reg signed [11:0] dl_q [0:LANE_DELAY-1];
-    reg [5:0]         fill;
-    reg               c_valid;
-    reg signed [11:0] c_i, c_q;
+    // ------------------------------------------------------------------ release FIFO
+    // Written with every LPF sample, read with every release. The core releases sample m about
+    // 30 clocks after it arrived, so at most that many samples wait here.
+    localparam integer FD = 1 << FIFO_BITS;
+    reg  [23:0]          fifo [0:FD-1];
+    reg  [FIFO_BITS-1:0] f_wr, f_rd;
+    reg  [FIFO_BITS:0]   f_n;
+    reg                  c_valid;
+    reg  signed [11:0]   c_i, c_q;
+    wire [23:0]          f_head = fifo[f_rd];
     always @(posedge clk) begin
-        if (in_valid) begin
-            dl_i[0] <= in_i; dl_q[0] <= in_q;
-            for (k = 1; k < LANE_DELAY; k = k + 1) begin dl_i[k] <= dl_i[k-1]; dl_q[k] <= dl_q[k-1]; end
-        end
+        if (in_valid) fifo[f_wr] <= {in_q, in_i};
     end
     always @(posedge clk) begin
         if (!rst_n) begin
-            fill <= 6'd0; c_valid <= 1'b0;
+            f_wr <= {FIFO_BITS{1'b0}}; f_rd <= {FIFO_BITS{1'b0}}; f_n <= {(FIFO_BITS+1){1'b0}};
+            c_valid <= 1'b0;
         end else begin
-            c_valid <= in_valid && (fill == LANE_DELAY);
-            if (in_valid) begin
-                c_i <= dl_i[LANE_DELAY-1]; c_q <= dl_q[LANE_DELAY-1];
-                if (fill != LANE_DELAY) fill <= fill + 6'd1;
+            c_valid <= rel;
+            if (in_valid) f_wr <= f_wr + 1'b1;
+            if (rel) begin
+                f_rd <= f_rd + 1'b1;
+                c_i  <= f_head[11:0];
+                c_q  <= f_head[23:12];
             end
+            f_n <= f_n + {{FIFO_BITS{1'b0}}, in_valid} - {{FIFO_BITS{1'b0}}, rel};
         end
     end
+`ifdef PD_SIM_CHECKS
+    always @(posedge clk) begin
+        if (rst_n && rel && f_n == 0 && !in_valid)
+            $display("ERROR pd_cfo_lane: release with an empty FIFO");
+        if (rst_n && in_valid && !rel && f_n == FD)
+            $display("ERROR pd_cfo_lane: release FIFO overflow");
+    end
+`endif
 
     // ------------------------------------------------------------------ lag taps on the lane stream
     // tap[j] = x(m - 1 - j); taps used: l - 1 for l = 16, 32, 128, 256. No reset: a tap is only
@@ -230,6 +244,8 @@ module pd_cfo_lane #(
             end
         end
     end
+    assign busy = (f_n != 0) || c_valid || p_v || snap_v || (seq != 3'd0) || cfo_valid;
+
 `ifdef PD_SIM_CHECKS
     always @(posedge clk)
         if (rst_n && snap_v && seq != 3'd0)

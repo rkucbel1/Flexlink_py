@@ -19,6 +19,7 @@ GET_DEBUG, then compare with the bit-true model's expected events:
     t_trig, status, cfo_inc, lag angles     exact (--cfo-tol / --angle-tol to relax)
     ToneCheck dB                            within --tone-tol (0.01 dB): the decision is exact
                                             integer; the dB value is the firmware's log10
+    debug records (--debug)                 every dbg_metric and flag word, exact
 --input-stage 0 sends the LPF output (<vector>.bin, PC did the front end); 1 sends the
 decimated input (<vector>_dec.bin) and the board runs the DC blocker and LPF itself.
 Exit status 0 = PASS, 1 = FAIL, 2 = communication error.
@@ -128,6 +129,25 @@ def compare(got: list[pr.EventRecord], exp: list[dict], a) -> tuple[bool, list[s
         ok = False
         lines.append(f"  MISSING t_trig {t}, cfo_inc {e['cfo_inc']}")
     return ok, lines
+
+
+def check_debug(dbg: np.ndarray, iq: np.ndarray, params: pr.Params, lines: list[str]) -> bool:
+    """Compare the board's debug records with the bit-true model, sample by sample."""
+    import pd_reference as ref
+    res = ref.detect(iq, params, debug=True)
+    n = min(dbg.size, res.metric.size)
+    bad = np.flatnonzero((dbg["metric"][:n] != res.metric[:n]) | (dbg["bits"][:n] != res.bits[:n]))
+    if dbg.size != res.metric.size:
+        lines.append(f"  DEBUG   {dbg.size} records, expected {res.metric.size}")
+        return False
+    if bad.size:
+        i = int(bad[0])
+        lines.append(f"  DEBUG   {bad.size} of {n} records differ, first at sample {i}: metric "
+                     f"{dbg['metric'][i]} bits 0x{dbg['bits'][i]:x}, expected {res.metric[i]} "
+                     f"0x{res.bits[i]:x}")
+        return False
+    lines.append(f"  ok      debug: all {n} records (metric and flags) match the bit-true model")
+    return True
 
 
 def plot_debug(dbg: np.ndarray, meta: dict, events: list[pr.EventRecord], path: Path) -> None:
@@ -282,6 +302,8 @@ def main(argv=None) -> int:
     got = sorted(events.values(), key=lambda e: e.t_trig)
     ok, lines = compare(got, meta["expected_events"], a)
     ok &= loop_ok
+    if a.debug and dbg_parts:
+        ok &= check_debug(np.concatenate(dbg_parts), iq, params, lines)
     print("Events (board vs reference):")
     print("\n".join(lines) if lines else "  none")
     truth = meta.get("truth", [])

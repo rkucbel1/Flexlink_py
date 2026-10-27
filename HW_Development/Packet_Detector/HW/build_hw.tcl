@@ -11,14 +11,16 @@
 #
 # Output: build/pd_zed.xsa (with bitstream), build/pd_zed/ (Vivado project, can be deleted)
 #
-# Phase 1 design (plumbing / loopback):
+# Phase 2 design (detector):
 #
 #   PS7 (DDR, Ethernet, UART) --M_AXI_GP0--> smartconnect --> AXI DMA registers
+#                                                         --> pd_0 registers (0x43C00000, 4 KB)
 #   DDR <--S_AXI_HP0-- smartconnect <-- AXI DMA M_AXI_MM2S / M_AXI_S2MM
-#   AXI DMA MM2S --AXIS 32b--> pl_core --AXIS 32b--> AXI DMA S2MM
+#   AXI DMA MM2S --AXIS 32b (samples)--> pd_0 --AXIS 32b (debug records)--> AXI DMA S2MM
 #
-#   pl_core = AXI4-Stream data FIFO: samples come back unchanged (RUN with PL loopback).
-#   Phase 2 replaces it with the detector (same stream ports plus an AXI-Lite register port).
+#   pd_0 = RTL/pd_axi.v (module reference): the packet detector with its register interface,
+#   event FIFO and debug stream; with CTRL.LOOPBACK it passes the samples straight through
+#   (RUN with PL loopback, as phase 1). The firmware expects the registers at 0x43C00000.
 #
 # One stream word = one complex sample: bits [15:0] = I, [31:16] = Q (12-bit values,
 # sign-extended), which is the byte order the PC sends.
@@ -127,26 +129,29 @@ set_property -dict [list \
 ] $dma
 
 # --------------------------------------------------------------------------
-# PL core: phase 1 = AXIS data FIFO (loopback)
+# PL core: the packet detector (RTL, added to the project and used as a module reference)
 # --------------------------------------------------------------------------
-set core [create_bd_cell -type ip -vlnv xilinx.com:ip:axis_data_fifo pl_core]
-set_property -dict [list \
-    CONFIG.FIFO_DEPTH {1024} \
-    CONFIG.TDATA_NUM_BYTES {4} \
-    CONFIG.HAS_TKEEP {1} \
-    CONFIG.HAS_TLAST {1} \
-] $core
-connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] [get_bd_intf_pins pl_core/S_AXIS]
-connect_bd_intf_net [get_bd_intf_pins pl_core/M_AXIS]        [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
+set rtl_dir [file normalize [file join $script_dir .. RTL]]
+set rtl_files {}
+foreach f {pd_dc_blocker.v pd_lpf.v pd_div16.v pd_detect_core.v pd_cordic.v pd_cfo_cascade.v
+           pd_cfo_lane.v pd_tone_rom.v pd_sdp_ram.v pd_tone_check.v pd_detect_top.v pd_axi.v} {
+    lappend rtl_files [file join $rtl_dir $f]
+}
+add_files -norecurse $rtl_files
+update_compile_order -fileset sources_1
+set core [create_bd_cell -type module -reference pd_axi pd_0]
+connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] [get_bd_intf_pins pd_0/S_AXIS]
+connect_bd_intf_net [get_bd_intf_pins pd_0/M_AXIS]           [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
 
 # --------------------------------------------------------------------------
 # Interconnect (explicit smartconnects, no automation, so the result is always the same)
 # --------------------------------------------------------------------------
-# PS GP0 master -> DMA control registers
+# PS GP0 master -> DMA control registers and detector registers
 set sc_ctrl [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect sc_ctrl]
-set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {1}] $sc_ctrl
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] $sc_ctrl
 connect_bd_intf_net [get_bd_intf_pins ps7/M_AXI_GP0]  [get_bd_intf_pins sc_ctrl/S00_AXI]
 connect_bd_intf_net [get_bd_intf_pins sc_ctrl/M00_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
+connect_bd_intf_net [get_bd_intf_pins sc_ctrl/M01_AXI] [get_bd_intf_pins pd_0/S_AXI]
 
 # DMA masters -> PS HP0 (DDR)
 set sc_mem [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect sc_mem]
@@ -160,15 +165,20 @@ connect_bd_net $clk \
     [get_bd_pins ps7/M_AXI_GP0_ACLK] [get_bd_pins ps7/S_AXI_HP0_ACLK] \
     [get_bd_pins axi_dma_0/s_axi_lite_aclk] [get_bd_pins axi_dma_0/m_axi_mm2s_aclk] \
     [get_bd_pins axi_dma_0/m_axi_s2mm_aclk] \
-    [get_bd_pins pl_core/s_axis_aclk] \
+    [get_bd_pins pd_0/aclk] \
     [get_bd_pins sc_ctrl/aclk] [get_bd_pins sc_mem/aclk]
-connect_bd_net $aresetn  [get_bd_pins axi_dma_0/axi_resetn] [get_bd_pins pl_core/s_axis_aresetn]
+connect_bd_net $aresetn  [get_bd_pins axi_dma_0/axi_resetn] [get_bd_pins pd_0/aresetn]
 connect_bd_net $icresetn [get_bd_pins sc_ctrl/aresetn] [get_bd_pins sc_mem/aresetn]
 
 # --------------------------------------------------------------------------
 # Addresses, validate, wrapper
 # --------------------------------------------------------------------------
+# detector registers at the address the firmware expects; everything else automatic
+set pd_seg [get_bd_addr_segs pd_0/S_AXI/*]
+assign_bd_address -offset 0x43C00000 -range 4K -target_address_space [get_bd_addr_spaces ps7/Data] $pd_seg
 assign_bd_address
+set got [get_property OFFSET [get_bd_addr_segs -of_objects [get_bd_addr_spaces ps7/Data] -filter {NAME =~ *pd_0*}]]
+if {$got != 0x43C00000} { error "pd_0 registers at $got, the firmware expects 0x43C00000" }
 regenerate_bd_layout
 validate_bd_design
 save_bd_design

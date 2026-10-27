@@ -39,6 +39,9 @@ module tb_pd_detect;
     wire [31:0] ev_t, ev_inc;
     wire [15:0] ev_a16, ev_a32, ev_a128, ev_a256;
     wire [39:0] ev_num, ev_den;
+    wire        busy;
+    wire [3:0]  open_n;
+    wire [31:0] open_t;
 
     pd_detect_top dut (
         .clk(clk), .rst_n(rst_n),
@@ -55,10 +58,11 @@ module tb_pd_detect;
         .a128_re(a128_re), .a128_im(a128_im), .a256_re(a256_re), .a256_im(a256_im),
         .ev_valid(ev_valid), .ev_t(ev_t), .ev_cfo_inc(ev_inc),
         .ev_ang16(ev_a16), .ev_ang32(ev_a32), .ev_ang128(ev_a128), .ev_ang256(ev_a256),
-        .ev_tone_num(ev_num), .ev_tone_den(ev_den), .ev_tone_fail(ev_fail));
+        .ev_tone_num(ev_num), .ev_tone_den(ev_den), .ev_tone_fail(ev_fail),
+        .busy(busy), .open_n(open_n), .open_t(open_t));
 
     // ------------------------------------------------------------------ files and settings
-    integer f_cfg, f_in, f_lpf, f_dbg, f_trig, f_cfo, f_tone, r, rc;
+    integer f_cfg, f_in, f_lpf, f_dbg, f_trig, f_cfo, f_tone, f_open, r, rc, x_open, x_open_t, guard;
     integer n_samples, n_trig, n_cfo_ev, gap, seed, maxerr, fixgap;
     integer cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q, cfg_blank, cfg_hold, cfg_ncfo, cfg_lin;
 
@@ -186,7 +190,9 @@ module tb_pd_detect;
         f_trig = $fopen("exp_trig.txt", "r");
         f_cfo  = $fopen("exp_cfo.txt", "r");
         f_tone = $fopen("exp_tone.txt", "r");
-        if (f_cfg == 0 || f_in == 0 || f_lpf == 0 || f_dbg == 0 || f_trig == 0 || f_cfo == 0 || f_tone == 0) begin
+        f_open = $fopen("exp_open.txt", "r");
+        if (f_cfg == 0 || f_in == 0 || f_lpf == 0 || f_dbg == 0 || f_trig == 0 || f_cfo == 0 || f_tone == 0 ||
+            f_open == 0) begin
             $display("FAIL: cannot open the vector files (cfg.txt ...) in the current directory");
             $finish;
         end
@@ -225,8 +231,19 @@ module tb_pd_detect;
         end
         @(negedge clk);
         s_valid = 1'b0;
-        // the last checks finish up to two jobs (2 x ceil(13 / NU) x N clocks) after the input ends
-        repeat (30 * cfg_ncfo + 2000) @(posedge clk);
+        // wait until nothing is in flight (the last checks take up to 2 x ceil(13 / NU) x N clocks)
+        guard = 0;
+        @(negedge clk);
+        while (busy && guard < 30 * cfg_ncfo + 2000) begin @(negedge clk); guard = guard + 1; end
+        if (busy) begin errors = errors + 1; $display("ERROR: still busy %0d clocks after the input ended", guard); end
+        repeat (20) @(negedge clk);
+        if (busy) begin errors = errors + 1; $display("ERROR: busy again after it went low"); end
+        r = $fscanf(f_open, "%d %d\n", x_open, x_open_t);
+        if (open_n !== x_open[3:0] || (x_open != 0 && open_t !== x_open_t)) begin
+            errors = errors + 1;
+            $display("ERROR: %0d open window(s) at the end (first t %0d), expected %0d (t %0d)", open_n, open_t, x_open, x_open_t);
+        end else if (x_open != 0)
+            $display("  window open at the end (truncated): t_trig %0d (ok)", open_t);
 
         if (lpf_seen != n_samples) begin
             errors = errors + 1; $display("ERROR: %0d LPF samples out, expected %0d", lpf_seen, n_samples);

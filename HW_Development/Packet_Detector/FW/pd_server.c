@@ -12,9 +12,16 @@
  *     0x18000000  debug buffer,  128 MB = 32M x 4-byte records (S2MM destination)
  * The program itself (code, heap, stack, rx/tx buffers) stays in the first 256 MB.
  *
- * Phase 1 (this version): the PL holds an AXIS FIFO, so RUN only supports the PL-loopback
- * flag: samples go DDR -> AXI DMA MM2S -> PL -> AXI DMA S2MM -> debug buffer, and the PC
- * reads them back with GET_DEBUG. RUN without the flag answers "no detector".
+ * Phase 2 (this version): the PL holds the detector (RTL/pd_axi.v, registers at PD_BASE).
+ *   RUN            samples DDR -> AXI DMA MM2S -> detector; events are read from the detector's
+ *                  event FIFO while the DMA runs; with the debug flag the debug records go
+ *                  detector -> AXI DMA S2MM -> debug buffer. After the DMA the firmware waits
+ *                  until the detector is idle, then reports a window that is still open (its
+ *                  samples have not all arrived) as a truncated event, once, in the RUN in which
+ *                  it was triggered. The detector state carries over to the next RUN.
+ *   RUN + loopback samples DDR -> MM2S -> PL (detector bypassed) -> S2MM -> debug buffer.
+ * The firmware converts the detector's integers to the event record: cfo_valid_cnt = t + N_CFO,
+ * ToneCheck dB = 10 log10(num / den) (Q8.8), TONE_THRESH (Q8.8 dB) -> linear threshold.
  *
  * Note: xil_printf (used for the UART log) knows only %d %u %x %s %c; no %l formats.
  *       Error texts for the PC are formatted with newlib's snprintf, which has them.
@@ -32,6 +39,7 @@
 #include "xil_types.h"
 #include "xstatus.h"
 #include "xaxidma.h"
+#include "xil_io.h"
 
 #include "lwip/err.h"
 #include "lwip/tcp.h"
@@ -41,7 +49,7 @@
 /* ---------------------------------------------------------------------------------- */
 #define PD_PORT                 5001
 #define PD_PROTOCOL_VERSION     1u
-#define PD_BUILD                2u              /* bump when the firmware changes */
+#define PD_BUILD                3u              /* bump when the firmware changes */
 
 #define SAMPLE_BUF_ADDR         0x10000000u
 #define DEBUG_BUF_ADDR          0x18000000u
@@ -56,6 +64,30 @@
 #elif defined(XPAR_AXI_DMA_0_BASEADDR)
 #define PD_DMA_BASE XPAR_AXI_DMA_0_BASEADDR
 #endif
+
+/* Detector registers (RTL/pd_axi.v). Address fixed by HW/build_hw.tcl. */
+#if defined(XPAR_PD_0_BASEADDR)
+#define PD_BASE XPAR_PD_0_BASEADDR
+#else
+#define PD_BASE 0x43C00000u
+#endif
+#define PD_ID_VALUE             0x50440100u
+#define R_ID                    0x00u
+#define R_CTRL                  0x04u
+#define R_STATUS                0x08u
+#define R_SAMPLES               0x0Cu
+#define R_OPEN_T                0x10u
+#define R_EV_LEVEL              0x14u
+#define R_EV_DATA               0x18u
+#define R_DBG_SENT              0x1Cu
+#define R_PARAM0                0x20u           /* ETA_HI_SQ ... TONE_LIN, 4 bytes apart */
+#define CTRL_RESET              0x1u
+#define CTRL_DEBUG              0x2u
+#define CTRL_LOOPBACK           0x4u
+#define STATUS_BUSY             0x1u
+#define STATUS_OPEN             0x2u
+#define STATUS_EV_OVF           0x100u
+#define IDLE_TIMEOUT_POLLS      10000000u
 
 /* ---------------------------------------------------------------------------------- */
 /* Protocol constants (keep in step with PC/pd_protocol.py)                            */
@@ -74,12 +106,19 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define RUN_FLAG_PL_LOOPBACK    0x2u
 #define BOARD_FLAG_EMULATOR     0x1u
 #define BOARD_FLAG_NO_DETECTOR  0x2u
+#define EV_CFO_VALID            0x1u
+#define EV_TONE_FAIL            0x2u
+#define EV_TRUNCATED            0x4u
+#define EV_SIZE                 24u
+#define MAX_EVENTS              ((MAX_PAYLOAD - 8u) / EV_SIZE)
+#define TONE_THRESH_MAX_Q8      (24u * 256u)
 
 /* ---------------------------------------------------------------------------------- */
 /* State                                                                               */
 /* ---------------------------------------------------------------------------------- */
 static XAxiDma dma;
 static int dma_ok;
+static int det_ok;                  /* detector found (ID register) */
 
 static struct tcp_pcb *client;
 
@@ -96,6 +135,9 @@ static u32       tx_off;
 static u8  params[PARAMS_SIZE];
 static u32 samples_stored;          /* samples in the sample buffer */
 static u32 debug_count;             /* records in the debug buffer from the last RUN */
+static u8  ev_out[8u + MAX_EVENTS * EV_SIZE];   /* RUN reply: n_events, count, records */
+static u32 ev_n;                    /* events in ev_out */
+static int ev_lost;                 /* more than MAX_EVENTS in one RUN */
 
 /* ---------------------------------------------------------------------------------- */
 /* Helpers                                                                             */
@@ -103,6 +145,89 @@ static u32 debug_count;             /* records in the debug buffer from the last
 static u32 rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return v; }       /* ARM is LE */
 static void wr32(u8 *p, u32 v) { memcpy(p, &v, 4); }
 static void wr16(u8 *p, u16 v) { memcpy(p, &v, 2); }
+
+static u32  pd_rd(u32 off)        { return Xil_In32(PD_BASE + off); }
+static void pd_wr(u32 off, u32 v) { Xil_Out32(PD_BASE + off, v); }
+
+/* ---------------------------------------------------------------------------------- */
+/* Number conversions (no libm: plain double arithmetic, checked against pd_reference) */
+/* ---------------------------------------------------------------------------------- */
+#define LN2  0.6931471805599453094
+#define LN10 2.302585092994045684
+
+static double pd_exp(double y)                  /* y >= 0, small */
+{
+    int k = (int)(y / LN2 + 0.5), i;
+    double r = y - k * LN2, term = 1.0, s = 1.0;
+    for (i = 1; i < 25; i++) {
+        term = term * r / i;
+        s = s + term;
+    }
+    for (i = 0; i < k; i++) {
+        s = s * 2.0;
+    }
+    return s;
+}
+
+static double pd_ln(double x)                   /* x > 0 */
+{
+    u64 bits;
+    int e;
+    double m, z, z2, t, s;
+    int i;
+    memcpy(&bits, &x, 8);
+    e = (int)((bits >> 52) & 0x7FF) - 1023;
+    bits = (bits & 0x000FFFFFFFFFFFFFull) | 0x3FF0000000000000ull;   /* mantissa in [1, 2) */
+    memcpy(&m, &bits, 8);
+    if (m > 1.4142135623730951) {
+        m = m / 2.0;
+        e = e + 1;
+    }
+    z = (m - 1.0) / (m + 1.0);                  /* ln m = 2 atanh z, |z| < 0.172 */
+    z2 = z * z;
+    t = z;
+    s = z;
+    for (i = 3; i < 40; i += 2) {
+        t = t * z2;
+        s = s + t / i;
+    }
+    return e * LN2 + 2.0 * s;
+}
+
+/* TONE_THRESH (Q8.8 dB) -> linear Q.16, as pd_reference.tone_thresh_lin; 0 = check off */
+static u32 tone_thresh_lin(u32 q8)
+{
+    if (q8 == 0) {
+        return 0;
+    }
+    return (u32)(pd_exp((q8 / 2560.0) * LN10) * 65536.0 + 0.5);
+}
+
+/* ToneCheck in Q8.8 dB from the detector's num / den, as pd_reference.tone_db + rounding */
+static s16 tone_db_q8(u64 num, u64 den)
+{
+    double db, v;
+    long long f;
+    if (den == 0) {
+        db = num > 0 ? 127.0 : -128.0;
+    } else if (num == 0) {
+        db = -128.0;
+    } else {
+        db = 10.0 * (pd_ln((double)num / (double)den) / LN10);
+    }
+    v = db * 256.0 + 0.5;
+    f = (long long)v;
+    if ((double)f > v) {
+        f = f - 1;                              /* floor */
+    }
+    if (f > 32767) {
+        f = 32767;
+    }
+    if (f < -32768) {
+        f = -32768;
+    }
+    return (s16)f;
+}
 
 static void reset_connection_state(void)
 {
@@ -148,22 +273,79 @@ static int dma_init(void)
     return 0;
 }
 
+/* ---------------------------------------------------------------------------------- */
+/* Detector                                                                            */
+/* ---------------------------------------------------------------------------------- */
+/* Read every complete event (8 words) from the detector's event FIFO into ev_out. */
+static void drain_events(void)
+{
+    while (pd_rd(R_EV_LEVEL) >= 8u) {
+        u32 w[8], i;
+        u8 *r;
+        u64 num, den;
+        for (i = 0; i < 8u; i++) {
+            w[i] = pd_rd(R_EV_DATA);
+        }
+        if (ev_n >= MAX_EVENTS) {
+            ev_lost = 1;
+            continue;
+        }
+        num = ((u64)(w[5] & 0xFFu) << 32) | w[4];
+        den = ((u64)(w[7] & 0xFFu) << 32) | w[6];
+        r = ev_out + 8u + EV_SIZE * ev_n;
+        wr32(r + 0, w[0]);                                      /* t_trig */
+        wr32(r + 4, w[1]);                                      /* cfo_inc */
+        wr32(r + 8, w[0] + rd32(params + 12));                  /* cfo_valid_cnt = t + N_CFO */
+        wr16(r + 12, (u16)tone_db_q8(num, den));
+        wr16(r + 14, (u16)(EV_CFO_VALID | ((w[5] >> 31) ? EV_TONE_FAIL : 0u)));
+        wr16(r + 16, (u16)(w[2] & 0xFFFFu));                    /* ang16 */
+        wr16(r + 18, (u16)(w[2] >> 16));                        /* ang32 */
+        wr16(r + 20, (u16)(w[3] & 0xFFFFu));                    /* ang128 */
+        wr16(r + 22, (u16)(w[3] >> 16));                        /* ang256 */
+        ev_n++;
+    }
+}
+
+/* Hold the detector in reset, write the parameters, release it. */
+static void detector_reset(void)
+{
+    u32 i;
+    if (!det_ok) {
+        return;
+    }
+    pd_wr(R_CTRL, CTRL_RESET);
+    for (i = 0; i < 9u; i++) {
+        u32 v = rd32(params + 4u * i);
+        if (i == 5u) {
+            continue;                                           /* tone_thresh: TONE_LIN below */
+        }
+        /* register order: ETA_HI ETA_LO QUAL N_CFO BLANK HOLDOFF STAGE SHIFT TONE_LIN */
+        pd_wr(R_PARAM0 + 4u * (i < 5u ? i : i - 1u), v);
+    }
+    pd_wr(R_PARAM0 + 4u * 8u, tone_thresh_lin(rd32(params + 20)));
+    pd_wr(R_CTRL, 0);
+}
+
 /*
- * Stream `bytes` from src through the PL into dst, in chunks. Each MM2S transfer ends with
- * TLAST, which ends the matching S2MM transfer. Returns 0 or a negative error code.
+ * Stream `bytes` from src through the PL, in chunks; with dst != 0 the PL's output stream is
+ * written to dst (each MM2S transfer ends with TLAST, which ends the matching S2MM transfer).
+ * With events != 0 the detector's event FIFO is read while the DMA runs.
+ * Returns 0 or a negative error code (message in err).
  */
-static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, char *err, u32 err_len)
+static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, int events, char *err, u32 err_len)
 {
     u32 off;
 
     Xil_DCacheFlushRange(src, bytes);
-    Xil_DCacheInvalidateRange(dst, bytes);
+    if (dst) {
+        Xil_DCacheInvalidateRange(dst, bytes);
+    }
     for (off = 0; off < bytes; off += DMA_CHUNK_BYTES) {
         u32 n = bytes - off < DMA_CHUNK_BYTES ? bytes - off : DMA_CHUNK_BYTES;
         u32 polls = DMA_TIMEOUT_POLLS;
-        u32 sr_rx, sr_tx, got;
+        u32 sr_rx = 0, sr_tx, got;
 
-        if (XAxiDma_SimpleTransfer(&dma, dst + off, n, XAXIDMA_DEVICE_TO_DMA) != XST_SUCCESS) {
+        if (dst && XAxiDma_SimpleTransfer(&dma, dst + off, n, XAXIDMA_DEVICE_TO_DMA) != XST_SUCCESS) {
             snprintf(err, err_len, "S2MM start failed at byte %lu", (unsigned long)off);
             dma_reset();
             return -1;
@@ -173,7 +355,11 @@ static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, char *err, u32 err_le
             dma_reset();
             return -2;
         }
-        while (XAxiDma_Busy(&dma, XAXIDMA_DMA_TO_DEVICE) || XAxiDma_Busy(&dma, XAXIDMA_DEVICE_TO_DMA)) {
+        while (XAxiDma_Busy(&dma, XAXIDMA_DMA_TO_DEVICE) ||
+               (dst && XAxiDma_Busy(&dma, XAXIDMA_DEVICE_TO_DMA))) {
+            if (events) {
+                drain_events();
+            }
             if (--polls == 0) {
                 sr_tx = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_TX_OFFSET, XAXIDMA_SR_OFFSET);
                 sr_rx = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_RX_OFFSET, XAXIDMA_SR_OFFSET);
@@ -184,21 +370,83 @@ static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, char *err, u32 err_le
             }
         }
         sr_tx = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_TX_OFFSET, XAXIDMA_SR_OFFSET);
-        sr_rx = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_RX_OFFSET, XAXIDMA_SR_OFFSET);
+        if (dst) {
+            sr_rx = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_RX_OFFSET, XAXIDMA_SR_OFFSET);
+        }
         if ((sr_tx | sr_rx) & XAXIDMA_ERR_ALL_MASK) {
             snprintf(err, err_len, "DMA error (MM2S SR 0x%08lx, S2MM SR 0x%08lx)",
                      (unsigned long)sr_tx, (unsigned long)sr_rx);
             dma_reset();
             return -4;
         }
-        got = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_RX_OFFSET, XAXIDMA_BUFFLEN_OFFSET);
-        if (got != n) {
-            snprintf(err, err_len, "S2MM received %lu bytes, expected %lu",
-                     (unsigned long)got, (unsigned long)n);
-            return -5;
+        if (dst) {
+            got = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_RX_OFFSET, XAXIDMA_BUFFLEN_OFFSET);
+            if (got != n) {
+                snprintf(err, err_len, "S2MM received %lu bytes, expected %lu",
+                         (unsigned long)got, (unsigned long)n);
+                return -5;
+            }
         }
     }
-    Xil_DCacheInvalidateRange(dst, bytes);
+    if (dst) {
+        Xil_DCacheInvalidateRange(dst, bytes);
+    }
+    return 0;
+}
+
+/*
+ * Detector RUN of `count` samples from the sample buffer. Fills ev_out; returns 0 or an error
+ * (message in err).
+ */
+static int detector_run(u32 count, int debug, char *err, u32 err_len)
+{
+    u32 start, polls, st, n_cfo = rd32(params + 12);
+
+    ev_n = 0;
+    ev_lost = 0;
+    start = pd_rd(R_SAMPLES);
+    pd_wr(R_CTRL, debug ? CTRL_DEBUG : 0u);
+    if (count > 0 && dma_stream(SAMPLE_BUF_ADDR, debug ? DEBUG_BUF_ADDR : 0, 4u * count, 1, err, err_len) != 0) {
+        pd_wr(R_CTRL, 0);
+        return -1;
+    }
+    /* the last samples, CFO results and tone checks finish without further input */
+    for (polls = IDLE_TIMEOUT_POLLS; (pd_rd(R_STATUS) & STATUS_BUSY) && polls > 0; polls--) {
+        drain_events();
+    }
+    drain_events();
+    st = pd_rd(R_STATUS);
+    pd_wr(R_CTRL, 0);
+    if (st & STATUS_BUSY) {
+        snprintf(err, err_len, "detector still busy after the DMA (STATUS 0x%08lx)", (unsigned long)st);
+        return -2;
+    }
+    if (st & STATUS_EV_OVF) {
+        snprintf(err, err_len, "detector event FIFO overflow (STATUS 0x%08lx)", (unsigned long)st);
+        return -3;
+    }
+    if (pd_rd(R_SAMPLES) - start != count) {
+        snprintf(err, err_len, "detector took %lu of %lu samples",
+                 (unsigned long)(pd_rd(R_SAMPLES) - start), (unsigned long)count);
+        return -4;
+    }
+    if (ev_lost) {
+        snprintf(err, err_len, "more than %lu events in one RUN - run in smaller pieces",
+                 (unsigned long)MAX_EVENTS);
+        return -5;
+    }
+    /* a window still waiting for samples: report it once, in the RUN that triggered it */
+    if ((st & STATUS_OPEN) && pd_rd(R_OPEN_T) - start < count) {
+        u32 t = pd_rd(R_OPEN_T);
+        u8 *r = ev_out + 8u + EV_SIZE * ev_n;
+        memset(r, 0, EV_SIZE);
+        wr32(r + 0, t);
+        wr32(r + 8, t + n_cfo);
+        wr16(r + 14, (u16)EV_TRUNCATED);
+        ev_n++;
+    }
+    wr32(ev_out + 0, ev_n);
+    wr32(ev_out + 4, count);
     return 0;
 }
 
@@ -287,13 +535,14 @@ static void handle_message(struct tcp_pcb *pcb)
         wr32(tx_small + 0, PD_PROTOCOL_VERSION);
         wr32(tx_small + 4, PD_BUILD);
         wr32(tx_small + 8, MAX_SAMPLES);
-        wr32(tx_small + 12, BOARD_FLAG_NO_DETECTOR);
+        wr32(tx_small + 12, det_ok ? 0u : BOARD_FLAG_NO_DETECTOR);
         reply(pcb, cmd, ST_OK, seq, tx_small, 16);
         return;
 
     case CMD_RESET:
         samples_stored = 0;
         debug_count = 0;
+        detector_reset();
         reply(pcb, cmd, ST_OK, seq, NULL, 0);
         return;
 
@@ -302,7 +551,24 @@ static void handle_message(struct tcp_pcb *pcb)
             reply_error(pcb, cmd, ST_BAD_ARG, seq, "SET_PARAMS payload too short");
             return;
         }
-        memcpy(params, pl, PARAMS_SIZE);    /* phase 2: write to the detector registers */
+        if (rd32(pl + 20) > TONE_THRESH_MAX_Q8) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "tone_thresh must be 0..24 dB (Q8.8 0..6144)");
+            return;
+        }
+        if (rd32(pl + 28) > 1u) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "input_stage must be 0 (LPF output) or 1 (decimated input)");
+            return;
+        }
+        if (rd32(pl + 12) < 128u || rd32(pl + 12) > 4096u) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "n_cfo must be 128..4096");
+            return;
+        }
+        if (rd32(pl + 0) > 0xFFFFu || rd32(pl + 4) > 0xFFFFu || rd32(pl + 8) > 0xFFFFu || rd32(pl + 32) > 15u) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "eta_*_sq and qual_len are 16-bit, dc_shift 0..15");
+            return;
+        }
+        memcpy(params, pl, PARAMS_SIZE);
+        detector_reset();                   /* new parameters take effect from a reset */
         reply(pcb, cmd, ST_OK, seq, NULL, 0);
         return;
 
@@ -364,19 +630,40 @@ static void handle_message(struct tcp_pcb *pcb)
             reply_error(pcb, cmd, ST_BAD_ARG, seq, msg);
             return;
         }
-        if (!(flags & RUN_FLAG_PL_LOOPBACK)) {
-            reply_error(pcb, cmd, ST_BAD_CMD, seq,
-                        "no detector in this bitstream (phase 1) - use RUN with the PL-loopback flag");
-            return;
-        }
         if (!dma_ok) {
             reply_error(pcb, cmd, ST_INTERNAL, seq, "DMA not initialised - see the UART log");
             return;
         }
+        if (!(flags & RUN_FLAG_PL_LOOPBACK)) {
+            if (!det_ok) {
+                reply_error(pcb, cmd, ST_BAD_CMD, seq,
+                            "no detector in this bitstream - use RUN with the PL-loopback flag");
+                return;
+            }
+            debug_count = 0;
+            if (detector_run(count, (flags & RUN_FLAG_DEBUG) != 0, msg, sizeof(msg)) != 0) {
+                reply_error(pcb, cmd, ST_INTERNAL, seq, msg);
+                return;
+            }
+            if (flags & RUN_FLAG_DEBUG) {
+                debug_count = count;
+            }
+            reply(pcb, cmd, ST_OK, seq, ev_out, 8u + EV_SIZE * ev_n);
+            return;
+        }
         debug_count = 0;
-        if (count > 0 && dma_stream(SAMPLE_BUF_ADDR, DEBUG_BUF_ADDR, 4u * count, msg, sizeof(msg)) != 0) {
+        if (det_ok) {
+            pd_wr(R_CTRL, CTRL_LOOPBACK);
+        }
+        if (count > 0 && dma_stream(SAMPLE_BUF_ADDR, DEBUG_BUF_ADDR, 4u * count, 0, msg, sizeof(msg)) != 0) {
+            if (det_ok) {
+                pd_wr(R_CTRL, 0);
+            }
             reply_error(pcb, cmd, ST_INTERNAL, seq, msg);
             return;
+        }
+        if (det_ok) {
+            pd_wr(R_CTRL, 0);
         }
         debug_count = count;
         wr32(tx_small + 0, 0);          /* no events */
@@ -521,6 +808,16 @@ static err_t accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
     return ERR_OK;
 }
 
+/* pd_protocol.Params defaults, until the PC sends SET_PARAMS */
+static void pr_default_params(void)
+{
+    static const u32 def[9] = {8028u, 2621u, 128u, 2048u, 288u, 3328u, 131072u, 0u, 10u};
+    u32 i;
+    for (i = 0; i < 9u; i++) {
+        wr32(params + 4u * i, def[i]);
+    }
+}
+
 /* ---------------------------------------------------------------------------------- */
 /* Entry points called by the template's main.c                                        */
 /* ---------------------------------------------------------------------------------- */
@@ -529,7 +826,7 @@ void print_app_header(void)
     xil_printf("\r\n----- Flexlink packet-detector test bench (build %d) -----\r\n", (int)PD_BUILD);
     xil_printf("TCP port %d, sample buffer %d samples at 0x%08x\r\n",
                PD_PORT, (int)MAX_SAMPLES, (unsigned int)SAMPLE_BUF_ADDR);
-    xil_printf("Phase 1: PL loopback only (no detector in the bitstream)\r\n");
+    xil_printf("Phase 2: packet detector in the PL, registers at 0x%08x\r\n", (unsigned int)PD_BASE);
 }
 
 int start_application(void)
@@ -540,6 +837,18 @@ int start_application(void)
     dma_ok = (dma_init() == 0);
     if (!dma_ok) {
         xil_printf("WARNING: DMA unavailable - LOAD/READ work, RUN will fail\r\n");
+    }
+    {
+        u32 id = pd_rd(R_ID);
+        det_ok = (id == PD_ID_VALUE);
+        if (det_ok) {
+            pr_default_params();
+            detector_reset();
+            xil_printf("Detector found (ID 0x%08x)\r\n", (unsigned int)id);
+        } else {
+            xil_printf("WARNING: no detector at 0x%08x (ID 0x%08x) - PL loopback only\r\n",
+                       (unsigned int)PD_BASE, (unsigned int)id);
+        }
     }
 
     pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);

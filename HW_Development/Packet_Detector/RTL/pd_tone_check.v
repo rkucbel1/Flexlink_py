@@ -62,7 +62,11 @@ module pd_tone_check #(
     output reg  signed [15:0] ev_ang256,
     output reg  [39:0]        ev_num,
     output reg  [39:0]        ev_den,
-    output reg                ev_fail
+    output reg                ev_fail,
+    // state, for the end of a run
+    output wire               busy,        // a check running or waiting, or an event going out
+    output wire [3:0]         open_n,      // windows triggered but not checked yet
+    output wire [31:0]        open_t       // the oldest of them (valid when open_n != 0)
 );
     localparam integer NB    = 13;
     localparam integer NP    = (NB + NU - 1) / NU;       // passes
@@ -338,6 +342,10 @@ module pd_tone_check #(
             endcase
         end
     end
+
+    assign busy   = (st != S_IDLE) || pv || ev_valid;
+    assign open_n = tf_n;
+    assign open_t = keep;
 
 `ifdef PD_SIM_CHECKS
     always @(posedge clk) begin

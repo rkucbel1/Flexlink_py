@@ -63,9 +63,14 @@ module pd_detect_top (
     output wire [15:0] ev_ang256,
     output wire [39:0] ev_tone_num,    // 9 (sum P_tone - max P_tone)
     output wire [39:0] ev_tone_den,    // sum P_ref; ToneCheck = 10 log10(num / den)
-    output wire        ev_tone_fail
+    output wire        ev_tone_fail,
+    // state: busy = something still in flight; open_n / open_t = windows still waiting for
+    // samples (at most 1 once busy is 0) and the first one's t_trig
+    output wire        busy,
+    output wire [3:0]  open_n,
+    output wire [31:0] open_t
 );
-    wire stall;
+    wire stall, lane_busy, tone_busy;
     assign s_iq_tready = !stall;
     wire   s_fire = s_iq_tvalid & !stall;
     wire signed [11:0] in_i = s_iq_tdata[11:0];
@@ -101,12 +106,13 @@ module pd_detect_top (
 
     pd_cfo_lane u_cfo (
         .clk(clk), .rst_n(rst_n), .n_cfo(n_cfo),
-        .in_valid(lpf_valid), .in_i(lpf_i), .in_q(lpf_q),
+        .in_valid(lpf_valid), .in_i(lpf_i), .in_q(lpf_q), .rel(dbg_valid),
         .trig(trig), .t_trig(t_trig),
         .cfo_valid(cfo_valid), .cfo_t(cfo_t), .cfo_inc(cfo_inc),
         .ang16(ang16), .ang32(ang32), .ang128(ang128), .ang256(ang256),
         .a16_re(a16_re), .a16_im(a16_im), .a32_re(a32_re), .a32_im(a32_im),
-        .a128_re(a128_re), .a128_im(a128_im), .a256_re(a256_re), .a256_im(a256_im));
+        .a128_re(a128_re), .a128_im(a128_im), .a256_re(a256_re), .a256_im(a256_im),
+        .busy(lane_busy));
 
     pd_tone_check u_tone (
         .clk(clk), .rst_n(rst_n), .n_cfo(n_cfo), .tone_lin(tone_lin),
@@ -117,7 +123,16 @@ module pd_detect_top (
         .stall(stall),
         .ev_valid(ev_valid), .ev_t(ev_t), .ev_cfo_inc(ev_cfo_inc),
         .ev_ang16(ev_ang16), .ev_ang32(ev_ang32), .ev_ang128(ev_ang128), .ev_ang256(ev_ang256),
-        .ev_num(ev_tone_num), .ev_den(ev_tone_den), .ev_fail(ev_tone_fail));
+        .ev_num(ev_tone_num), .ev_den(ev_tone_den), .ev_fail(ev_tone_fail),
+        .busy(tone_busy), .open_n(open_n), .open_t(open_t));
+
+    // samples inside the front end and core: accepted minus debug records out
+    reg [7:0] inflight;
+    always @(posedge clk) begin
+        if (!rst_n) inflight <= 8'd0;
+        else        inflight <= inflight + {7'd0, s_fire} - {7'd0, dbg_valid};
+    end
+    assign busy = (inflight != 8'd0) || s_fire || lane_busy || tone_busy;
 endmodule
 
 `default_nettype wire

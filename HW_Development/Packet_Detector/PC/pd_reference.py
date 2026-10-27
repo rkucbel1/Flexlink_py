@@ -77,8 +77,6 @@ H_LP = (-0.0015, -0.0107, -0.0271, -0.0388, -0.0216, 0.0431, 0.1452, 0.2418, 0.2
 LPF_FRAC = 17                             # coefficients: signed 18-bit, value / 2^17
 H_LP_Q = tuple(int(round(h * (1 << LPF_FRAC))) for h in H_LP)
 LPF_DELAY = (len(H_LP) - 1) // 2          # 8 samples
-LANE_DELAY = 32                           # RTL CFO lane runs this many samples behind the input:
-#                                           a window is complete LANE_DELAY samples after its end
 
 L = 256                                   # running-sum length
 D = 32                                    # detection lag

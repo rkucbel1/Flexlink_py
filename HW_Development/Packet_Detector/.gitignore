@@ -9,3 +9,5 @@ __pycache__/
 FW/debug/
 SIM/work/
 SIM/sim.log
+SIM/cosim/obj/
+SIM/cosim/*.o
