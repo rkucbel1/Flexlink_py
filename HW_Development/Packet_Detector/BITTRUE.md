@@ -57,6 +57,12 @@ table are new.
 5. **§5.1 input.** The model and the test bench accept either the LPF output
    (`input_stage 0`) or the decimated stream (`input_stage 1`, the board runs the front end). The
    half-band decimator 40 → 20 Msps (§8 item 4) is still floating point on the PC.
+6. **§4.7 / §5.4, tone check: the window is replayed from a buffer.** f̂ is only known once the
+   window has ended, so the hardware keeps the LPF stream in an 8192-sample buffer (6 BRAM36,
+   N up to 4096) and runs the 13 bins over it afterwards: 4 DFT units, 4 passes, 16 DSPs. The
+   result is ready about 4 N clocks after `cfo_valid`, before the next window can end at the real
+   sample rate. The spec's estimate of two complex MAC units would not keep up with back-to-back
+   windows. The decision and the integers are exactly those of the model.
 
 ## Verification
 

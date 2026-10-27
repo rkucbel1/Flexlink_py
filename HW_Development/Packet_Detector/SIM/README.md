@@ -4,11 +4,15 @@
 - **every** LPF output sample;
 - **every** debug record (metric and flag bits);
 - **every** trigger;
-- **every** CFO result: window start, the four lag accumulators, the four CORDIC angles and `cfo_inc`.
+- **every** CFO result: window start, the four lag accumulators, the four CORDIC angles and `cfo_inc`;
+- **every** event after the tone check: its CFO fields, tone `num` and `den`, and the abort flag.
+
+It obeys `tready`: with fast input the tone check holds the input back, and the log says for how many clocks. Inputs change on the falling clock edge, so the testbench never races the DUT.
 
 `tb_pd_units.v` runs directed unit tests:
 - the CORDIC on 22025 vectors: random values plus ±π, the axes, zero, and tiny and full-scale values;
-- the cascade on 101000 angle sets, including sets that land exactly on each rounding boundary and one LSB either side.
+- the cascade on 101000 angle sets, including sets that land exactly on each rounding boundary and one LSB either side;
+- the tone check on 160 windows: random full scale, single tones exactly on a bin (the largest DFT values), Preamble-A-like tones, silence, DC, Nyquist, tiny signals; f̂ at 0, ±2²³ and 2²⁴−1; N 128 / 2048 / 4096; thresholds 0, 24 dB, random, and exactly on and one LSB past the decision.
 
 ```bash
 cd Flexlink_py/HW_Development/Packet_Detector/SIM
@@ -19,8 +23,10 @@ source ~/SiskinRF/Flexlink_py/.venv/bin/activate       # for make_tb_vectors.py 
 ./run_sim.sh ../TestVectors/rep3.json 0       # input_stage 0: LPF output in, front end bypassed
 ./run_sim.sh stress 1                         # synthetic full-scale stress vector, 34 triggers
 ./run_sim.sh cfo 1                            # 40 real packets, CFO ±600 kHz, SNR -6..30 dB: 80 CFO results
-./run_sim.sh units                            # CORDIC + cascade unit tests
-GAP=0 ./run_sim.sh stress 0                   # one sample per clock
+./run_sim.sh units                            # CORDIC, cascade and tone-check unit tests
+GAP=0 ./run_sim.sh stress 0                   # one sample per clock (the tone check stalls the input)
+FIXGAP=1 GAP=4 ./run_sim.sh stress 1          # exactly 5 clocks per sample = 20 Msps: no stalls
+NCFO=4096 GAP=0 ./run_sim.sh cfo 1            # other CFO window length (128..4096)
 HOLDOFF=300 ./run_sim.sh                      # short re-arm (effective >= N_CFO): 9 triggers on rep3
 SIM=verilator ./run_sim.sh                    # Verilator instead of xsim
 ```

@@ -12,7 +12,7 @@ throw-away build output.
 | `FW/build_firmware.py` | Vitis 2025.2: platform + lwIP + app from the echo-server template, with `pd_server.c` |
 | `FW/run_board.tcl` | XSDB: program the FPGA over JTAG and start the firmware |
 | `BITTRUE.md` | Bit-true model: word lengths, spec changes, verification against the simulator |
-| `RTL/` | Verilog of the detector: DC blocker, LPF, detection core → `t_trig`, debug stream; CFO lane → `cfo_inc`; see `RTL/README.md` |
+| `RTL/` | Verilog of the detector: DC blocker, LPF, detection core → `t_trig`, debug stream; CFO lane → `cfo_inc`; tone check → event; see `RTL/README.md` |
 | `SIM/` | Testbench against the bit-true model, `run_sim.sh` (xsim or Verilator); see `SIM/README.md` |
 | `HW/synth_detect.tcl` | Out-of-context synthesis + place & route of `RTL/` at 100 MHz: timing and resources |
 | `TestVectors/` | Output of `PC/pd_make_vector.py` |
@@ -100,9 +100,20 @@ Step 3 done: **CFO lane RTL** (`RTL/pd_cfo_lane.v`, `pd_cordic.v`, `pd_cfo_casca
 matches the bit-true model in Verilator: four lag accumulators, four angles and `cfo_inc` for
 every trigger. Vectors: 40 real packets at ±600 kHz, the stress vector and rep3. The unit tests
 cover 22025 CORDIC vectors and 101000 cascade sets with exact rounding boundaries. 6 of 7
-injected faults were caught; the 7th turned out to be logically equivalent. To do: xsim and
-timing (`HW/synth_detect.tcl`). Next: the tone check, then the AXI wrapper that replaces
-`pl_core`.
+injected faults were caught; the 7th turned out to be logically equivalent. xsim passes too.
+Place & route: **100 MHz met, WNS +0.856 ns**; 4782 LUT (9%), 5315 FF (5%), 49 DSP48 (22%),
+1 BRAM tile.
+
+Step 4: **tone-check RTL** (`RTL/pd_tone_check.v`, `pd_tone_rom.v`). After f̂ it replays the
+CFO window from an 8192-sample buffer through four DFT units (13 bins in four passes) and
+outputs one event per window: the CFO result plus tone `num`, `den` and the abort flag. It
+matches the bit-true model in Verilator on every event of every vector: N_CFO 128 / 2048 /
+4096, both input stages, one sample per clock up to 20 Msps. The unit test covers 160 windows
+with the threshold exactly on the decision boundary; 8 of 9 injected faults were caught, and
+the 9th is logically equivalent. At 20 Msps the input is never stalled. Faster input (DMA from
+memory) is held back with `tready` while the check catches up; results are unchanged. xsim
+passes too. Place & route of the whole detector: **100 MHz met, WNS +0.948 ns**; 7803 LUT (15%),
+7438 FF (7%), 78 DSP48 (35%), 9 BRAM tiles (6%). Next: the AXI wrapper that replaces `pl_core`.
 
 
 The AXIS FIFO in `build_hw.tcl` (`pl_core`) is replaced by the detector RTL with the same stream

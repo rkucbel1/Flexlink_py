@@ -1,12 +1,13 @@
 // tb_pd_detect.v  (Flexlink_py/HW_Development/Packet_Detector/SIM)
 //
 // Self-checking testbench for pd_detect_top against the bit-true model. Reads the files written
-// by make_tb_vectors.py (cfg.txt, in.txt, exp_lpf.txt, exp_dbg.txt, exp_trig.txt, exp_cfo.txt) from the
-// current directory (run_sim.sh runs the simulator inside the vector's folder), feeds the
-// samples with random gaps in tvalid (+gap=N: up to N idle clocks between samples, 0 = one
-// sample per clock, +seed=S), and checks every LPF output sample, every debug record, every
-// trigger and every CFO result (window start, the four lag accumulators, the four CORDIC angles
-// and cfo_inc). Prints PASS / FAIL and the first +maxerr=N (default 10) mismatches.
+// by make_tb_vectors.py (cfg.txt, in.txt, exp_lpf.txt, exp_dbg.txt, exp_trig.txt, exp_cfo.txt,
+// exp_tone.txt) from the current directory (run_sim.sh runs the simulator inside the vector's
+// folder), feeds the samples with random gaps in tvalid (+gap=N: up to N idle clocks between
+// samples, 0 = one sample per clock, +seed=S; +fixgap=1: exactly N, e.g. 4 = 20 Msps), obeys tready, and checks every LPF output sample,
+// every debug record, every trigger, every CFO result (window start, the four lag accumulators,
+// the four CORDIC angles and cfo_inc) and every event after the tone check (CFO fields, tone
+// num / den, fail). Prints PASS / FAIL and the first +maxerr=N (default 10) mismatches.
 // Plain Verilog-2001 (xsim, Verilator).
 `timescale 1ns / 1ps
 `default_nettype none
@@ -22,6 +23,7 @@ module tb_pd_detect;
     reg  [15:0] eta_hi_sq, eta_lo_sq, qual_len;
     reg  [31:0] blank_len, arm_holdoff;
     reg  [15:0] n_cfo;
+    reg  [23:0] tone_lin;
     reg         s_valid;
     reg  [31:0] s_data;
     wire        s_ready;
@@ -33,12 +35,16 @@ module tb_pd_detect;
     wire [31:0] cfo_t, cfo_inc;
     wire [15:0] ang16, ang32, ang128, ang256;
     wire [36:0] a16_re, a16_im, a32_re, a32_im, a128_re, a128_im, a256_re, a256_im;
+    wire        ev_valid, ev_fail;
+    wire [31:0] ev_t, ev_inc;
+    wire [15:0] ev_a16, ev_a32, ev_a128, ev_a256;
+    wire [39:0] ev_num, ev_den;
 
     pd_detect_top dut (
         .clk(clk), .rst_n(rst_n),
         .input_stage(input_stage), .dc_shift(dc_shift),
         .eta_hi_sq(eta_hi_sq), .eta_lo_sq(eta_lo_sq), .qual_len(qual_len),
-        .blank_len(blank_len), .arm_holdoff(arm_holdoff), .n_cfo(n_cfo),
+        .blank_len(blank_len), .arm_holdoff(arm_holdoff), .n_cfo(n_cfo), .tone_lin(tone_lin),
         .s_iq_tvalid(s_valid), .s_iq_tdata(s_data), .s_iq_tready(s_ready),
         .lpf_valid(lpf_valid), .lpf_i(lpf_i), .lpf_q(lpf_q),
         .trig(trig), .t_trig(t_trig),
@@ -46,17 +52,21 @@ module tb_pd_detect;
         .cfo_valid(cfo_valid), .cfo_t(cfo_t), .cfo_inc(cfo_inc),
         .ang16(ang16), .ang32(ang32), .ang128(ang128), .ang256(ang256),
         .a16_re(a16_re), .a16_im(a16_im), .a32_re(a32_re), .a32_im(a32_im),
-        .a128_re(a128_re), .a128_im(a128_im), .a256_re(a256_re), .a256_im(a256_im));
+        .a128_re(a128_re), .a128_im(a128_im), .a256_re(a256_re), .a256_im(a256_im),
+        .ev_valid(ev_valid), .ev_t(ev_t), .ev_cfo_inc(ev_inc),
+        .ev_ang16(ev_a16), .ev_ang32(ev_a32), .ev_ang128(ev_a128), .ev_ang256(ev_a256),
+        .ev_tone_num(ev_num), .ev_tone_den(ev_den), .ev_tone_fail(ev_fail));
 
     // ------------------------------------------------------------------ files and settings
-    integer f_cfg, f_in, f_lpf, f_dbg, f_trig, f_cfo, r, rc;
-    integer n_samples, n_trig, n_cfo_ev, gap, seed, maxerr;
-    integer cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q, cfg_blank, cfg_hold, cfg_ncfo;
+    integer f_cfg, f_in, f_lpf, f_dbg, f_trig, f_cfo, f_tone, r, rc;
+    integer n_samples, n_trig, n_cfo_ev, gap, seed, maxerr, fixgap;
+    integer cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q, cfg_blank, cfg_hold, cfg_ncfo, cfg_lin;
 
     // ------------------------------------------------------------------ checkers
-    integer errors, lpf_seen, dbg_seen, trig_seen, cfo_seen;
+    integer errors, lpf_seen, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, stalls;
     initial begin
-        errors = 0; lpf_seen = 0; dbg_seen = 0; trig_seen = 0; cfo_seen = 0;
+        errors = 0; lpf_seen = 0; dbg_seen = 0; trig_seen = 0; cfo_seen = 0; ev_seen = 0;
+        ev_fails = 0; stalls = 0;
         rst_n = 1'b0; s_valid = 1'b0; s_data = 32'd0;
     end
     reg [11:0] e_i, e_q;
@@ -66,6 +76,10 @@ module tb_pd_detect;
     reg [36:0] x_a [0:7];
     reg [15:0] x_g [0:3];
     integer    j, bad;
+    reg [31:0] y_t, y_inc;
+    reg [15:0] y_g [0:3];
+    reg [39:0] y_num, y_den;
+    reg [3:0]  y_fail;
 
     always @(posedge clk) begin
         if (rst_n && lpf_valid) begin
@@ -130,14 +144,38 @@ module tb_pd_detect;
             end
             cfo_seen = cfo_seen + 1;
         end
+        if (rst_n && ev_valid) begin
+            r = $fscanf(f_tone, "%h %h %h %h %h %h %h %h %h\n", y_t, y_inc, y_g[0], y_g[1], y_g[2], y_g[3],
+                        y_num, y_den, y_fail);
+            if (r != 9) begin
+                errors = errors + 1;
+                if (errors <= maxerr) $display("ERROR event: unexpected event for t %0d", ev_t);
+            end else begin
+                bad = (ev_t !== y_t) || (ev_inc !== y_inc) || (ev_a16 !== y_g[0]) || (ev_a32 !== y_g[1]) ||
+                      (ev_a128 !== y_g[2]) || (ev_a256 !== y_g[3]) || (ev_num !== y_num) ||
+                      (ev_den !== y_den) || (ev_fail !== y_fail[0]);
+                if (bad) begin
+                    errors = errors + 1;
+                    if (errors <= maxerr)
+                        $display("ERROR event %0d: t %0d (exp %0d) cfo_inc %08h (exp %08h) num %010h (exp %010h) den %010h (exp %010h) fail %0d (exp %0d)",
+                                 ev_seen, ev_t, y_t, ev_inc, y_inc, ev_num, y_num, ev_den, y_den, ev_fail, y_fail[0]);
+                end else if (ev_seen < 20)
+                    $display("  event %0d for t_trig %0d: tone num %0d den %0d, %s (ok)", ev_seen, ev_t, ev_num, ev_den,
+                             ev_fail ? "FAIL" : "pass");
+                if (ev_fail) ev_fails = ev_fails + 1;
+            end
+            ev_seen = ev_seen + 1;
+        end
+        if (rst_n && s_valid && !s_ready) stalls = stalls + 1;
     end
 
     // ------------------------------------------------------------------ stimulus
     integer i, w, idle, rnd;
     reg [15:0] si, sq;
     initial begin
-        gap = 3; seed = 1; maxerr = 10;
+        gap = 3; seed = 1; maxerr = 10; fixgap = 0;
         rc = $value$plusargs("gap=%d", gap);
+        rc = $value$plusargs("fixgap=%d", fixgap);
         rc = $value$plusargs("seed=%d", seed);
         rc = $value$plusargs("maxerr=%d", maxerr);
 
@@ -147,41 +185,48 @@ module tb_pd_detect;
         f_dbg  = $fopen("exp_dbg.txt", "r");
         f_trig = $fopen("exp_trig.txt", "r");
         f_cfo  = $fopen("exp_cfo.txt", "r");
-        if (f_cfg == 0 || f_in == 0 || f_lpf == 0 || f_dbg == 0 || f_trig == 0 || f_cfo == 0) begin
+        f_tone = $fopen("exp_tone.txt", "r");
+        if (f_cfg == 0 || f_in == 0 || f_lpf == 0 || f_dbg == 0 || f_trig == 0 || f_cfo == 0 || f_tone == 0) begin
             $display("FAIL: cannot open the vector files (cfg.txt ...) in the current directory");
             $finish;
         end
-        r = $fscanf(f_cfg, "%d %d %d %d %d %d %d %d %d %d %d", cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q,
-                    cfg_blank, cfg_hold, n_samples, n_trig, cfg_ncfo, n_cfo_ev);
-        if (r != 11) begin
-            $display("FAIL: cfg.txt has %0d fields, expected 11 - rerun make_tb_vectors.py", r);
+        r = $fscanf(f_cfg, "%d %d %d %d %d %d %d %d %d %d %d %d", cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q,
+                    cfg_blank, cfg_hold, n_samples, n_trig, cfg_ncfo, n_cfo_ev, cfg_lin);
+        if (r != 12) begin
+            $display("FAIL: cfg.txt has %0d fields, expected 12 - rerun make_tb_vectors.py", r);
             $finish;
         end
         input_stage = cfg_stage[0];  dc_shift  = cfg_shift[3:0];
         eta_hi_sq   = cfg_hi[15:0];  eta_lo_sq = cfg_lo[15:0];  qual_len = cfg_q[15:0];
         blank_len   = cfg_blank;     arm_holdoff = cfg_hold;  n_cfo = cfg_ncfo[15:0];
+        tone_lin    = cfg_lin[23:0];
         $display("Vector: %0d samples, input_stage %0d, dc_shift %0d, eta_hi_sq %0d, eta_lo_sq %0d, Q %0d, blank %0d, holdoff %0d, N_CFO %0d, %0d trigger(s), %0d CFO result(s); max gap %0d",
                  n_samples, cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q, cfg_blank, cfg_hold, cfg_ncfo, n_trig, n_cfo_ev, gap);
 
-        repeat (5) @(posedge clk);
-        rst_n <= 1'b1;
-        repeat (20) @(posedge clk);
+        repeat (5) @(negedge clk);
+        rst_n = 1'b1;
+        repeat (20) @(negedge clk);
 
         for (i = 0; i < n_samples; i = i + 1) begin
             r = $fscanf(f_in, "%h %h\n", si, sq);
             rnd  = $random(seed);
-            idle = (gap > 0) ? ((rnd & 32'h7fffffff) % (gap + 1)) : 0;
+            idle = fixgap ? gap : (gap > 0) ? ((rnd & 32'h7fffffff) % (gap + 1)) : 0;
+            // inputs change on the falling edge only, so the DUT (rising edge) never races them;
+            // a sample is taken at the first rising edge with tready = 1
             for (w = 0; w < idle; w = w + 1) begin
-                s_valid <= 1'b0;
-                @(posedge clk);
+                @(negedge clk);
+                s_valid = 1'b0;
             end
-            s_valid <= 1'b1;
-            s_data  <= {sq, si};
-            @(posedge clk);
+            @(negedge clk);
+            s_valid = 1'b1;
+            s_data  = {sq, si};
+            while (!s_ready) @(negedge clk);
             if (i % 50000 == 49999) $display("  %0d samples in, %0d errors", i + 1, errors);
         end
-        s_valid <= 1'b0;
-        repeat (300) @(posedge clk);
+        @(negedge clk);
+        s_valid = 1'b0;
+        // the last checks finish up to two jobs (2 x ceil(13 / NU) x N clocks) after the input ends
+        repeat (30 * cfg_ncfo + 2000) @(posedge clk);
 
         if (lpf_seen != n_samples) begin
             errors = errors + 1; $display("ERROR: %0d LPF samples out, expected %0d", lpf_seen, n_samples);
@@ -195,9 +240,13 @@ module tb_pd_detect;
         if (cfo_seen != n_cfo_ev) begin
             errors = errors + 1; $display("ERROR: %0d CFO results, expected %0d", cfo_seen, n_cfo_ev);
         end
+        if (ev_seen != n_cfo_ev) begin
+            errors = errors + 1; $display("ERROR: %0d events, expected %0d", ev_seen, n_cfo_ev);
+        end
+        $display("  input stalled for %0d clocks (tone check catching up)", stalls);
         if (errors == 0)
-            $display("PASS: %0d samples, %0d debug records, %0d trigger(s), %0d CFO result(s) match the bit-true model",
-                     n_samples, dbg_seen, trig_seen, cfo_seen);
+            $display("PASS: %0d samples, %0d debug records, %0d trigger(s), %0d CFO result(s), %0d event(s) (%0d failing the tone check) match the bit-true model",
+                     n_samples, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails);
         else
             $display("FAIL: %0d error(s)", errors);
         $finish;

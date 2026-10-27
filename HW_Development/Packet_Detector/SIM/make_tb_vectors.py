@@ -7,6 +7,7 @@ testbench, with the bit-true model's expected outputs for every sample:
 
   work/<name>_s<stage>/cfg.txt       input_stage dc_shift eta_hi_sq eta_lo_sq qual_len
                                      blank_len arm_holdoff n_samples n_trig n_cfo n_cfo_events
+                                     tone_lin
   work/<name>_s<stage>/in.txt        input samples, "iiii qqqq" (16-bit hex, two's complement)
   work/<name>_s<stage>/exp_lpf.txt   detector input (LPF output), "iii qqq" (12-bit hex)
   work/<name>_s<stage>/exp_dbg.txt   per sample "mmmm bbbb": dbg_metric, dbg_bits (hex)
@@ -15,12 +16,15 @@ testbench, with the bit-true model's expected outputs for every sample:
                                      A128 re im, A256 re im (37-bit), ang16 ang32 ang128 ang256,
                                      cfo_inc (32-bit). Windows ending in the last LANE_DELAY
                                      samples are left out (the RTL lane needs those samples).
+  work/<name>_s<stage>/exp_tone.txt  per event, same windows (hex): t, cfo_inc, the four angles,
+                                     tone num, tone den (40-bit), fail (0/1)
 
     python make_tb_vectors.py ../TestVectors/rep3.json --input-stage 1
     python make_tb_vectors.py ../TestVectors/rep3.json --input-stage 0 --max-samples 50000
     python make_tb_vectors.py stress --input-stage 1      # synthetic full-scale stress vector
+    python make_tb_vectors.py cfo --n-cfo 4096            # override the CFO window length
     python make_tb_vectors.py cfo --input-stage 1         # 40 real packets, CFO +-600 kHz, SNR -6..30 dB
-    python make_tb_vectors.py units                       # CORDIC + cascade unit-test vectors
+    python make_tb_vectors.py units                       # CORDIC, cascade, tone-check unit tests
 """
 from __future__ import annotations
 
@@ -111,11 +115,70 @@ def units_vectors(out_root: Path, seed: int = 3) -> Path:
     (out / "cascade.txt").write_text("".join(
         f"{a & 0xFFFF:04x} {b & 0xFFFF:04x} {c & 0xFFFF:04x} {d & 0xFFFF:04x} "
         f"{-ref.cfo_cascade({16: a, 32: b, 128: c, 256: d}) & 0xFFFFFFFF:08x}\n" for a, b, c, d in sets))
-    print(f"{out}: {len(vec)} CORDIC vectors, {len(sets)} cascade angle sets")
+    n_tone = tone_vectors(out, rng)
+    print(f"{out}: {len(vec)} CORDIC vectors, {len(sets)} cascade angle sets, {n_tone} tone-check windows")
     return out
 
 
-def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, holdoff: int | None) -> Path:
+def tone_vectors(out: Path, rng) -> int:
+    """Tone-check windows: header "N cfo_inc lin num den fail" (hex), then N samples "iii qqq".
+    Random, full-scale and silent windows, single tones on a bin (largest DFT values), f_hat at
+    the wrap points, N = 128 / 2048 / 4096, and thresholds on and just past the decision."""
+    m24 = 1 << 24
+    lin_max = ref.tone_thresh_lin(ref.TONE_THRESH_MAX_Q8)
+    cases = []
+
+    def tone(n, f, amp=2047.0, ph=0.0):
+        k = np.arange(n)
+        return amp * np.exp(1j * (2 * np.pi * f * k / m24 + ph))
+
+    def q12(z):
+        return np.stack([np.clip(np.round(z.real), -2048, 2047), np.clip(np.round(z.imag), -2048, 2047)],
+                        axis=1).astype(np.int64)
+
+    for i in range(64):
+        n = (128, 2048, 4096, int(rng.integers(128, 4097)))[i % 4]
+        f = int(rng.integers(-(1 << 23), 1 << 23))
+        if i in (0, 1, 2, 3):
+            f = (0, 1 << 23, m24 - 1, -(1 << 23))[i]
+        kind = i % 8
+        if kind == 0:
+            x = rng.integers(-2048, 2048, (n, 2))                          # random full scale
+        elif kind == 1:
+            m = int(rng.choice(ref.TONE_OFFSETS + ref.NOISE_REF_OFFSETS))
+            x = q12(tone(n, f + m, 2047.0 * np.sqrt(2), rng.uniform(0, 6.3)))   # one bin, clipped corners
+        elif kind == 2:
+            x = q12(sum(tone(n, f + o, 700.0, rng.uniform(0, 6.3)) for o in ref.TONE_OFFSETS)
+                    + rng.normal(0, 30, n) + 1j * rng.normal(0, 30, n))    # Preamble-A-like + noise
+        elif kind == 3:
+            x = np.zeros((n, 2), np.int64)                                # silence: num = den = 0
+        elif kind == 4:
+            x = np.full((n, 2), -2048) if i % 16 == 4 else np.tile([[2047, -2048]], (n, 1))  # DC
+        elif kind == 5:
+            x = rng.integers(-1, 2, (n, 2))                               # tiny: no shift
+        elif kind == 6:
+            x = q12(tone(n, int(rng.integers(0, m24)), 1500.0) + rng.normal(0, 200, n)
+                    + 1j * rng.normal(0, 200, n))                         # CW off the bins + noise
+        else:
+            x = np.where((np.arange(n) % 2 == 0)[:, None], [[2047, 2047]], [[-2048, -2048]])  # Nyquist
+        x = np.asarray(x, np.int64)
+        num, den, _, _ = ref.tone_check(x[:, 0], x[:, 1], f)
+        lins = [0, lin_max, int(rng.integers(1, lin_max + 1))]
+        if den > 0 and (num << 16) // den < lin_max:
+            b = (num << 16) // den                                        # b * den <= num << 16
+            lins += [b, b + 1]
+        for lin in lins[(i % 3):(i % 3) + 1] + lins[3:]:
+            fail = int(lin != 0 and (num << 16) < lin * den)
+            cases.append((n, -f, lin, num, den, fail, x))
+    with open(out / "tone.txt", "w") as fh:
+        for n, inc, lin, num, den, fail, x in cases:
+            fh.write(f"{n:04x} {inc & 0xFFFFFFFF:08x} {lin:06x} {num:010x} {den:010x} {fail:x}\n")
+            fh.write("".join(f"{a & 0xFFF:03x} {b & 0xFFF:03x}\n" for a, b in x))
+    return len(cases)
+
+
+def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, holdoff: int | None,
+           n_cfo: int | None = None) -> Path:
     if str(vector) == "units":
         return units_vectors(out_root)
     if str(vector) == "cfo":
@@ -140,6 +203,8 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
         iq = np.fromfile(vector.with_name(name), dtype="<i2").reshape(-1, 2).astype(np.int64)
     if holdoff is not None:
         p.arm_holdoff = holdoff
+    if n_cfo is not None:
+        p.n_cfo = n_cfo
     if max_samples:
         iq = iq[:max_samples]
 
@@ -148,8 +213,9 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     trig = [e.t_trig for e in res.events]
     n = iq.shape[0]
     xi, xq = lpf[:, 0].astype(np.int64), lpf[:, 1].astype(np.int64)
-    cfo_lines = []
-    for e in res.events:
+    cfo_lines, tone_lines = [], []
+    lin = ref.tone_thresh_lin(p.tone_thresh) if p.tone_thresh > 0 else 0
+    for e, x in zip(res.events, res.extra):
         if not e.status & pr.EV_CFO_VALID or e.t_trig + p.n_cfo + ref.LANE_DELAY > n:
             continue
         acc = ref.cfo_accumulators(xi, xq, e.t_trig, p.n_cfo)
@@ -160,21 +226,28 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
         vals += [f"{a & 0xFFFF:04x}" for a in (e.ang16, e.ang32, e.ang128, e.ang256)]
         vals.append(f"{e.cfo_inc & 0xFFFFFFFF:08x}")
         cfo_lines.append(" ".join(vals) + "\n")
+        m40 = (1 << 40) - 1
+        tone_lines.append(f"{e.t_trig & 0xFFFFFFFF:08x} {e.cfo_inc & 0xFFFFFFFF:08x} "
+                          + " ".join(f"{a & 0xFFFF:04x}" for a in (e.ang16, e.ang32, e.ang128, e.ang256))
+                          + f" {x['tone_num'] & m40:010x} {x['tone_den'] & m40:010x}"
+                          + f" {1 if e.status & pr.EV_TONE_FAIL else 0}\n")
 
     out = out_root / f"{vector.stem}_s{stage}"
     out.mkdir(parents=True, exist_ok=True)
     (out / "cfg.txt").write_text(
         f"{p.input_stage} {p.dc_shift} {p.eta_hi_sq} {p.eta_lo_sq} {p.qual_len} {p.blank_len} "
-        f"{p.arm_holdoff} {iq.shape[0]} {len(trig)} {p.n_cfo} {len(cfo_lines)}\n")
+        f"{p.arm_holdoff} {iq.shape[0]} {len(trig)} {p.n_cfo} {len(cfo_lines)} {lin}\n")
     u16 = (iq & 0xFFFF)
     np.savetxt(out / "in.txt", u16, fmt="%04x")
     np.savetxt(out / "exp_lpf.txt", lpf & 0xFFF, fmt="%03x")
     np.savetxt(out / "exp_dbg.txt", np.stack([res.metric, res.bits], axis=1).astype(np.int64), fmt="%04x")
     (out / "exp_trig.txt").write_text("".join(f"{t}\n" for t in trig))
     (out / "exp_cfo.txt").write_text("".join(cfo_lines))
+    (out / "exp_tone.txt").write_text("".join(tone_lines))
+    n_fail = sum(int(l.split()[-1]) for l in tone_lines)
     shown = trig if len(trig) <= 12 else trig[:12] + ["..."]
     print(f"{out}: {iq.shape[0]} samples, input_stage {stage}, {len(trig)} trigger(s) at {shown}, "
-          f"{len(cfo_lines)} CFO result(s)")
+          f"{len(cfo_lines)} CFO result(s), {n_fail} failing the tone check")
     return out
 
 
@@ -185,9 +258,10 @@ def main(argv=None) -> int:
     ap.add_argument("--input-stage", type=int, choices=(0, 1), default=1)
     ap.add_argument("--max-samples", type=int)
     ap.add_argument("--holdoff", type=int, help="override arm_holdoff (e.g. small, to get many triggers)")
+    ap.add_argument("--n-cfo", type=int, help="override n_cfo (128..4096)")
     ap.add_argument("--out", type=Path, default=HERE / "work")
     a = ap.parse_args(argv)
-    export(a.vector, a.input_stage, a.max_samples, a.out, a.holdoff)
+    export(a.vector, a.input_stage, a.max_samples, a.out, a.holdoff, a.n_cfo)
     return 0
 
 
