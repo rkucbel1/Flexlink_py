@@ -137,9 +137,32 @@ python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json --pl
 python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json                   # detector
 python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json --input-stage 1 --debug --plot
 python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 --chunk 50000
-python pd_board_regression.py          # 21 cases vs the bit-true model, a few minutes
+python pd_board_regression.py          # 29 cases vs the bit-true model, a few minutes
 python pd_noise_rate.py --seconds 20   # false-trigger rate on noise (spec 3.3)
 ```
+
+Step 6: **40 → 20 Msps half-band decimator in the PL** (`RTL/pd_halfband.v`, `input_stage 2`).
+The board takes 40 Msps samples, as the radio delivers them. Bit-true Monte Carlo: same Pd and
+CFO error as the simulator's `resample_poly` at every SNR; without a filter Pd at −12 dB falls
+to 0.37 (`BITTRUE.md`, change 7). Verilator: the 40-packet CFO sweep and the stress vector at
+40 Msps match the model; 5 of 5 injected faults caught. Co-simulation: `pd_hw_test.py
+--input-stage 2` and the stage-2 regression cases pass. Bitstream ID 2.0, firmware build 4.
+The test vectors need rebuilding once for the 40 Msps file (the existing files stay
+byte-identical):
+
+```bash
+cd PC
+python pd_make_vector.py --repeat 3 --seed 2 --out ../TestVectors/rep3
+python pd_make_vector.py --seed 1                     # Waveform_Payload_DefectsModeled_Tx
+python pd_hw_test.py ../TestVectors/rep3.json --input-stage 2 --debug
+```
+
+Step 7: **power floor** (`BITTRUE.md`, change 8). At very high SNR with the gain fixed for the
+packet (+60 dB), the idle noise drops to about 0.5 LSB and the few isolated ±1 values that are
+left can look periodic: 2 of 200 packets triggered early. A sample now has to have R0 and R_D
+of at least 1024 (2 LSB rms on average) to count as above η_hi. Pd and every real-packet
+result unchanged; +30 to +65 dB and noise-free all clean. New vector `highsnr` (RTL and board
+regression), 5 of 5 injected faults caught.
 
 **Board regression** (`PC/pd_board_regression.py`): the RTL simulation's coverage on the board.
 Each case runs on the board and, with the same commands, through `pd_board_emulator`'s logic
@@ -156,3 +179,14 @@ ports plus an AXI-Lite port for the registers (spec 5.2) and the event FIFO. The
 then writes `SET_PARAMS` to those registers, RUN streams the samples through the detector
 (debug records via S2MM), and reads the events back. The HDL gets an xsim testbench driven by
 the same test vectors and checked against `PC/pd_reference.py` before it goes on the board.
+
+## Known issue (fixed): corrupted samples on LOAD / READ
+
+Firmware builds 4-8 replaced about 0.13 % of the samples with 0x404, 0x408, 0x624 or 0x628
+(LOOPBACK FAIL in `pd_hw_test.py`). Cause: the 2025.2 standalone BSP's interrupt entry does not
+save the VFP/NEON registers, and the Ethernet interrupt handler uses them (a `memcpy` of a
+register-offset table in `XEmacPs_GetQxOffset`). An interrupt in the middle of a `memcpy` in the
+main loop left those values in the copied data. `FW/build_firmware.py` now patches the
+platform's `asm_vectors.S` to always save them, gives the IRQ stack 4 KB, and checks the built
+ELF ("IRQ handler saves the VFP registers: OK"). Diagnostics kept for the future:
+`PC/pd_load_diag.py`, `pd_memtest.py`, `pd_reg_diag.py`, `pd_bisect.py`, `pd_where.py`.

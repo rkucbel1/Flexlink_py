@@ -1,8 +1,9 @@
 {
-  "format": "int16 I,Q interleaved, little-endian, 12-bit values, 20 Msps",
+  "format": "int16 I,Q interleaved, little-endian, 12-bit values, 20 Msps (_40.bin: 40 Msps)",
   "files": {
     "lpf_out": "rep3.bin",
-    "decimated": "rep3_dec.bin"
+    "decimated": "rep3_dec.bin",
+    "input40": "rep3_40.bin"
   },
   "source": "Waveform_Payload_DefectsModeled_Tx.h5",
   "ray": 1,
@@ -28,13 +29,19 @@
   "defects": {
     "DefectsApplied": "Multipath,TimingOffset,TimingDrift,Freq_Offset,CW_Interferer,PhaseNoise,ThermalNoise,DC_Offset,IQ_Imbalance",
     "FrequencyOffset": 12000.0,
-    "SNR_dB": -8.0,
-    "MeasuredSNR_dB": -7.290189597167203,
-    "Sample_Offset": -1.0,
-    "Drift_ppm": 10.0,
+    "SNR_dB": [
+      -8.0
+    ],
+    "MeasuredSNR_dB": [
+      -7.290189597167203
+    ],
+    "Sample_Offset": -1,
+    "Drift_ppm": 10,
     "DCOffset_dBc": -30.0,
     "CW_Frequency": 1100000.0,
-    "CW_Level_dBc": -20.0
+    "CW_Level_dBc": -20.0,
+    "MultipathModel": "ETU",
+    "RandomSeed": -1
   },
   "truth": [
     {
@@ -126,6 +133,77 @@
       }
     }
   ],
+  "expected_events_s2": [
+    {
+      "t_trig": 3410,
+      "cfo_inc": -10119,
+      "cfo_valid_cnt": 5458,
+      "tone_db_q8": 6324,
+      "status": 1,
+      "ang16": 307,
+      "ang32": 1248,
+      "ang128": 5377,
+      "ang256": 10119,
+      "f_hat_hz": 12062.788009643555,
+      "tone_db": 24.701789372486445,
+      "tone_num": 159544973115,
+      "tone_den": 540386123,
+      "lag_estimates_hz": {
+        "16": 5855.560302734375,
+        "32": 11901.85546875,
+        "128": 12819.766998291016,
+        "256": 12062.788009643555
+      }
+    },
+    {
+      "t_trig": 103429,
+      "cfo_inc": -10112,
+      "cfo_valid_cnt": 105477,
+      "tone_db_q8": 6341,
+      "status": 1,
+      "ang16": 313,
+      "ang32": 1246,
+      "ang128": 5369,
+      "ang256": 10112,
+      "f_hat_hz": 12054.443359375,
+      "tone_db": 24.768618313159134,
+      "tone_num": 39907959480,
+      "tone_den": 133106018,
+      "lag_estimates_hz": {
+        "16": 5970.001220703125,
+        "32": 11882.781982421875,
+        "128": 12800.69351196289,
+        "256": 12054.443359375
+      }
+    },
+    {
+      "t_trig": 203461,
+      "cfo_inc": -10079,
+      "cfo_valid_cnt": 205509,
+      "tone_db_q8": 6378,
+      "status": 1,
+      "ang16": 322,
+      "ang32": 1272,
+      "ang128": 5353,
+      "ang256": 10079,
+      "f_hat_hz": 12015.104293823242,
+      "tone_db": 24.914804485150412,
+      "tone_num": 160005464064,
+      "tone_den": 516005541,
+      "lag_estimates_hz": {
+        "16": 6141.66259765625,
+        "32": 12130.7373046875,
+        "128": 12762.54653930664,
+        "256": 12015.104293823242
+      }
+    }
+  ],
+  "samples_40": 600116,
+  "quantisation_40": {
+    "backoff_db": 12.0,
+    "scale": 317.28094409274496,
+    "clipped_values": 0
+  },
   "simulator_crosscheck": [
     {
       "t_trig": 3400,

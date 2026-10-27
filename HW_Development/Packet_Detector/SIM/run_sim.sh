@@ -7,6 +7,8 @@
 #
 #   ./run_sim.sh                                   # rep3, input_stage 1, gaps up to 3 clocks, xsim
 #   ./run_sim.sh ../TestVectors/rep3.json 0        # input_stage 0 (LPF output in)
+#   ./run_sim.sh cfo 2                             # input_stage 2 (40 Msps in, half-band)
+#   ./run_sim.sh highsnr 2                         # packets at +40..+65 dB, near-silent idle
 #   GAP=0 ./run_sim.sh                             # one sample per clock
 #   FIXGAP=1 GAP=4 ./run_sim.sh stress 1           # exactly 5 clocks per sample (20 Msps): no stalls
 #   SIM=verilator ./run_sim.sh                     # Verilator instead of xsim
@@ -44,7 +46,7 @@ if [[ "$VEC" == units ]]; then
   RTL=(../RTL/pd_cordic.v ../RTL/pd_cfo_cascade.v ../RTL/pd_tone_rom.v ../RTL/pd_sdp_ram.v ../RTL/pd_tone_check.v)
 else
   TOP=tb_pd_detect; TB=tb_pd_detect.v
-  RTL=(../RTL/pd_dc_blocker.v ../RTL/pd_lpf.v ../RTL/pd_div16.v ../RTL/pd_detect_core.v
+  RTL=(../RTL/pd_halfband.v ../RTL/pd_dc_blocker.v ../RTL/pd_lpf.v ../RTL/pd_div16.v ../RTL/pd_detect_core.v
        ../RTL/pd_cordic.v ../RTL/pd_cfo_cascade.v ../RTL/pd_cfo_lane.v ../RTL/pd_tone_rom.v
        ../RTL/pd_sdp_ram.v ../RTL/pd_tone_check.v ../RTL/pd_detect_top.v)
 args=("$VEC" --input-stage "$STAGE")

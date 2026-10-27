@@ -10,15 +10,18 @@ bit-true model with the board's RUN semantics). Every RUN reply must match: the 
 decision exact) and, for cases with debug, every debug record.
 
 Cases (the RTL simulation's coverage, on the board):
-  rep3 / defects     real packets from TestVectors/, both input stages, debug
-  cfo                40 real packets, CFO +-600 kHz, SNR -6..30 dB (needs h5py and the
-                     simulator project, as pd_bittrue_check.py)
+  rep3 / defects     real packets from TestVectors/, all three input stages (s2 = 40 Msps,
+                     the board's half-band; needs vectors rebuilt with pd_make_vector.py), debug
+  cfo                40 real packets, CFO +-600 kHz, SNR -6..30 dB, at 20 and 40 Msps (needs
+                     h5py and the simulator project, as pd_bittrue_check.py)
+  highsnr            real packets at +40, +55, +60, +65 dB and noise-free: near-silent idle,
+                     where the power floor acts (20 and 40 Msps)
   stress             synthetic full-scale vector: saturation, den = 0, many triggers;
                      holdoff 1, N_CFO 128 / 4096, tone check off / 24 dB, DC blocker off / short
   pieces             rep3 in uneven RUNs, with windows split across RUNs (truncated events)
   noise_k            noise only, 5 x 0.2 s: false-trigger rate (they should all fail the tone check)
 
-    python pd_board_regression.py                         # board at 192.168.50.10
+    python pd_board_regression.py                         # board at 192.168.50.10 (29 cases)
     python pd_board_regression.py --only stress,pieces    # some cases (substring match)
     python pd_board_regression.py --quick                 # one short noise record
     python pd_board_regression.py --list
@@ -55,7 +58,10 @@ DEFAULT_HOST = hw.DEFAULT_HOST
 # --------------------------------------------------------------------------------------- #
 def vector_from_json(name: str, stage: int):
     meta = json.loads((ROOT / "TestVectors" / f"{name}.json").read_text())
-    f = meta["files"]["decimated"] if stage == 1 else meta["files"]["lpf_out"]
+    key = {0: "lpf_out", 1: "decimated", 2: "input40"}[stage]
+    if key not in meta["files"]:
+        raise FileNotFoundError(f"{name}.json has no {key} file - rebuild it with pd_make_vector.py")
+    f = meta["files"][key]
     iq = np.fromfile(ROOT / "TestVectors" / f, "<i2").reshape(-1, 2)
     known = set(pr.Params.__dataclass_fields__)
     p = pr.Params(**{k: v for k, v in meta["params"].items() if k in known})
@@ -80,17 +86,28 @@ def cases(quick: bool):
             setattr(p, k, v)
         return p
 
-    for stage in (0, 1):
-        yield (f"rep3_s{stage}", "3 real packets", lambda s=stage: vector_from_json("rep3", s), None, True)
+    for stage in (0, 1, 2):
+        yield (f"rep3_s{stage}", "3 real packets" + (" at 40 Msps" if stage == 2 else ""),
+               lambda s=stage: vector_from_json("rep3", s), None, True)
     yield ("defects_s1", "Tx defects file", lambda: vector_from_json("Waveform_Payload_DefectsModeled_Tx", 1), None, True)
+    yield ("defects_s2", "Tx defects file at 40 Msps", lambda: vector_from_json("Waveform_Payload_DefectsModeled_Tx", 2), None, True)
 
     def cfo(stage):
-        iq = mk.cfo_sweep_vector()
+        iq = mk.cfo_sweep_vector(rate40=stage == 2)
         if stage == 0:
             iq = ref.front_end(iq, 10)
         return iq.astype(np.int16), p_of(arm_holdoff=4000, input_stage=stage)
     yield ("cfo_s1", "40 packets, CFO +-600 kHz, SNR -6..30 dB", lambda: cfo(1), None, True)
+    yield ("cfo_s2", "the same at 40 Msps", lambda: cfo(2), None, True)
     yield ("cfo_s0_n4096", "same, N_CFO 4096", lambda: (cfo(0)[0], p_of(arm_holdoff=4000, n_cfo=4096)), None, False)
+
+    def high(stage):
+        iq = mk.high_snr_vector(rate40=stage == 2)
+        if stage == 0:
+            iq = ref.front_end(iq, 10)
+        return iq.astype(np.int16), p_of(arm_holdoff=4000, input_stage=stage)
+    yield ("highsnr_s1", "30 packets at +40..+65 dB and noise-free", lambda: high(1), None, True)
+    yield ("highsnr_s2", "the same at 40 Msps", lambda: high(2), None, True)
 
     st = lambda: mk.stress_vector().astype(np.int16)                      # noqa: E731
     yield ("stress_s1", "full-scale stress, holdoff 500", lambda: (st(), p_of(arm_holdoff=500, input_stage=1)), None, True)
@@ -101,6 +118,8 @@ def cases(quick: bool):
     yield ("stress_s1_tone24", "stress, tone threshold 24 dB", lambda: (st(), p_of(arm_holdoff=1, tone_thresh=24 * 256, input_stage=1)), None, False)
     yield ("stress_s1_dc0", "stress, DC blocker off", lambda: (st(), p_of(arm_holdoff=1, dc_shift=0, input_stage=1)), None, True)
     yield ("stress_s1_dc4", "stress, DC blocker shift 4", lambda: (st(), p_of(arm_holdoff=1, dc_shift=4, input_stage=1)), None, True)
+    yield ("stress_s2_hold1", "stress at 40 Msps, holdoff 1", lambda: (st(), p_of(arm_holdoff=1, input_stage=2)), None, True)
+    yield ("stress_s2_n128", "stress at 40 Msps, N_CFO 128", lambda: (st(), p_of(arm_holdoff=1, n_cfo=128, input_stage=2)), None, False)
     yield ("rep3_s1_hold300", "rep3, re-arm after N_CFO", lambda: (vector_from_json("rep3", 1)[0], p_of(arm_holdoff=300, input_stage=1)), None, False)
 
     def pieces():
@@ -108,6 +127,8 @@ def cases(quick: bool):
         return iq, p
     yield ("pieces_s1", "rep3 in 8 uneven RUNs, windows split", pieces,
            [3401, 2000, 46, 1, 100000, 98000, 2000, None], True)
+    yield ("pieces_s2", "rep3 at 40 Msps in 8 uneven (even) RUNs", lambda: vector_from_json("rep3", 2),
+           [6802, 4000, 92, 2, 200000, 196000, 4000, None], True)
     yield ("pieces_s1_end", "rep3 cut inside a window (truncated)", lambda: (vector_from_json("rep3", 1)[0][:5000], vector_from_json("rep3", 1)[1]),
            None, True)
     # noise: independent 4M-sample records (0.2 s each; the model needs ~1 GB per 4M samples)
@@ -146,7 +167,7 @@ def session(target, iq: np.ndarray, p: pr.Params, sizes: list[int], debug: bool,
         dbg = None
         if debug:
             if board:
-                dbg = target.get_debug(done)
+                dbg = target.get_debug(done // (2 if p.input_stage == 2 else 1))
             else:
                 dbg = target.b.debug.copy()       # the whole capture (GET_DEBUG is limited to 1 MB)
         out.append((evs, done, dbg))

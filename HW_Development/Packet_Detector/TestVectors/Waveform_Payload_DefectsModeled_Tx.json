@@ -1,8 +1,9 @@
 {
-  "format": "int16 I,Q interleaved, little-endian, 12-bit values, 20 Msps",
+  "format": "int16 I,Q interleaved, little-endian, 12-bit values, 20 Msps (_40.bin: 40 Msps)",
   "files": {
     "lpf_out": "Waveform_Payload_DefectsModeled_Tx.bin",
-    "decimated": "Waveform_Payload_DefectsModeled_Tx_dec.bin"
+    "decimated": "Waveform_Payload_DefectsModeled_Tx_dec.bin",
+    "input40": "Waveform_Payload_DefectsModeled_Tx_40.bin"
   },
   "source": "Waveform_Payload_DefectsModeled_Tx.h5",
   "ray": 1,
@@ -28,13 +29,19 @@
   "defects": {
     "DefectsApplied": "Multipath,TimingOffset,TimingDrift,Freq_Offset,CW_Interferer,PhaseNoise,ThermalNoise,DC_Offset,IQ_Imbalance",
     "FrequencyOffset": 12000.0,
-    "SNR_dB": -8.0,
-    "MeasuredSNR_dB": -7.290189597167203,
-    "Sample_Offset": -1.0,
-    "Drift_ppm": 10.0,
+    "SNR_dB": [
+      -8.0
+    ],
+    "MeasuredSNR_dB": [
+      -7.290189597167203
+    ],
+    "Sample_Offset": -1,
+    "Drift_ppm": 10,
     "DCOffset_dBc": -30.0,
     "CW_Frequency": 1100000.0,
-    "CW_Level_dBc": -20.0
+    "CW_Level_dBc": -20.0,
+    "MultipathModel": "ETU",
+    "RandomSeed": -1
   },
   "truth": [
     {
@@ -76,6 +83,35 @@
       }
     }
   ],
+  "expected_events_s2": [
+    {
+      "t_trig": 3420,
+      "cfo_inc": -10084,
+      "cfo_valid_cnt": 5468,
+      "tone_db_q8": 6383,
+      "status": 1,
+      "ang16": 326,
+      "ang32": 1260,
+      "ang128": 5350,
+      "ang256": 10084,
+      "f_hat_hz": 12021.064758300781,
+      "tone_db": 24.932974530666222,
+      "tone_num": 40020372405,
+      "tone_den": 128523834,
+      "lag_estimates_hz": {
+        "16": 6217.95654296875,
+        "32": 12016.29638671875,
+        "128": 12755.393981933594,
+        "256": 12021.064758300781
+      }
+    }
+  ],
+  "samples_40": 200038,
+  "quantisation_40": {
+    "backoff_db": 12.0,
+    "scale": 317.35821673450374,
+    "clipped_values": 0
+  },
   "simulator_crosscheck": [
     {
       "t_trig": 3410,

@@ -6,6 +6,8 @@
 //   comparator: common floor shift s so the largest of |Re P|, |Im P|, R0, R_D fits 18-bit
 //     signed; num = (Re'^2 + Im'^2) << 16, den = R0' * R_D'
 //     above_hi = num > ETA_HI_SQ * den,  below_lo = num < ETA_LO_SQ * den
+//   power floor: low = R0 < E_MIN or R_D < E_MIN (exact sums, E_MIN = 1024): a low sample is
+//     never above_hi and always below_lo (near-silent input, pd_reference.E_MIN)
 //   blanking (n < BLANK_LEN), qualifier (count of above_hi, reset by below_lo, held between),
 //   trigger when the count reaches QUAL_LEN, re-arm max(ARM_HOLDOFF, N_CFO, 1) samples after
 //   t_trig (the detector cannot re-arm before the CFO window is over).
@@ -15,7 +17,7 @@
 // processed samples from reset; t_trig is the index of the triggering sample. Samples before
 // index 0 count as zero (delay lines reset to zero, the history RAM is masked until full).
 // Outputs: trig (one-clock pulse) with t_trig; a debug stream (one record per input sample):
-//   dbg_metric, dbg_bits = {11'b0, blank, trig, armed, below_lo, above_hi}.
+//   dbg_metric, dbg_bits = {10'b0, low_power, blank, trig, armed, below_lo, above_hi}.
 `timescale 1ns / 1ps
 `default_nettype none
 
@@ -43,6 +45,7 @@ module pd_detect_core (
 );
     localparam integer L = 256;
     localparam integer D = 32;
+    localparam signed [32:0] E_MIN = 33'sd1024;
     integer k;
 
     // ------------------------------------------------------------------ stage 1: x(n), x(n-32)
@@ -154,11 +157,13 @@ module pd_detect_core (
     reg [31:0]        m1, m2;
     reg signed [32:0] s6_pr, s6_pi, s6_r0, s6_rd;
     reg               v6;
+    reg               low6, low7, low8, low9, low10, low11;
     always @(posedge clk) begin
         if (!rst_n) v6 <= 1'b0;
         else begin
             v6 <= v5;
             if (v5) begin
+                low6 <= (s5_r0 < E_MIN) || (s5_rd < E_MIN);
                 m1 <= (abs33(s5_pr) > abs33(s5_pi)) ? abs33(s5_pr) : abs33(s5_pi);
                 m2 <= (s5_r0[31:0] > s5_rd[31:0]) ? s5_r0[31:0] : s5_rd[31:0];
                 s6_pr <= s5_pr; s6_pi <= s5_pi; s6_r0 <= s5_r0; s6_rd <= s5_rd;
@@ -185,6 +190,7 @@ module pd_detect_core (
         else begin
             v7 <= v6;
             if (v6) begin
+                low7 <= low6;
                 s7 <= shift_of((m1 > m2) ? m1 : m2);
                 s7_pr <= s6_pr; s7_pi <= s6_pi; s7_r0 <= s6_r0; s7_rd <= s6_rd;
             end
@@ -204,6 +210,7 @@ module pd_detect_core (
         else begin
             v8 <= v7;
             if (v7) begin
+                low8 <= low7;
                 p8_re <= sh_pr[17:0]; p8_im <= sh_pi[17:0];
                 r8_0  <= sh_r0[17:0]; r8_d  <= sh_rd[17:0];
             end
@@ -219,6 +226,7 @@ module pd_detect_core (
         else begin
             v9 <= v8;
             if (v8) begin
+                low9  <= low8;
                 sq_re <= p8_re * p8_re;
                 sq_im <= p8_im * p8_im;
                 den9  <= r8_0 * r8_d;
@@ -235,6 +243,7 @@ module pd_detect_core (
         else begin
             v10 <= v9;
             if (v9) begin
+                low10  <= low9;
                 num10  <= {(sq_re + sq_im), 16'd0};
                 thr_hi <= eta_hi_sq * den9;
                 thr_lo <= eta_lo_sq * den9;
@@ -253,8 +262,9 @@ module pd_detect_core (
         else begin
             v11 <= v10;
             if (v10) begin
-                above11 <= num10 > thr_hi;
-                below11 <= num10 < thr_lo;
+                above11 <= (num10 > thr_hi) && !low10;
+                below11 <= (num10 < thr_lo) || low10;
+                low11   <= low10;
                 num11   <= num10;
                 den11   <= den10;
             end
@@ -289,7 +299,7 @@ module pd_detect_core (
                 arm_at <= blank_len;         // follow the register until the first sample
             if (v11) begin
                 n12    <= n12 + 32'd1;
-                bits12 <= {11'd0, blank, fire, armed, below11, above11};
+                bits12 <= {10'd0, low11, blank, fire, armed, below11, above11};
                 num12  <= num11;
                 den12  <= den11;
                 if (n12 == 32'd0) arm_at <= blank_len;

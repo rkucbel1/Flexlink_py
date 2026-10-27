@@ -8,9 +8,15 @@ word lengths were chosen with pd_bittrue_check.py; the results are in ../BITTRUE
 
 Datapath (one complex sample per step, I and Q are independent rails where it applies)
 
-  x_dec  12-bit signed I/Q, 20 Msps (decimated, AGC-normalised radio samples)
+  x40    12-bit signed I/Q, 40 Msps (radio samples)                    input_stage 2
     |
-    |  front_end()      input_stage 1 only; with input_stage 0 the PC does this and the
+  half-band decimator   43 taps, 18-bit coefficients HB_Q (exact unity DC gain), causal:
+                         y(m) = sat12(rnd(sum_k HB_Q[k] * x40(2m+1-k) >> HB_FRAC)): one
+                         output per input pair, after its second sample
+    |
+  x_dec  12-bit signed I/Q, 20 Msps (decimated, AGC-normalised radio samples)   input_stage 1
+    |
+    |  front_end()      input_stage 1 and 2; with input_stage 0 the PC does this and the
     v                    board receives x_lpf directly
   DC blocker            acc(n) = acc(n-1) - rnd(acc(n-1) >> k) + ((x(n) - x(n-1)) << DC_FRAC)
                          y(n)   = sat12(rnd(acc(n) >> DC_FRAC)),  k = dc_shift (0 = bypass)
@@ -24,6 +30,9 @@ Datapath (one complex sample per step, I and Q are independent rails where it ap
                          signed; P', R0', RD' = value >> s (floor);
                          above_hi: (Re'^2 + Im'^2) << 16 >  ETA_HI_SQ * R0' * RD'
                          below_lo: (Re'^2 + Im'^2) << 16 <  ETA_LO_SQ * R0' * RD'
+    power floor          low = R0 < E_MIN or R_D < E_MIN (exact sums): such a sample is never
+                         above_hi and always below_lo (near-silent input: a few isolated LSBs
+                         make the normalised ratio meaningless)
     blanking / qualifier / holdoff  -> t_trig
     CFO accumulators     A_lag = s_lag * sum_{n=t+lag..t+N-1} x(n) x*(n-lag), lag 16/32/128/256
     CORDIC (vectoring)   16-bit angle of each A_lag
@@ -60,7 +69,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from pd_protocol import (DBG_ABOVE_HI, DBG_ARMED, DBG_BELOW_LO, DBG_BLANK, DBG_TRIG, EV_CFO_VALID,
+from pd_protocol import (DBG_ABOVE_HI, DBG_ARMED, DBG_BELOW_LO, DBG_BLANK, DBG_LOW_POWER, DBG_TRIG, EV_CFO_VALID,
                          EV_TONE_FAIL, EV_TRUNCATED, FS, NCO_BITS, EventRecord, Params)
 
 # --------------------------------------------------------------------------------------- #
@@ -81,6 +90,9 @@ LPF_DELAY = (len(H_LP) - 1) // 2          # 8 samples
 L = 256                                   # running-sum length
 D = 32                                    # detection lag
 CMP_BITS = 18                             # comparator input width (spec 5.3)
+E_MIN = 1024                              # power floor: R0 and R_D (256-sample sums of |x|^2) must
+#                                           reach this, an average of 4 LSB^2 (2 LSB rms), else the
+#                                           sample counts as below_lo (BITTRUE.md, change 8)
 
 CASCADE = ((16, -1), (32, 1), (128, 1), (256, 1))
 ANGLE_BITS = 16                           # CORDIC output: -32768..32767 = -pi..pi
@@ -190,6 +202,33 @@ def lpf(y: np.ndarray, coef=H_LP_Q, frac: int = LPF_FRAC) -> np.ndarray:
         if h:
             acc += h * _delay(y, k)
     return _sat(_rnd_shift(acc, frac))
+
+
+# 43-tap half-band, 40 -> 20 Msps: passband +-8.2 MHz (the 841 tones), ripple 0.0065 dB;
+# stopband from 11.8 MHz, 62.7 dB (18-bit coefficients, / 2^17). Designed as
+# the odd-phase filter of remez(22, [0, 0.41]) / 2, centre 1/2, odd taps scaled to sum 1/2
+# exactly, rounded, residue fixed symmetrically. Fixed table: never recomputed.
+HB_FRAC = 17
+_HB_HALF = (78, 0, -178, 0, 368, 0, -676, 0, 1148, 0, -1851, 0, 2894, 0, -4500, 0, 7238, 0,
+            -13212, 0, 41459, 65536)
+HB_Q = _HB_HALF + _HB_HALF[-2::-1]
+HB_TAPS = len(HB_Q)                       # 43
+HB_DELAY = (HB_TAPS - 1) // 2             # 21 input samples = 10.5 samples at 20 Msps
+assert sum(HB_Q) == 1 << HB_FRAC
+
+
+def halfband(x40) -> np.ndarray:
+    """40 Msps 12-bit I/Q (N, 2) -> 20 Msps 12-bit I/Q (N // 2, 2), bit-true:
+    y(m) = sat12(rnd(sum_k HB_Q[k] x(2m+1-k) >> HB_FRAC)), x(n < 0) = 0."""
+    x = np.asarray(x40, dtype=np.int64)
+    n = x.shape[0] // 2
+    acc = np.zeros((n,) + x.shape[1:], np.int64)
+    for k, h in enumerate(HB_Q):
+        if h:
+            idx = 2 * np.arange(n) + 1 - k
+            ok = idx >= 0
+            acc[ok] += h * x[idx[ok]]
+    return _sat(_rnd_shift(acc, HB_FRAC))
 
 
 def front_end(x_dec, dc_shift: int = 10) -> np.ndarray:
@@ -360,18 +399,22 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False) -> Result:
     """Run the detector over 12-bit I/Q samples (N, 2), starting from reset.
 
     With p.input_stage == 1 the samples are the decimated stream and go through front_end()
-    first; with 0 they are already the LPF output.
+    first; with 2 they are the 40 Msps stream and go through halfband() and front_end();
+    with 0 they are already the LPF output. Sample indices (t_trig, ...) are always at 20 Msps.
     """
     iq = as_iq(iq)
-    if p.input_stage == 1:
+    if p.input_stage == 2:
+        iq = halfband(iq)
+    if p.input_stage in (1, 2):
         iq = front_end(iq, p.dc_shift)
     xi, xq = iq[:, 0], iq[:, 1]
     n = xi.size
-    (pr, pi, r0, rd), _ = comparator_inputs(xi, xq)
+    (pr, pi, r0, rd), (_, _, r0_full, rd_full) = comparator_inputs(xi, xq)
+    low = (r0_full < E_MIN) | (rd_full < E_MIN)
     num = (pr * pr + pi * pi) << 16
     den = r0 * rd
-    above = num > p.eta_hi_sq * den
-    below = num < p.eta_lo_sq * den
+    above = (num > p.eta_hi_sq * den) & ~low
+    below = (num < p.eta_lo_sq * den) | low
     trig = find_triggers(above, below, p)
 
     if not 128 <= p.n_cfo <= 4096:
@@ -410,6 +453,7 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False) -> Result:
         bits = np.zeros(n, np.uint16)
         bits[above] |= DBG_ABOVE_HI
         bits[below] |= DBG_BELOW_LO
+        bits[low] |= DBG_LOW_POWER
         bits[:min(p.blank_len, n)] |= DBG_BLANK
         armed = np.zeros(n, bool)
         start = p.blank_len

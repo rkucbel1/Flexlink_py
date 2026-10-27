@@ -23,6 +23,8 @@ source ~/SiskinRF/Flexlink_py/.venv/bin/activate       # for make_tb_vectors.py 
 ./run_sim.sh ../TestVectors/rep3.json 0       # input_stage 0: LPF output in, front end bypassed
 ./run_sim.sh stress 1                         # synthetic full-scale stress vector, 34 triggers
 ./run_sim.sh cfo 1                            # 40 real packets, CFO ±600 kHz, SNR -6..30 dB: 80 CFO results
+./run_sim.sh cfo 2                            # the same packets at 40 Msps: half-band in front
+./run_sim.sh highsnr 2                        # 30 packets at +40..+65 dB and noise-free: the power floor
 ./run_sim.sh units                            # CORDIC, cascade and tone-check unit tests
 GAP=0 ./run_sim.sh stress 0                   # one sample per clock (the tone check stalls the input)
 FIXGAP=1 GAP=4 ./run_sim.sh stress 1          # exactly 5 clocks per sample = 20 Msps: no stalls

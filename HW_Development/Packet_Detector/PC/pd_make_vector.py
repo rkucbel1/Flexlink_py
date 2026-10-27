@@ -19,7 +19,12 @@ Turns a simulator waveform (.h5) into a test vector for the Zedboard packet dete
   7. Write (int16 I,Q interleaved, little-endian):
        <out>.bin      LPF output       (board input_stage 0: the PC did the front end)
        <out>_dec.bin  decimated input  (board input_stage 1: the board runs the front end)
-     and <out>.json (metadata, parameters, expected events). Both inputs give the same events.
+       <out>_40.bin   40 Msps input    (board input_stage 2: the board also decimates, with its
+                      half-band; only for a 40 Msps source). Quantised at 40 Msps with the same
+                      backoff, before any decimation.
+     and <out>.json (metadata, parameters, expected events). Inputs 0 and 1 give the same events
+     ("expected_events"); input 2 has its own ("expected_events_s2"): the half-band is not the
+     simulator's resample_poly, so samples and results differ slightly.
 
 Usage
     python pd_make_vector.py                                   # default Tx test file
@@ -227,14 +232,31 @@ def main(argv=None) -> int:
                 "freq": load_module(root / "Flexlink_BasicModules" / "Preamble" / "Receive_Get_Frequency_Offset.py")}
         sim = simulator_crosscheck(x_lpf, mods, p)
 
+    # 5b. 40 Msps input for input_stage 2: quantise before decimation, same backoff
+    iq40, res40, scale40, clipped40 = None, None, None, 0
+    if up == 2:
+        n40 = x_in.size - x_in.size % 2
+        rms40 = float(np.sqrt(np.mean(np.abs(x_in[:n40]) ** 2)))
+        scale40 = FULL_SCALE * 10 ** (-a.backoff / 20) / rms40 if rms40 > 0 else 1.0
+        f40 = np.stack([x_in[:n40].real, x_in[:n40].imag], axis=1) * scale40
+        clipped40 = int(np.count_nonzero(np.abs(f40) > FULL_SCALE))
+        iq40 = np.clip(np.round(f40), -FULL_SCALE - 1, FULL_SCALE).astype(np.int16)
+        p40 = Params(**{**p.as_dict(), "input_stage": 2})
+        res40 = ref.detect(iq40, p40)
+
     # 6. Write
     out.parent.mkdir(parents=True, exist_ok=True)
     iq.tofile(out.with_suffix(".bin"))
     dec_path = out.with_name(out.name + "_dec.bin")
     iq_dec.tofile(dec_path)
+    files = {"lpf_out": out.with_suffix(".bin").name, "decimated": dec_path.name}
+    if iq40 is not None:
+        p40_path = out.with_name(out.name + "_40.bin")
+        iq40.tofile(p40_path)
+        files["input40"] = p40_path.name
     meta = {
-        "format": "int16 I,Q interleaved, little-endian, 12-bit values, 20 Msps",
-        "files": {"lpf_out": out.with_suffix(".bin").name, "decimated": dec_path.name},
+        "format": "int16 I,Q interleaved, little-endian, 12-bit values, 20 Msps (_40.bin: 40 Msps)",
+        "files": files,
         "source": str(in_path.name), "ray": a.ray, "samples": int(iq.shape[0]),
         "sample_rate": 20e6,
         "front_end": {"decimator": "filter" if defects else "simple", "dc_shift": dc_shift,
@@ -249,6 +271,12 @@ def main(argv=None) -> int:
         "params": p.as_dict(),
         "expected_events": [{**vars(e), **{k: v for k, v in x.items() if k != "t_trig"}}
                             for e, x in zip(res.events, res.extra)],
+        "expected_events_s2": None if res40 is None else
+                              [{**vars(e), **{k: v for k, v in x.items() if k != "t_trig"}}
+                               for e, x in zip(res40.events, res40.extra)],
+        "samples_40": None if iq40 is None else int(iq40.shape[0]),
+        "quantisation_40": None if iq40 is None else {"backoff_db": a.backoff, "scale": scale40,
+                                                       "clipped_values": clipped40},
         "simulator_crosscheck": sim,
         "seed": a.seed,
     }
@@ -260,6 +288,11 @@ def main(argv=None) -> int:
           f"({iq.shape[0] / 20e6 * 1e3:.2f} ms), {a.repeat} packet(s), input rms {-a.backoff:.1f} dBFS, "
           f"{clipped} clipped values")
     print(f"Params {p.describe()}")
+    if res40 is not None:
+        print(f"40 Msps input {files['input40']}: {iq40.shape[0]} samples, {clipped40} clipped values; "
+              f"input_stage 2 events: " + ", ".join(
+                  f"t_trig {e.t_trig} f_hat {x['f_hat_hz']:.0f} Hz" if "f_hat_hz" in x else f"t_trig {e.t_trig}"
+                  for e, x in zip(res40.events, res40.extra)))
     true_cfo = attrs.get("FrequencyOffset")
     for i, (e, xx) in enumerate(zip(res.events, res.extra)):
         line = f"  ref event {i}: t_trig {e.t_trig}"

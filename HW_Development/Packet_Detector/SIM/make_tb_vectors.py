@@ -7,7 +7,7 @@ testbench, with the bit-true model's expected outputs for every sample:
 
   work/<name>_s<stage>/cfg.txt       input_stage dc_shift eta_hi_sq eta_lo_sq qual_len
                                      blank_len arm_holdoff n_samples n_trig n_cfo n_cfo_events
-                                     tone_lin
+                                     tone_lin n_out (detector samples: n_samples / 2 with stage 2)
   work/<name>_s<stage>/in.txt        input samples, "iiii qqqq" (16-bit hex, two's complement)
   work/<name>_s<stage>/exp_lpf.txt   detector input (LPF output), "iii qqq" (12-bit hex)
   work/<name>_s<stage>/exp_dbg.txt   per sample "mmmm bbbb": dbg_metric, dbg_bits (hex)
@@ -25,6 +25,8 @@ testbench, with the bit-true model's expected outputs for every sample:
     python make_tb_vectors.py stress --input-stage 1      # synthetic full-scale stress vector
     python make_tb_vectors.py cfo --n-cfo 4096            # override the CFO window length
     python make_tb_vectors.py cfo --input-stage 1         # 40 real packets, CFO +-600 kHz, SNR -6..30 dB
+    python make_tb_vectors.py cfo --input-stage 2         # the same at 40 Msps (half-band decimator)
+    python make_tb_vectors.py highsnr --input-stage 2     # 30 packets at +40..+65 dB and noise-free
     python make_tb_vectors.py units                       # CORDIC, cascade, tone-check unit tests
 """
 from __future__ import annotations
@@ -65,16 +67,32 @@ def stress_vector(seed: int = 7) -> np.ndarray:
     return np.clip(np.concatenate(seg), -2048, 2047).astype(np.int64)
 
 
-def cfo_sweep_vector(seed: int = 11, n_packets: int = 40) -> np.ndarray:
+def cfo_sweep_vector(seed: int = 11, n_packets: int = 40, rate40: bool = False) -> np.ndarray:
     """Real packets (Tx/Waveform_Payload_Tx.h5) back to back, each with its own CFO (uniform
-    +-600 kHz) and SNR (uniform -6..30 dB), decimated and quantised as in pd_bittrue_check."""
+    +-600 kHz) and SNR (uniform -6..30 dB), decimated and quantised as in pd_bittrue_check.
+    rate40: the same packets at 40 Msps, quantised before decimation (input stage 2)."""
     import pd_bittrue_check as chk
     rng = np.random.default_rng(seed)
     tx = chk.load_tx(chk.find_root(HERE))
     recs = []
     for _ in range(n_packets):
-        x20, _, _ = chk.make_trials(tx, float(rng.uniform(-6, 30)), 1, rng, cfo_max=600e3)
-        recs.append(chk.quantise(x20)[:, :, 0])
+        x20, _, _, x40 = chk.make_trials(tx, float(rng.uniform(-6, 30)), 1, rng, cfo_max=600e3, return40=True)
+        recs.append(chk.quantise(x40 if rate40 else x20)[:, :, 0])
+    return np.concatenate(recs).astype(np.int64)
+
+
+def high_snr_vector(seed: int = 13, per_snr: int = 6, rate40: bool = False) -> np.ndarray:
+    """Real packets at very high SNR (+40, +55, +60, +65 dB and noise-free), quantised per
+    packet at -12 dBFS: the idle noise between them is ~0.5 LSB or less, the case the power
+    floor (pd_reference.E_MIN) is for. rate40: at 40 Msps, quantised before decimation."""
+    import pd_bittrue_check as chk
+    rng = np.random.default_rng(seed)
+    tx = chk.load_tx(chk.find_root(HERE))
+    recs = []
+    for snr in (40, 55, 60, 65, 300):
+        for _ in range(per_snr):
+            x20, _, _, x40 = chk.make_trials(tx, snr, 1, rng, cfo_max=600e3, return40=True)
+            recs.append(chk.quantise(x40 if rate40 else x20)[:, :, 0])
     return np.concatenate(recs).astype(np.int64)
 
 
@@ -185,22 +203,37 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     if str(vector) == "cfo":
         p = pr.Params(arm_holdoff=4000)
         p.input_stage = stage
-        iq_dec = cfo_sweep_vector()
-        iq = iq_dec if stage == 1 else ref.front_end(iq_dec, p.dc_shift)
+        if stage == 2:
+            iq = cfo_sweep_vector(rate40=True)
+        else:
+            iq_dec = cfo_sweep_vector()
+            iq = iq_dec if stage == 1 else ref.front_end(iq_dec, p.dc_shift)
         vector = Path("cfo.json")
+    elif str(vector) == "highsnr":
+        p = pr.Params(arm_holdoff=4000)
+        p.input_stage = stage
+        if stage == 2:
+            iq = high_snr_vector(rate40=True)
+        else:
+            iq_dec = high_snr_vector()
+            iq = iq_dec if stage == 1 else ref.front_end(iq_dec, p.dc_shift)
+        vector = Path("highsnr.json")
     elif str(vector) == "stress":
         p = pr.Params(arm_holdoff=500)
         p.input_stage = stage
-        iq_dec = stress_vector()
-        # input_stage 0 feeds the same pattern straight into the detector
-        iq = iq_dec
+        # every stage gets the same pattern: straight into the detector (0), into the front end
+        # at 20 Msps (1) or into the half-band at 40 Msps (2)
+        iq = stress_vector()
         vector = Path("stress.json")
     else:
         meta = json.loads(vector.with_suffix(".json").read_text())
         known = {f.name for f in fields(pr.Params)}
         p = pr.Params(**{k: v for k, v in meta["params"].items() if k in known})
         p.input_stage = stage
-        name = meta["files"]["decimated"] if stage == 1 else meta["files"]["lpf_out"]
+        key = {0: "lpf_out", 1: "decimated", 2: "input40"}[stage]
+        if key not in meta["files"]:
+            raise SystemExit(f"{vector.name} has no {key} file - rebuild it with PC/pd_make_vector.py")
+        name = meta["files"][key]
         iq = np.fromfile(vector.with_name(name), dtype="<i2").reshape(-1, 2).astype(np.int64)
     if holdoff is not None:
         p.arm_holdoff = holdoff
@@ -209,10 +242,12 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     if max_samples:
         iq = iq[:max_samples]
 
-    lpf = ref.front_end(iq, p.dc_shift) if stage == 1 else iq
+    if stage == 2 and iq.shape[0] % 2:
+        iq = iq[:-1]                                   # whole input pairs
+    lpf = ref.front_end(ref.halfband(iq) if stage == 2 else iq, p.dc_shift) if stage else iq
     res = ref.detect(iq, p, debug=True)
     trig = [e.t_trig for e in res.events]
-    n = iq.shape[0]
+    n = lpf.shape[0]
     xi, xq = lpf[:, 0].astype(np.int64), lpf[:, 1].astype(np.int64)
     cfo_lines, tone_lines = [], []
     lin = ref.tone_thresh_lin(p.tone_thresh) if p.tone_thresh > 0 else 0
@@ -237,7 +272,7 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     out.mkdir(parents=True, exist_ok=True)
     (out / "cfg.txt").write_text(
         f"{p.input_stage} {p.dc_shift} {p.eta_hi_sq} {p.eta_lo_sq} {p.qual_len} {p.blank_len} "
-        f"{p.arm_holdoff} {iq.shape[0]} {len(trig)} {p.n_cfo} {len(cfo_lines)} {lin}\n")
+        f"{p.arm_holdoff} {iq.shape[0]} {len(trig)} {p.n_cfo} {len(cfo_lines)} {lin} {lpf.shape[0]}\n")
     u16 = (iq & 0xFFFF)
     np.savetxt(out / "in.txt", u16, fmt="%04x")
     np.savetxt(out / "exp_lpf.txt", lpf & 0xFFF, fmt="%03x")
@@ -258,7 +293,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Export a test vector for the RTL testbench")
     ap.add_argument("vector", type=Path,
                     help="TestVectors/<name>.json, or 'stress', 'cfo' (synthetic vectors), 'units' (unit tests)")
-    ap.add_argument("--input-stage", type=int, choices=(0, 1), default=1)
+    ap.add_argument("--input-stage", type=int, choices=(0, 1, 2), default=1)
     ap.add_argument("--max-samples", type=int)
     ap.add_argument("--holdoff", type=int, help="override arm_holdoff (e.g. small, to get many triggers)")
     ap.add_argument("--n-cfo", type=int, help="override n_cfo (128..4096)")

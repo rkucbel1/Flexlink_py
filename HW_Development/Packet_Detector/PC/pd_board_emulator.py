@@ -67,10 +67,13 @@ class Board:
         count = count or self.buf.shape[0]
         if count > self.buf.shape[0]:
             raise BoardError(pr.ST_BAD_ARG, f"run {count} samples, buffer has {self.buf.shape[0]}")
+        div = 2 if self.params.input_stage == 2 else 1  # input samples per detector sample
+        if div == 2 and count % 2 and not flags & pr.RUN_FLAG_PL_LOOPBACK:
+            raise BoardError(pr.ST_BAD_ARG, "input_stage 2: RUN count must be even (whole 40 Msps sample pairs)")
         if flags & pr.RUN_FLAG_PL_LOOPBACK:          # samples through the PL unchanged
             self.debug = np.ascontiguousarray(self.buf[:count]).view(pr.DEBUG_DTYPE).ravel().copy()
             return struct.pack("<II", 0, count)
-        start = self.history.shape[0]
+        start = self.history.shape[0] // div        # in detector (20 Msps) samples
         self.history = np.concatenate([self.history, self.buf[:count]])
         want_dbg = bool(flags & pr.RUN_FLAG_DEBUG)
         res = ref.detect(self.history, self.params, debug=want_dbg)
@@ -92,7 +95,7 @@ class Board:
                 e.cfo_inc += 100
         self.debug = None
         if want_dbg:
-            self.debug = np.empty(count, pr.DEBUG_DTYPE)
+            self.debug = np.empty(count // div, pr.DEBUG_DTYPE)
             self.debug["metric"], self.debug["bits"] = res.metric[start:], res.bits[start:]
         return struct.pack("<II", len(out), count) + b"".join(e.pack() for e in out)
 
@@ -114,8 +117,9 @@ class Board:
             p = pr.Params.unpack(payload)
             if not 0 <= p.tone_thresh <= ref.TONE_THRESH_MAX_Q8:
                 raise BoardError(pr.ST_BAD_ARG, "tone_thresh must be 0..24 dB (Q8.8 0..6144)")
-            if p.input_stage not in (0, 1):
-                raise BoardError(pr.ST_BAD_ARG, "input_stage must be 0 (LPF output) or 1 (decimated input)")
+            if p.input_stage not in (0, 1, 2):
+                raise BoardError(pr.ST_BAD_ARG, "input_stage must be 0 (LPF output), 1 (20 Msps input) "
+                                                "or 2 (40 Msps input)")
             self.params = p
             return b""
         if cmd == pr.LOAD_SAMPLES:

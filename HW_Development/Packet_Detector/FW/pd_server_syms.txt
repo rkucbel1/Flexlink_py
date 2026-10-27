@@ -1,0 +1,1063 @@
+00000000 a SECT
+00000000 a shift
+00000000 a shift
+00000001 a L2CCControl
+00000111 a L2CCTAGLatency
+00000121 a L2CCDataLatency
+000001ff a DDR_REG
+00000200 a UNDEF_REG
+00000400 A _ABORT_STACK_SIZE
+00000400 A _FIQ_STACK_SIZE
+00000400 A _IRQ_STACK_SIZE
+00000400 A _UNDEF_STACK_SIZE
+00000800 A _SUPERVISOR_STACK_SIZE
+00001005 a CRValMmuCac
+00002000 a CRValHiVectorAddr
+0000767b a SLCRlockKey
+0000a000 A _HEAP_SIZE
+0000a000 A _STACK_SIZE
+0000df0d a SLCRUnlockKey
+00020202 a SLCRL2cRamConfig
+00100000 a DDR_START
+00100000 T _vector_table
+00100020 t IRQHandler
+00100030 t FIQHandler
+00100034 t FIQLoop
+00100040 t Undefined
+0010005c t SVCHandler
+00100080 t DataAbortHandler
+001000a0 t PrefetchAbortHandler
+001000cc T _boot
+001000cc T _prestart
+001000e0 t CheckEFUSE
+00100118 t OKToRun
+001002a0 t Sync
+00100344 t invalidate_dcache
+00100358 t loop1
+00100394 t loop2
+00100398 t loop3
+001003b4 t skip
+001003c0 t finished
+00100458 t __do_global_dtors_aux
+00100484 t frame_dummy
+001004a8 00000028 t Xil_In32
+001004d0 00000038 t Xil_Out32
+00100508 00000030 t rd32
+00100538 00000030 t wr32
+00100568 00000034 t wr16
+0010059c 00000034 t pd_rd
+001005d0 00000038 t pd_wr
+00100608 00000118 t pd_exp
+00100720 00000168 t pd_ln
+00100888 0000008c t tone_thresh_lin
+00100914 0000016c t tone_db_q8
+00100a80 00000088 t reset_connection_state
+00100b08 000000a8 t dma_reset
+00100bb0 000000a8 t dma_init
+00100c58 000002cc t drain_events
+00100f24 00000114 t detector_reset
+00101038 00000398 t dma_stream
+001013d0 000003a0 t detector_run
+00101770 000001e4 t tx_pump
+00101954 000000d8 t reply
+00101a2c 000000a4 t reply_error
+00101ad0 000015f4 t handle_message
+001030c4 000000b0 t drop_client
+00103174 00000034 t sent_cb
+001031a8 0000004c t err_cb
+001031f4 00000458 t recv_cb
+0010364c 000000f8 t accept_cb
+00103744 0000006c t pr_default_params
+001037b0 0000004c T print_app_header
+001037fc 000001c0 T start_application
+001039bc 0000001c T transfer_data
+001039d8 00000074 T print_ip
+00103a4c 00000054 T print_ip_settings
+00103aa0 00000298 T main
+00103d38 00000230 T timer_callback
+00103f68 00000018 T enable_caches
+00103f80 00000018 T disable_caches
+00103f98 00000018 T init_platform
+00103fb0 00000024 T TimerCounterHandler
+00103fd4 0000002c T init_timer
+00104000 00000014 T cleanup_platform
+00104014 00000028 T print
+00104040 000001d8 t outnum1
+00104218 000001a4 t outnum
+001043bc 000005ec T xil_vprintf
+001049a8 0000002c T xil_printf
+001049e8 00000060 T _start
+00104a48 00000038 T Xil_DCacheInvalidateLine
+00104a80 00000178 T Xil_DCacheInvalidateRange
+00104bf8 00000048 T Xil_DCacheFlushLine
+00104c40 0000013c T Xil_DCacheFlushRange
+00104d7c 00000038 T Xil_DCacheStoreLine
+00104db4 0000007c T Xil_ICacheDisable
+00104e30 00000038 T Xil_ICacheInvalidateLine
+00104e68 00000080 T Xil_ICacheInvalidateRange
+00104ee8 000000b0 T Xil_L1DCacheInvalidate
+00104f98 00000020 T Xil_L1DCacheEnable
+00104fb8 00000018 T Xil_L1DCacheInvalidateLine
+00104fd0 00000064 T Xil_L1DCacheInvalidateRange
+00105034 00000088 T Xil_L1DCacheFlush
+001050bc 00000018 T Xil_L1DCacheDisable
+001050d4 0000005c T Xil_DCacheFlush
+00105130 00000078 T Xil_DCacheDisable
+001051a8 00000018 T Xil_L1DCacheFlushLine
+001051c0 00000064 T Xil_L1DCacheFlushRange
+00105224 00000018 T Xil_L1DCacheStoreLine
+0010523c 0000001c T Xil_L1ICacheEnable
+00105258 0000001c T Xil_L1ICacheDisable
+00105274 00000018 T Xil_L1ICacheInvalidate
+0010528c 00000018 T Xil_L1ICacheInvalidateLine
+001052a4 00000064 T Xil_L1ICacheInvalidateRange
+00105308 00000060 T Xil_L2CacheDisable
+00105368 0000006c T Xil_L2CacheInvalidate
+001053d4 00000020 T Xil_DCacheInvalidate
+001053f4 00000030 T Xil_ICacheInvalidate
+00105424 00000060 T Xil_L2CacheEnable
+00105484 00000078 T Xil_ICacheEnable
+001054fc 00000078 T Xil_DCacheEnable
+00105574 00000014 T Xil_L2CacheInvalidateLine
+00105588 000000a4 T Xil_L2CacheInvalidateRange
+0010562c 00000044 T Xil_L2CacheFlush
+00105670 0000001c T Xil_L2CacheFlushLine
+0010568c 000000a0 T Xil_L2CacheFlushRange
+0010572c 00000018 T Xil_L2CacheStoreLine
+00105744 00000014 T FIQInterrupt
+00105758 00000014 T IRQInterrupt
+0010576c 00000014 T UndefinedException
+00105780 00000014 T SWInterrupt
+00105794 00000014 T DataAbortInterrupt
+001057a8 00000014 T PrefetchAbortInterrupt
+001057bc 00000004 t Xil_ExceptionNullHandler
+001057c0 00000004 t Xil_DataAbortHandler
+001057c4 00000004 t Xil_PrefetchAbortHandler
+001057c8 00000004 t Xil_UndefinedExceptionHandler
+001057cc 00000004 T Xil_ExceptionInit
+001057d0 00000018 T Xil_ExceptionRegisterHandler
+001057e8 00000020 T Xil_GetExceptionRegisterHandler
+00105808 00000024 T Xil_ExceptionRemoveHandler
+0010582c T __cpu_init
+00105868 00000030 T sleep
+00105898 00000030 T msleep
+001058c8 00000034 T usleep
+001058fc 00000030 T XilTimer_Sleep
+0010592c 00000030 T XTimer_SetHandler
+0010595c 00000020 T XTimer_SetInterval
+0010597c 00000018 T XTimer_ClearTickInterrupt
+00105994 000000a0 t XGlobalTimer_ModifyInterval
+00105a34 0000001c T XilSleepTimer_Init
+00105a50 00000028 T XTime_GetTime
+00105a78 00000010 T XTtc_CallbackHandler
+00105a88 00000014 t XTickTimer_TtcStop
+00105a9c 00000010 t XTickTimer_ClearTtcInterrupt
+00105aac 00000048 t XTimer_TtcSetIntrHandler
+00105af4 00000100 t XTimer_TtcTickInterval
+00105bf4 00000034 T XilTickTimer_Init
+00105c28 00000020 T lwip_init
+00105c48 0000006c T mem_init
+00105cb4 00000160 T mem_free
+00105e14 00000180 T mem_trim
+00105f94 00000194 T mem_malloc
+00106128 0000002c T mem_calloc
+00106154 00000070 t do_memp_malloc_pool
+001061c4 00000060 T memp_init_pool
+00106224 000000a0 T memp_init
+001062c4 0000000c T memp_malloc_pool
+001062d0 00000020 T memp_malloc
+001062f0 00000044 T memp_free_pool
+00106334 0000005c T memp_free
+00106390 00000008 t netif_null_output_ip4
+00106398 00000004 T netif_init
+0010639c 00000014 T netif_input
+001063b0 00000078 T netif_set_ipaddr
+00106428 0000002c T netif_set_netmask
+00106454 0000002c T netif_set_gw
+00106480 00000114 T netif_set_addr
+00106594 0000012c T netif_add
+001066c0 00000034 T netif_add_noaddr
+001066f4 000000c0 T netif_remove
+001067b4 00000010 T netif_set_default
+001067c4 0000001c T netif_set_up
+001067e0 00000028 T netif_set_down
+00106808 00000020 T netif_set_link_up
+00106828 00000020 T netif_set_link_down
+00106848 00000078 T netif_index_to_name
+001068c0 00000048 T netif_get_by_index
+00106908 00000094 T netif_find
+0010699c 0000001c T netif_name_to_index
+001069b8 000000cc t pbuf_free.part.0
+00106a84 00000054 T pbuf_free_ooseq
+00106ad8 00000178 T pbuf_alloc
+00106c50 0000004c T pbuf_alloc_reference
+00106c9c 00000068 T pbuf_alloced_custom
+00106d04 000000e0 T pbuf_realloc
+00106de4 00000070 T pbuf_add_header
+00106e54 00000070 T pbuf_add_header_force
+00106ec4 00000054 T pbuf_remove_header
+00106f18 000000b4 T pbuf_header
+00106fcc 000000bc T pbuf_header_force
+00107088 00000080 T pbuf_free_header
+00107108 0000000c T pbuf_free
+00107114 0000002c T pbuf_clen
+00107140 00000024 T pbuf_ref
+00107164 00000050 T pbuf_cat
+001071b4 00000078 T pbuf_chain
+0010722c 00000054 T pbuf_dechain
+00107280 0000018c T pbuf_copy_partial_pbuf
+0010740c 0000001c T pbuf_copy
+00107428 000000a4 T pbuf_copy_partial
+001074cc 00000088 T pbuf_get_contiguous
+00107554 00000038 T pbuf_skip
+0010758c 0000007c T pbuf_take
+00107608 000000a0 T pbuf_take_at
+001076a8 0000009c T pbuf_coalesce
+00107744 00000034 T pbuf_clone
+00107778 00000048 T pbuf_get_at
+001077c0 00000040 T pbuf_try_get_at
+00107800 00000038 T pbuf_put_at
+00107838 000000b4 T pbuf_memcmp
+001078ec 00000070 T pbuf_memfind
+0010795c 00000098 T pbuf_strstr
+001079f4 00000004 T stats_init
+001079f8 00000094 t tcp_new_port
+00107a8c 00000078 t tcp_close_shutdown_fin
+00107b04 00000020 T tcp_init
+00107b24 0000000c T tcp_free
+00107b30 000000ec T tcp_bind
+00107c1c 00000018 T tcp_bind_netif
+00107c34 00000118 T tcp_listen_with_backlog_and_err
+00107d4c 00000008 T tcp_listen_with_backlog
+00107d54 00000054 T tcp_update_rcv_ann_wnd
+00107da8 00000094 T tcp_recved
+00107e3c 000001b4 T tcp_connect
+00107ff0 00000040 T tcp_txnow
+00108030 0000003c T tcp_segs_free
+0010806c 0000002c T tcp_seg_free
+00108098 0000000c T tcp_setprio
+001080a4 00000048 T tcp_seg_copy
+001080ec 0000000c T tcp_arg
+001080f8 0000000c T tcp_recv
+00108104 0000000c T tcp_sent
+00108110 0000000c T tcp_err
+0010811c 00000018 T tcp_accept
+00108134 00000010 T tcp_poll
+00108144 000000fc T tcp_pcb_purge
+00108240 000005bc T tcp_slowtmr
+001087fc 00000098 T tcp_pcb_remove
+00108894 000001f4 T tcp_abandon
+00108a88 00000008 T tcp_abort
+00108a90 00000018 t tcp_accept_null
+00108aa8 00000064 t tcp_kill_state
+00108b0c 00000270 T tcp_alloc
+00108d7c 00000008 T tcp_new
+00108d84 00000008 T tcp_new_ip_type
+00108d8c 00000218 t tcp_close_shutdown
+00108fa4 0000002c T tcp_close
+00108fd0 000000a0 T tcp_shutdown
+00109070 00000060 T tcp_recv_null
+001090d0 000000c0 T tcp_process_refused_data
+00109190 000000cc T tcp_fasttmr
+0010925c 00000030 T tcp_tmr
+0010928c 00000024 T tcp_next_iss
+001092b0 00000030 T tcp_eff_send_mss_netif
+001092e0 000000e0 T tcp_netif_ip_addr_changed
+001093c0 00000014 T tcp_debug_state_str
+001093d4 0000005c T tcp_tcp_get_tcp_addrinfo
+00109430 00000048 T tcp_free_ooseq
+00109478 000000dc t tcp_oos_insert_segment
+00109554 00000060 t tcp_input_delayed_close
+001095b4 000000ac t tcp_free_acked_segments.isra.0
+00109660 00000ae8 t tcp_receive
+0010a148 000001e4 t tcp_parseopt
+0010a32c 00000ec4 T tcp_input
+0010b1f0 00000018 T tcp_trigger_input_pcb_close
+0010b208 000000ac t tcp_pbuf_prealloc
+0010b2b4 000000f8 t tcp_create_segment
+0010b3ac 00000098 t tcp_output_alloc_header_common.constprop.0
+0010b444 000000c0 t tcp_output_control_segment
+0010b504 00000688 T tcp_write
+0010bb8c 000001d8 T tcp_split_unsent_seg
+0010bd64 000000ec T tcp_enqueue_flags
+0010be50 00000078 T tcp_send_fin
+0010bec8 000000ac T tcp_rexmit_rto_prepare
+0010bf74 000000b8 T tcp_rexmit
+0010c02c 0000007c T tcp_rexmit_fast
+0010c0a8 00000074 T tcp_rst
+0010c11c 000000a8 T tcp_rst_netif
+0010c1c4 000000a4 T tcp_send_empty_ack
+0010c268 000004b0 T tcp_output
+0010c718 00000014 T tcp_rexmit_rto_commit
+0010c72c 00000030 T tcp_rexmit_rto
+0010c75c 00000080 T tcp_keepalive
+0010c7dc 00000140 T tcp_zero_window_probe
+0010c91c 00000004 T tcp_timer_needed
+0010c920 00000020 T udp_init
+0010c940 00000330 T udp_input
+0010cc70 00000198 T udp_bind
+0010ce08 000001cc T udp_sendto_if_src
+0010cfd4 00000088 T udp_sendto_if
+0010d05c 000000a8 T udp_sendto
+0010d104 00000020 T udp_send
+0010d124 00000018 T udp_bind_netif
+0010d13c 000000a4 T udp_connect
+0010d1e0 00000028 T udp_disconnect
+0010d208 00000010 T udp_recv
+0010d218 0000005c T udp_remove
+0010d274 00000030 T udp_new
+0010d2a4 00000030 T udp_new_ip_type
+0010d2d4 0000005c T udp_netif_ip_addr_changed
+0010d330 0000017c t dhcp_create_msg
+0010d4ac 00000170 t dhcp_bind
+0010d61c 0000008c t dhcp_inc_pcb_refcount
+0010d6a8 000000b4 t dhcp_handle_ack.isra.0
+0010d75c 00000240 t dhcp_reboot.isra.0
+0010d99c 000001ec t dhcp_discover
+0010db88 000002b4 t dhcp_select.isra.0
+0010de3c 0000072c t dhcp_recv
+0010e568 000001a0 t dhcp_conflict_callback
+0010e708 0000002c T dhcp_set_struct
+0010e734 00000034 T dhcp_cleanup
+0010e768 00000154 T dhcp_inform
+0010e8bc 00000048 T dhcp_network_changed_link_up
+0010e904 000001ec T dhcp_renew
+0010eaf0 00000200 T dhcp_release_and_stop
+0010ecf0 0000010c T dhcp_start
+0010edfc 000002e0 T dhcp_coarse_tmr
+0010f0dc 000000ec T dhcp_fine_tmr
+0010f1c8 00000010 T dhcp_release
+0010f1d8 00000004 T dhcp_stop
+0010f1dc 00000030 T dhcp_supplied_address
+0010f20c 00000064 t etharp_free_entry
+0010f270 0000019c t etharp_find_entry
+0010f40c 000000f4 t etharp_raw
+0010f500 00000118 t etharp_output_to_arp_index
+0010f618 000000cc T etharp_tmr
+0010f6e4 0000004c T etharp_cleanup_netif
+0010f730 0000006c T etharp_find_addr
+0010f79c 00000064 T etharp_get_entry
+0010f800 00000248 T etharp_input
+0010fa48 00000290 T etharp_query
+0010fcd8 000001a8 T etharp_output
+0010fe80 00000040 T etharp_request
+0010fec0 00000044 T etharp_acd_probe
+0010ff04 00000040 T etharp_acd_announce
+0010ff44 000000ec t icmp_send_response
+00110030 0000025c T icmp_input
+0011028c 0000000c T icmp_dest_unreach
+00110298 0000000c T icmp_time_exceeded
+001102a4 00000028 t ipfrag_free_pbuf_custom
+001102cc 000000f0 t ip_reass_free_complete_datagram
+001103bc 000000e4 t ip_reass_remove_oldest_datagram
+001104a0 0000005c T ip_reass_tmr
+001104fc 0000068c T ip4_reass
+00110b88 000002a0 T ip4_frag
+00110e28 000000c8 T ip4_route
+00110ef0 000003d4 T ip4_input
+001112c4 00000150 T ip4_output_if_src
+00111414 00000044 T ip4_output_if
+00111458 00000094 T ip4_output
+001114ec 00000060 T ip4_addr_isbroadcast_u32
+0011154c 00000064 T ip4_addr_netmask_valid
+001115b0 000001dc T ip4addr_aton
+0011178c 00000024 T ipaddr_addr
+001117b0 00000100 T ip4addr_ntoa_r
+001118b0 00000010 T ip4addr_ntoa
+001118c0 00000044 T acd_add
+00111904 00000044 T acd_remove
+00111948 0000004c T acd_start
+00111994 00000014 T acd_stop
+001119a8 00000024 T acd_network_changed_link_down
+001119cc 000001c0 T acd_tmr
+00111b8c 00000164 T acd_arp_reply
+00111cf0 000000d4 T acd_netif_ip_addr_changed
+00111dc4 00000154 T ethernet_input
+00111f18 0000008c T ethernet_output
+00111fa4 00000010 T sys_arch_protect
+00111fb4 00000008 T sys_arch_unprotect
+00111fbc 00000010 T lwip_raw_init
+00111fcc 0000003c T xtopology_find_index
+00112008 000000cc T xemac_add
+001120d4 0000005c T xemacif_input
+00112130 0000010c T emacps_link_status
+0011223c 0000001c T eth_link_detect
+00112258 000000e0 t phy_identify
+00112338 00000054 T detect_phy
+0011238c 00001088 T phy_setup_emacps
+00113414 00000060 T isphy_pcspma_external
+00113474 00000098 T MacConfig_SgmiiPcs
+0011350c 000000c0 t low_level_output
+001135cc 00000004 t xemacpsif_output
+001135d0 000000b8 T xemacpsif_input
+00113688 00000074 T HandleEmacPsError
+001136fc 00000050 T HandleTxErrors
+0011374c 000000f4 T xemacpsif_init
+00113840 0000000c T xemacpsif_resetrx_on_no_rxdata
+0011384c 0000000c T lwip_htons
+00113858 00000008 T lwip_htonl
+00113860 0000008c T lwip_strnstr
+001138ec 000000ac T lwip_strnistr
+00113998 00000078 T lwip_stricmp
+00113a10 0000005c T lwip_strnicmp
+00113a6c 000000e8 T lwip_itoa
+00113b54 00000044 T lwip_memcmp_consttime
+00113b98 00000124 T lwip_standard_chksum
+00113cbc 000000d4 T inet_chksum_pseudo
+00113d90 00000004 T ip_chksum_pseudo
+00113d94 000000fc T inet_chksum_pseudo_partial
+00113e90 00000004 T ip_chksum_pseudo_partial
+00113e94 00000014 T inet_chksum
+00113ea8 00000084 T inet_chksum_pbuf
+00113f2c 00000058 T pq_create_queue
+00113f84 00000048 T pq_enqueue
+00113fcc 00000044 T pq_dequeue
+00114010 0000000c T pq_qlength
+0011401c 00000008 T xemacps_is_tx_space_available
+00114024 000000cc T xemacps_process_sent_bds
+001140f0 00000018 T emacps_send_handler
+00114108 000001c4 T emacps_sgsend
+001142cc 00000134 T setup_rx_bds
+00114400 00000054 T clean_dma_txdescs
+00114454 00000384 T init_dma
+001147d8 00000054 T resetrx_on_no_rxdata
+0011482c 00000140 T emacps_recv_handler
+0011496c 0000005c T free_txrx_pbufs
+001149c8 00000040 T free_onlytx_pbufs
+00114a08 00000060 T reset_dma
+00114a68 000000dc T emacps_error_handler
+00114b44 0000001c T xemacps_lookup_config
+00114b60 0000021c T init_emacps
+00114d7c 00000064 T init_emacps_on_error
+00114de0 00000058 T setup_isr
+00114e38 00000004 T start_emacps
+00114e3c 00000020 T restart_emacps_transmitter
+00114e5c 00000064 T XAxiDma_LookupConfig
+00114ec0 00000114 T XAxiDma_Reset
+00114fd4 000002c4 T XAxiDma_CfgInitialize
+00115298 0000004c T XAxiDma_ResetIsDone
+001152e4 000000d4 T XAxiDma_Pause
+001153b8 000001f4 T XAxiDma_Resume
+001155ac 0000001c T XAxiDma_Busy
+001155c8 00000028 T XAxiDma_SelectKeyHole
+001155f0 00000028 T XAxiDma_SelectCyclicMode
+00115618 0000016c T XAxiDma_SimpleTransfer
+00115784 000000d4 T XEmacPs_SetHandler
+00115858 000002c8 T XEmacPs_IntrHandler
+00115b20 0000010c T XEmacPs_BdRingCreate
+00115c2c 000000bc T XEmacPs_BdRingClone
+00115ce8 00000070 T XEmacPs_BdRingAlloc
+00115d58 000000c4 T XEmacPs_BdRingUnAlloc
+00115e1c 000000a4 T XEmacPs_BdRingToHw
+00115ec0 00000108 T XEmacPs_BdRingFromHwTx
+00115fc8 000000f4 T XEmacPs_BdRingFromHwRx
+001160bc 00000080 T XEmacPs_BdRingFree
+0011613c 00000190 T XEmacPs_BdRingCheck
+001162cc 00000018 T XEmacPs_BdRingPtrReset
+001162e4 00000028 T XEmacPs_StubHandler
+0011630c 0000017c T XEmacPs_Start
+00116488 0000008c T XEmacPs_Stop
+00116514 000000a0 T XEmacPs_SetQueuePtr
+001165b4 00000304 T XEmacPs_Reset
+001168b8 00000100 T XEmacPs_CfgInitialize
+001169b8 00000110 T XEmacPs_SetMacAddress
+00116ac8 000000e8 T XEmacPs_GetMacAddress
+00116bb0 0000014c T XEmacPs_SetHash
+00116cfc 0000014c T XEmacPs_DeleteHash
+00116e48 0000007c T XEmacPs_ClearHash
+00116ec4 000000a4 T XEmacPs_GetHash
+00116f68 000000c8 T XEmacPs_SetTypeIdCheck
+00117030 000001a8 T XEmacPs_SetOptions
+001171d8 000001a0 T XEmacPs_ClearOptions
+00117378 00000078 T XEmacPs_GetOptions
+001173f0 000000a4 T XEmacPs_SendPausePacket
+00117494 00000098 T XEmacPs_GetOperatingSpeed
+0011752c 000000e0 T XEmacPs_SetOperatingSpeed
+0011760c 000000a4 T XEmacPs_SetMdioDivisor
+001176b0 000000a0 T XEmacPs_PhyRead
+00117750 0000001c T XEmacPs_IsCommonMdioPresent
+0011776c 00000098 T XEmacPs_PhyWrite
+00117804 0000009c T XEmacPs_DMABLengthUpdate
+001178a0 00000054 T XEmacPs_ResetHw
+001178f4 00000064 T XEmacPs_GetQxOffset
+00117958 00000064 T XTtcPs_LookupConfig
+001179bc 00000028 t StubStatusHandler
+001179e4 00000110 T XTtcPs_CfgInitialize
+00117af4 0000004c T XTtcPs_Release
+00117b40 000000a4 T XTtcPs_SetMatchValue
+00117be4 000000b0 T XTtcPs_GetMatchValue
+00117c94 000000a8 T XTtcPs_SetPrescaler
+00117d3c 00000090 T XTtcPs_GetPrescaler
+00117dcc 000000e0 T XTtcPs_CalcIntervalFromFreq
+00117eac 000000c4 T XTtcPs_InterruptHandler
+00117f70 000000e0 T XTtcPs_SetStatusHandler
+00118050 000000f0 T XTtcPs_SetOptions
+00118140 000000a0 T XTtcPs_GetOptions
+001181e0 00000018 T XUartPs_SendByte
+001181f8 0000001c T XUartPs_RecvByte
+00118214 00000050 T XUartPs_ResetHw
+00118264 00000020 T XUartPs_WaitTransmitDone
+00118284 0000001c T outbyte
+001182a0 00000020 T inbyte
+001182c0 00000168 T XAxiDma_UpdateBdRingCDesc
+00118428 000001a4 T XAxiDma_BdRingCreate
+001185cc 000000fc T XAxiDma_BdRingClone
+001186c8 00000110 T XAxiDma_StartBdRingHw
+001187d8 00000020 T XAxiDma_BdRingStart
+001187f8 0000004c T XAxiDma_BdRingSetCoalesce
+00118844 0000001c T XAxiDma_BdRingGetCoalesce
+00118860 00000080 T XAxiDma_BdRingAlloc
+001188e0 000000b0 T XAxiDma_BdRingUnAlloc
+00118990 000001f8 T XAxiDma_BdRingToHw
+00118b88 00000158 T XAxiDma_BdRingFromHw
+00118ce0 0000008c T XAxiDma_BdRingFree
+00118d6c 00000178 T XAxiDma_BdRingCheck
+00118ee4 000000b8 T XAxiDma_BdRingDumpRegs
+00118f9c 0000008c T XEmacPs_SetupPCS
+00119028 00000050 T XEmacPs_USXPCSGetState
+00119078 0000005c T XEmacPs_IsHighSpeedPCS
+001190d8 t .udivsi3_skip_div0_test
+001190d8 T __aeabi_uidiv
+001190d8 0000025c T __udivsi3
+00119334 0000001a T __aeabi_uidivmod
+00119350 T __aeabi_idiv
+00119350 00000294 T __divsi3
+00119356 t .divsi3_skip_div0_test
+001195e4 0000001a T __aeabi_idivmod
+00119600 00000002 W __aeabi_idiv0
+00119600 00000002 W __aeabi_ldiv0
+00119604 T __aeabi_drsub
+0011960c 0000027a T __aeabi_dsub
+0011960c 0000027a T __subdf3
+00119610 00000276 T __adddf3
+00119610 00000276 T __aeabi_dadd
+00119888 0000001e T __aeabi_ui2d
+00119888 0000001e T __floatunsidf
+001198a8 00000022 T __aeabi_i2d
+001198a8 00000022 T __floatsidf
+001198cc 00000042 T __aeabi_f2d
+001198cc 00000042 T __extendsfdf2
+00119910 0000006a T __aeabi_ul2d
+00119910 0000006a T __floatundidf
+00119920 0000005a T __aeabi_l2d
+00119920 0000005a T __floatdidf
+0011997c T __aeabi_uldivmod
+001199ac 00000030 T __aeabi_d2lz
+001199ac 00000030 T __fixdfdi
+001199e0 00000040 T __aeabi_d2ulz
+001199e0 00000040 T __fixunsdfdi
+00119a20 00000106 T __udivmoddi4
+00119b28 00000044 T __assert_func
+00119b6c 0000000a T __assert
+00119b78 00000008 T atoi
+00119b80 00000008 T _atoi_r
+00119b88 0000001e T exit
+00119ba8 00000010 T malloc
+00119bb8 00000010 T free
+00119bc8 0000056c T _malloc_r
+0011a134 00000002 T __malloc_lock
+0011a138 00000002 T __malloc_unlock
+0011a13c 00000012 T srand
+0011a150 00000048 T rand
+0011a198 00000118 t _strtol_l.part.0
+0011a2b0 00000028 T _strtol_r
+0011a2d8 00000042 T strtol_l
+0011a31c 00000042 T strtol
+0011a360 0000001c T _fiprintf_r
+0011a37c 0000002a T fiprintf
+0011a3a8 00000bf8 T _vfiprintf_r
+0011afa0 0000001e T vfiprintf
+0011afc0 0000006a t __sbprintf
+0011b02c 0000001e T __sprint_r
+0011b04c 0000013a T __sflush_r
+0011b188 0000002c T _fflush_r
+0011b1b4 0000004e T fflush
+0011b204 00000004 t __fp_lock
+0011b208 0000001c t stdio_exit_handler
+0011b224 00000040 t cleanup_stdio
+0011b264 00000004 t __fp_unlock
+0011b268 000000d6 t global_stdio_init.part.0
+0011b340 000000a4 T __sfp
+0011b3e4 00000022 T __sinit
+0011b408 00000002 T __sfp_lock_acquire
+0011b40c 00000002 T __sfp_lock_release
+0011b410 00000016 T __fp_lock_all
+0011b428 00000016 T __fp_unlock_all
+0011b440 0000030a T __sfvwrite_r
+0011b74c 00000042 T _fwalk_sglue
+0011b790 0000008a T _snprintf_r
+0011b81c 00000092 T snprintf
+0011b8b0 00000022 T __sread
+0011b8d4 00000004 T __seofread
+0011b8d8 0000003e T __swrite
+0011b918 00000022 T __sseek
+0011b93c 00000008 T __sclose
+0011b944 000000c4 T __swsetup_r
+0011ba08 0000005c T memcmp
+0011ba64 000000f8 T memmove
+0011bb5c 000000a8 T memset
+0011bc04 0000007e T strncmp
+0011bc84 00000074 T strncpy
+0011bcf8 00000004 T __localeconv_l
+0011bcfc 00000008 T _localeconv_r
+0011bd04 00000008 T localeconv
+0011bd0c 00000026 T _close_r
+0011bd34 0000006e T _reclaim_reent
+0011bda4 0000002e T _lseek_r
+0011bdd4 0000002e T _read_r
+0011be04 00000026 T _sbrk_r
+0011be2c 0000002e T _write_r
+0011be5c 0000000c T __errno
+0011be68 00000056 T __libc_init_array
+0011bec0 0000002c T __libc_fini_array
+0011beec 0000001c T sysconf
+0011bf20 000002de T strcmp
+0011c200 T memchr
+0011c2c0 000005e0 T memcpy
+0011c8c0 000000d8 T strlen
+0011c998 000000ae T __call_exitprocs
+0011ca48 0000000e T abort
+0011ca58 000000c0 T _malloc_trim_r
+0011cb18 00000208 T _free_r
+0011cd20 0000037a T _realloc_r
+0011d0a0 000018d8 T _svfprintf_r
+0011e978 00000058 T __ssprint_r
+0011e9d0 00000080 T _fclose_r
+0011ea50 00000010 T fclose
+0011ea60 000000dc T __smakebuf_r
+0011eb3c 0000005a T __swhatbuf_r
+0011eb98 00000030 T _init_signal_r
+0011ebc8 00000050 T _signal_r
+0011ec18 00000052 T _raise_r
+0011ec6c 00000062 T __sigtramp_r
+0011ecd0 0000005a T raise
+0011ed2c 00000050 T signal
+0011ed7c 0000003a T _init_signal
+0011edb8 00000066 T __sigtramp
+0011ee20 00000052 T _setlocale_r
+0011ee74 0000000e T __locale_mb_cur_max
+0011ee84 00000052 T setlocale
+0011eed8 0000002c T _fstat_r
+0011ef04 00000026 T _isatty_r
+0011ef2c 0000002c T _kill_r
+0011ef58 00000004 T _getpid_r
+0011ef60 00000078 T frexp
+0011efd8 00000136 t quorem
+0011f110 00000cea T _dtoa_r
+0011fdfc 00000016 T _mbtowc_r
+0011fe14 00000024 T __ascii_mbtowc
+0011fe38 0000004c T _Balloc
+0011fe84 00000012 T _Bfree
+0011fe98 000000a6 T __multadd
+0011ff40 000000ba T __s2b
+0011fffc 00000046 T __hi0bits
+00120044 00000058 T __lo0bits
+0012009c 00000060 T __i2b
+001200fc 00000172 T __multiply
+00120270 000000ba T __pow5mult
+0012032c 000000ec T __lshift
+00120418 0000003e T __mcmp
+00120458 00000196 T __mdiff
+001205f0 00000064 T __ulp
+00120654 000000c2 T __b2d
+00120718 000000c0 T __d2b
+001207d8 0000005e T __ratio
+00120838 00000028 T _mprec_log10
+00120860 0000005c T __copybits
+001208bc 00000040 T __any_on
+001208fc 00000016 T _wctomb_r
+00120914 0000001c T __ascii_wctomb
+00120930 000000c0 T __ssputs_r
+001209f0 0000007a T _calloc_r
+00120a6c 00000034 T Xil_Assert
+00120aa0 00000010 T Xil_AssertSetCallback
+00120ab0 00000004 T XNullHandler
+00120ab4 00000054 T Xil_ConvertCharToNibble
+00120b08 000000e8 T Xil_ConvertStringToHex
+00120bf0 00000050 T Xil_WaitForEvent
+00120c40 0000005c T Xil_WaitForEvents
+00120c9c 00000098 T Xil_WaitForEventSet
+00120d34 00000018 T Xil_UtilRMW32
+00120d4c 00000064 T Xil_SecureMemCpy
+00120db0 0000006c T Xil_SecureZeroize
+00120e1c 00000044 T Xil_SMemCmp
+00120e60 00000120 T Xil_SMemCmp_CT
+00120f80 00000074 T Xil_SMemCpy
+00120ff4 0000003c T Xil_SMemSet
+00121030 00000084 T Xil_SStrCat
+001210b4 0000007c T Xil_SStrCmp
+00121130 00000084 T Xil_SStrCmp_CT
+001211b4 00000064 T Xil_SStrCpy
+00121218 00000060 T Xil_SMemMove
+00121278 0000002c T Xil_SecureRMW32
+001212a4 000000b4 T Xil_SChangeEndiannessAndCpy
+00121358 000000c8 T Xil_SReverseData
+00121420 00000068 T Xil_MemCpy64
+00121488 0000005c T XConfigInterruptCntrl
+001214e4 00000064 T XConnectToInterruptCntrl
+00121548 00000044 T XDisconnectInterruptCntrl
+0012158c 00000008 T XStartInterruptCntrl
+00121594 00000030 T XEnableIntrId
+001215c4 00000030 T XDisableIntrId
+001215f4 00000050 T XSetPriorityTriggerType
+00121644 0000003c T XGetPriorityTriggerType
+00121680 00000014 T XStopInterruptCntrl
+00121694 00000038 T XRegisterInterruptHandler
+001216cc 00000140 T XSetupInterruptSystem
+0012180c 00000068 T XGetEncodedIntrId
+00121874 00000024 T XTriggerSoftwareIntr
+00121898 00000044 W read
+001218dc 00000044 W _read
+00121920 00000008 W isatty
+00121928 00000008 W _isatty
+00121930 00000040 W _sbrk
+00121970 00000004 W _exit
+00121974 00000008 W _close
+0012197c 0000005c W write
+001219d8 0000005c W _write
+00121a34 00000008 W getpid
+00121a3c 00000008 W _getpid
+00121a44 00000010 W _fstat
+00121a54 0000001c W kill
+00121a70 0000001c W _kill
+00121a8c 0000001c W lseek
+00121aa8 0000001c W _lseek
+00121ac4 00000038 T Xil_SetTlbAttributes
+00121afc 00000024 T Xil_EnableMMU
+00121b20 00000028 T Xil_DisableMMU
+00121b48 00000068 T Xil_MemMap
+00121bb0 00000050 t StubHandler
+00121c00 000000c8 T XScuGic_Connect
+00121cc8 000000f4 T XScuGic_Disconnect
+00121dbc 00000104 T XScuGic_SoftwareIntr
+00121ec0 00000154 T XScuGic_SetPriorityTriggerType
+00122014 0000011c T XScuGic_GetPriorityTriggerType
+00122130 000000ac T XScuGic_InterruptMaptoCpu
+001221dc 000000f0 T XScuGic_Enable
+001222cc 000000a8 T XScuGic_InterruptUnmapFromCpu
+00122374 000000f0 T XScuGic_Disable
+00122464 0000009c T XScuGic_UnmapAllInterruptsFromCpu
+00122500 000000e8 T XScuGic_Stop
+001225e8 00000194 T XScuGic_CfgInitialize
+0012277c 00000050 T XScuGic_SetCpuID
+001227cc 00000010 T XScuGic_GetCpuID
+001227dc 0000001c T XScuGic_IsInitialized
+001227f8 00000078 T XScuGic_InterruptHandler
+00122870 00000064 T XScuGic_LookupConfig
+001228d4 0000005a T strncat
+00122930 00000024 T strnlen
+00122954 00000008 T XGetPlatform_Info
+0012295c 0000000c T XGetCoreId
+00122968 00000008 T XIOCoherencySupported
+00122970 00000050 T Xil_SpinLock
+001229c0 00000034 T Xil_SpinUnlock
+001229f4 0000006c T Xil_InitializeSpinLock
+00122a60 00000018 T Xil_ReleaseSpinLock
+00122a78 00000030 T Xil_IsSpinLockEnabled
+00122aa8 00000020 T xtimerinit
+00122ac8 00000008 t ___getpid_from_thumb
+00122ad0 00000008 t __memmove_from_arm
+00122afc T _init
+00122b08 T _fini
+00122b18 R __rodata_start
+00122b18 r all_implied_fbits
+00123524 00000024 r def.0
+001235e0 00000024 R memp_pools
+00123604 00000010 R memp_PBUF_POOL
+00123614 00000010 R memp_PBUF
+00123624 00000010 R memp_ARP_QUEUE
+00123634 00000010 R memp_FRAG_PBUF
+00123644 00000010 R memp_REASSDATA
+00123654 00000010 R memp_TCP_SEG
+00123664 00000010 R memp_TCP_PCB_LISTEN
+00123674 00000010 R memp_TCP_PCB
+00123684 00000010 R memp_UDP_PCB
+00123694 00000010 R tcp_pcb_lists
+001236a4 00000007 r tcp_persist_backoff
+001236ac 0000000d r tcp_backoff
+001236bc 0000002c r tcp_state_str
+001236e8 00000004 R lwip_num_cyclic_timers
+001236ec 00000030 R lwip_cyclic_timers
+0012371c 00000004 R ip_addr_broadcast
+00123720 00000004 R ip_addr_any
+00123724 00000006 R ethbroadcast
+0012372c 00000006 R ethzero
+00123734 0000000c r __func__.0
+00123740 00000040 r CSWTCH.27
+001237e0 00000014 r __func__.0
+001237f4 00000054 r TmrCtrOptionsTable
+00123848 00000101 R _ctype_
+0012394c 00000010 r blanks.1
+0012395c 00000010 r zeroes.0
+0012396c 00000010 r blanks.1
+0012397c 00000010 r zeroes.0
+00123990 0000000c r p05.0
+001239a0 000000c8 R __mprec_tens
+00123a68 00000028 R __mprec_tinytens
+00123a90 00000028 R __mprec_bigtens
+00123ab8 r all_implied_fbits
+001249fe A _SDA2_BASE_
+001249fe D __rodata1_end
+001249fe D __rodata1_start
+001249fe R __rodata_end
+001249fe D __sbss2_end
+001249fe D __sbss2_start
+001249fe D __sdata2_end
+001249fe D __sdata2_start
+00124a00 D __data_start
+00124a00 D __dso_handle
+00124a04 00000004 D dhcp_timoutcntr
+00124a08 00000038 D XExc_VectorTable
+00124a40 00000002 d tcp_port
+00124a44 00000004 d iss.0
+00124a48 00000002 d udp_port
+00124a4c 00000010 D xtopology
+00124a5c 00000004 D link_speed
+00124a60 00000408 D __malloc_av_
+00124e68 00000004 D __malloc_sbrk_base
+00124e6c 00000004 D __malloc_trim_threshold
+00124e70 0000000c D __sglue
+00124e80 00000004 D _impure_ptr
+00124e88 00000120 D _impure_data
+00124fa8 0000016c D __global_locale
+00125114 00000004 D Xil_AssertWait
+00125118 D __CTOR_END__
+00125118 D __CTOR_LIST__
+00125118 D __DTOR_END__
+00125118 D __DTOR_LIST__
+00125118 r __EH_FRAME_BEGIN__
+00125118 D ___CTORS_END___
+00125118 D ___CTORS_LIST___
+00125118 D ___DTORS_END___
+00125118 D ___DTORS_LIST___
+00125118 D __data1_end
+00125118 D __data1_start
+00125118 D __data_end
+00125118 D __fixup_end
+00125118 D __fixup_start
+00125188 r __FRAME_END__
+0012518c R __eh_framehdr_end
+0012518c R __eh_framehdr_start
+00128000 R MMUTable
+00128000 R __mmu_tbl_start
+0012c000 R __exidx_start
+0012c000 R __mmu_tbl_end
+0012c008 R __exidx_end
+0012c008 d __frame_dummy_init_array_entry
+0012c008 D __init_array_start
+0012c008 D __preinit_array_end
+0012c008 D __preinit_array_start
+0012c010 d __do_global_dtors_aux_fini_array_entry
+0012c010 D __fini_array_start
+0012c010 D __init_array_end
+0012c014 D __fini_array_end
+0012c018 00000098 D XAxiDma_ConfigTable
+0012c018 D __drvcfgsecdata_start
+0012c0b0 00000060 D XEmacPs_ConfigTable
+0012c110 00000050 D XTtcPs_ConfigTable
+0012c160 00000004 D XCortexa9_ConfigTable
+0012c164 00000608 D XScuGic_ConfigTable
+0012c768 D __drvcfgsecdata_size
+0012c76c A _SDA_BASE_
+0012c76c N __ARM.attributes_start
+0012c76c D __drvcfgsecdata_end
+0012c76c N __sbss_end
+0012c76c N __sbss_start
+0012c76c N __sdata_end
+0012c76c N __sdata_start
+0012c76c N __tbss_end
+0012c76c N __tbss_start
+0012c76c N __tdata_end
+0012c76c N __tdata_start
+0012e79b N __ARM.attributes_end
+00200000 B __bss_start
+00200000 00000001 b completed.1
+00200004 00000018 b object.0
+00200040 00000750 b dma
+00200790 00000004 b dma_ok
+00200794 00000004 b det_ok
+00200798 00000004 b det_cfg
+0020079c 00000004 b det_version
+002007a0 00000004 b client
+002007c0 00100010 b rx_buf
+003007d0 00000004 b rx_have
+003007d4 00000004 b rx_len
+003007d8 00000004 b rx_stream
+003007dc 00000004 b msg_start
+003007e0 00060000 b seg_log
+003607e0 00000004 b seg_n
+003607e4 00003000 b load_log
+003637e4 00000004 b load_n
+003637e8 00000010 b tx_hdr
+003637f8 00000100 b tx_small
+003638f8 00000004 b tx_data
+003638fc 00000004 b tx_total
+00363900 00000004 b tx_off
+00363904 00000024 b params
+00363928 00000004 b samples_stored
+0036392c 00000004 b debug_count
+00363930 000ffff8 b ev_out
+00463928 00000004 b ev_n
+0046392c 00000004 b ev_lost
+00463930 0000003c b server_netif
+0046396c 00000004 B echo_netif
+00463970 00000004 B TcpFastTmrFlag
+00463974 00000004 B TcpSlowTmrFlag
+00463978 00000004 b DetectEthLinkStatus.5
+0046397c 00000004 b Tcp_Fasttimer.4
+00463980 00000004 b Tcp_Slowtimer.3
+00463984 00000004 b dhcp_timer.2
+00463988 00000004 b dhcp_finetimer.1
+0046398c 00000004 b acd_timer.0
+00463990 00000004 B UndefinedExceptionAddr
+00463994 00000004 B PrefetchAbortAddr
+00463998 00000004 B DataAbortAddr
+0046399c 00000040 B TimerInst
+004639dc 00000001 b IsSleepTimerStarted.0
+004639e0 00000004 b IsTickTimerStarted.2
+004639e4 00000001 b Prescaler.0
+004639e6 00000002 b Interval.1
+004639e8 00000004 b ram
+004639ec 00000004 b ram_end
+004639f0 00000004 b lfree
+004639f4 000800bf B ram_heap
+004e3ab4 00000014 b memp_stats_UDP_PCB
+004e3ac8 0000013f B memp_memory_UDP_PCB_base
+004e3c08 00000004 b memp_tab_UDP_PCB
+004e3c0c 00000004 b memp_tab_PBUF_POOL
+004e3c10 00000014 b memp_stats_PBUF_POOL
+004e3c24 0038003f B memp_memory_PBUF_POOL_base
+00863c64 00000004 b memp_tab_PBUF
+00863c68 00000014 b memp_stats_PBUF
+00863c7c 0001003f B memp_memory_PBUF_base
+00873cbc 00000004 b memp_tab_ARP_QUEUE
+00873cc0 00000014 b memp_stats_ARP_QUEUE
+00873cd4 000007bf B memp_memory_ARP_QUEUE_base
+00874494 00000004 b memp_tab_FRAG_PBUF
+00874498 00000014 b memp_stats_FRAG_PBUF
+008744ac 0000403f B memp_memory_FRAG_PBUF_base
+008784ec 00000004 b memp_tab_REASSDATA
+008784f0 00000014 b memp_stats_REASSDATA
+00878504 0000017f B memp_memory_REASSDATA_base
+00878684 00000004 b memp_tab_TCP_SEG
+00878688 00000014 b memp_stats_TCP_SEG
+0087869c 0001003f B memp_memory_TCP_SEG_base
+008886dc 00000004 b memp_tab_TCP_PCB_LISTEN
+008886e0 00000014 b memp_stats_TCP_PCB_LISTEN
+008886f4 0000023f B memp_memory_TCP_PCB_LISTEN_base
+00888934 00000004 b memp_tab_TCP_PCB
+00888938 00000014 b memp_stats_TCP_PCB
+0088894c 0000183f B memp_memory_TCP_PCB_base
+0088a18c 00000001 b netif_num
+0088a190 00000004 B netif_list
+0088a194 00000004 B netif_default
+0088a198 00000001 B pbuf_free_ooseq_pending
+0088a19c 000000e0 B lwip_stats
+0088a27c 00000004 B tcp_bound_pcbs
+0088a280 00000004 B tcp_listen_pcbs
+0088a284 00000004 B tcp_ticks
+0088a288 00000004 B tcp_active_pcbs
+0088a28c 00000001 B tcp_active_pcbs_changed
+0088a28d 00000001 b tcp_timer_ctr
+0088a290 00000004 B tcp_tw_pcbs
+0088a294 00000001 b tcp_timer
+0088a298 00000004 b seqno
+0088a29c 00000001 b recv_flags
+0088a29e 00000002 b recv_acked
+0088a2a0 00000004 b ackno
+0088a2a4 00000001 b flags
+0088a2a8 00000004 b tcphdr
+0088a2ac 00000002 b tcplen
+0088a2b0 00000010 b inseg
+0088a2c0 00000004 b recv_data
+0088a2c4 00000002 b tcphdr_optlen
+0088a2c6 00000002 b tcp_optidx
+0088a2c8 00000004 b tcphdr_opt2
+0088a2cc 00000002 b tcphdr_opt1len
+0088a2d0 00000004 B tcp_input_pcb
+0088a2d4 00000004 B udp_pcbs
+0088a2d8 00000004 b xid.0
+0088a2dc 00000001 b dhcp_pcb_refcount
+0088a2e0 00000004 b dhcp_pcb
+0088a2e4 00000008 b dhcp_rx_options_given
+0088a2ec 00000020 b dhcp_rx_options_val
+0088a30c 000000f0 b arp_table
+0088a3fc 00000001 b etharp_cached_entry
+0088a400 00000004 b reassdatagrams
+0088a404 00000002 b ip_reass_pbufcount
+0088a406 00000002 b ip_id
+0088a408 00000010 b str.0
+0088a418 00000004 B phyaddrforemac
+0088a41c 00000004 B lwip_runtime_debug
+0088a420 00000080 B phymapemac0
+0088a4a0 00000080 B phymapemac1
+0088a520 00000004 B mac_config
+0088a524 00000004 B NetIf
+0088a528 00000018 B ip_data
+0088a540 00000004 b i.0
+0088a544 00008018 B pq_queue
+00900000 00000400 b tx_pbufs_storage
+00900400 00000400 b rx_pbufs_storage
+00900800 00000004 b bd_space_index
+00900804 00000004 b bd_space_attr_set
+00a00000 00100000 B emac_bd_space
+00b00000 00000018 b StatusHandlerTable
+00b00018 00000004 B __malloc_top_pad
+00b0001c 00000028 B __malloc_current_mallinfo
+00b00044 00000004 B __malloc_max_sbrked_mem
+00b00048 00000004 B __malloc_max_total_mem
+00b0004c 00000138 B __sf
+00b00184 00000004 B __stdio_exit_handler
+00b00188 00000004 B errno
+00b0018c 00000004 B __atexit
+00b00190 00000004 B _PathLocale
+00b00194 00000004 b Xil_AssertCallbackRoutine
+00b00198 00000004 B Xil_AssertStatus
+00b0019c 00000004 B fptr
+00b001a0 0000000c b XScuGicInstance
+00b001ac 00000004 b ScuGicInitialized
+00b001b0 00000004 b heap.1
+00b001b4 00000004 b CpuId
+00b001b8 00000004 b Xil_Spinlock_Addr
+00b001bc 00000004 b Xil_Spinlock_Flag_Addr
+00b001c0 B HeapBase
+00b001c0 B __bss_end
+00b001c0 B _heap
+00b001c0 B _heap_start
+00b0a1c0 B HeapLimit
+00b0a1c0 B _heap_end
+00b0a1c0 B _stack_end
+00b141c0 B __stack
+00b141c0 B _irq_stack_end
+00b141c0 B _stack
+00b145c0 B __irq_stack
+00b145c0 B _supervisor_stack_end
+00b14dc0 B __supervisor_stack
+00b14dc0 B _abort_stack_end
+00b151c0 B __abort_stack
+00b151c0 B _fiq_stack_end
+00b155c0 B __fiq_stack
+00b155c0 B _undef_stack_end
+00b159c0 B __undef_stack
+00b159c0 B end
+0fffff00 a RESERVED
+1ff00000 a DDR_SIZE
+1fffffff a DDR_END
+40000000 a FPEXC_EN
+72360000 a L2CCAuxControl
+f8000000 a PSS_SLCR_BASE_ADDR
+f8000004 a SLCRlockReg
+f8000008 a SLCRUnlockReg
+f8000244 a SLCRCPURSTReg
+f8000a1c a SLCRL2cRamReg
+f800d010 a EFUSEStaus
+f8f02000 a PSS_L2CC_BASE_ADDR
+f8f02100 a L2CCCrtl
+f8f02104 a L2CCAuxCrtl
+f8f02108 a L2CCTAGLatReg
+f8f0210c a L2CCDataLatReg
+f8f0221c a L2CCIntRaw
+f8f02220 a L2CCIntClear
+f8f02730 a L2CCSync
+f8f0277c a L2CCWay
+fe00000f a LRemap

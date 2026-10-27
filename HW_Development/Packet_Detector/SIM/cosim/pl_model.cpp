@@ -75,8 +75,10 @@ static void tick() {
     }
 }
 
+static u32 dma_regs[64];                      // DMA register stub (co-sim): plain storage
 extern "C" void Xil_Out32(UINTPTR a, u32 v) {
     init();
+    if ((a & 0xFFFF0000u) == 0x40400000u) { dma_regs[(a & 0xFF) / 4] = v; return; }
     top->s_axi_awaddr = a & 0xFFF; top->s_axi_wdata = v; top->s_axi_wstrb = 0xF;
     top->s_axi_awvalid = 1; top->s_axi_wvalid = 1; top->s_axi_bready = 1;
     bool aw = false, w = false, b = false;
@@ -92,6 +94,7 @@ extern "C" void Xil_Out32(UINTPTR a, u32 v) {
 
 extern "C" u32 Xil_In32(UINTPTR a) {
     init();
+    if ((a & 0xFFFF0000u) == 0x40400000u) return dma_regs[(a & 0xFF) / 4];
     top->s_axi_araddr = a & 0xFFF; top->s_axi_arvalid = 1; top->s_axi_rready = 1;
     bool ar = false;
     for (int k = 0; k < 1000; k++) {

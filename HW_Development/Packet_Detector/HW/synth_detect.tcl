@@ -18,7 +18,7 @@ set period 10.0
 file mkdir $out
 
 read_verilog [list \
-    [file join $rtl pd_dc_blocker.v] [file join $rtl pd_lpf.v] [file join $rtl pd_div16.v] \
+    [file join $rtl pd_halfband.v] [file join $rtl pd_dc_blocker.v] [file join $rtl pd_lpf.v] [file join $rtl pd_div16.v] \
     [file join $rtl pd_detect_core.v] [file join $rtl pd_cordic.v] [file join $rtl pd_cfo_cascade.v] \
     [file join $rtl pd_cfo_lane.v] [file join $rtl pd_tone_rom.v] [file join $rtl pd_sdp_ram.v] [file join $rtl pd_tone_check.v] \
     [file join $rtl pd_detect_top.v]]

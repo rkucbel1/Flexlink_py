@@ -3,13 +3,14 @@
 // AXI wrapper of the packet detector for the Zedboard block design (replaces the phase-1
 // loopback FIFO "pl_core"):
 //   S_AXIS  samples from the AXI DMA MM2S (one complex sample per beat, I [15:0], Q [31:16])
-//   M_AXIS  debug records to the AXI DMA S2MM, one per sample: {dbg_bits, dbg_metric};
-//           TLAST on the record of each input beat that had TLAST, so every S2MM transfer
-//           ends with its MM2S transfer
+//   M_AXIS  debug records to the AXI DMA S2MM, one per detector sample (20 Msps; with input
+//           stage 2 one per input pair): {dbg_bits, dbg_metric}; TLAST on the record of each
+//           input beat that had TLAST, so every S2MM transfer ends with its MM2S transfer
+//           (stage 2: transfers must hold whole pairs, i.e. an even number of samples)
 //   S_AXI   AXI4-Lite registers: control, status, parameters, event FIFO
 //
 // Register map (byte offsets; RW = read/write, RO = read only):
-//   0x00 ID          RO  0x50440100 ("PD", version 1.0)
+//   0x00 ID          RO  0x50440200 ("PD", version 2.0; 1.0 had no input stage 2)
 //   0x04 CTRL        RW  bit0 RESET (1 = detector held in reset; 1 after power-up)
 //                        bit1 DEBUG (send debug records on M_AXIS; change only when not BUSY)
 //                        bit2 LOOPBACK (S_AXIS -> M_AXIS unchanged, detector not fed)
@@ -17,7 +18,8 @@
 //                        flight), bit1 OPEN (a window still waits for samples), bits 7:4 number
 //                        of open windows, bit8 EV_OVF (event lost; sticky until RESET),
 //                        bit9 in reset, bit10 loopback
-//   0x0C SAMPLES     RO  samples processed since RESET (the detector's sample_cnt)
+//   0x0C SAMPLES     RO  input samples taken since RESET (stage 2: 40 Msps samples, twice the
+//                        detector's sample_cnt)
 //   0x10 OPEN_T      RO  t_trig of the first open window (valid when OPEN)
 //   0x14 EV_LEVEL    RO  words in the event FIFO (8 per event)
 //   0x18 EV_DATA     RO  next event word (reading removes it)
@@ -28,7 +30,7 @@
 //   0x2C N_CFO       RW   |  detector parameters (pd_protocol.Params); write them while RESET
 //   0x30 BLANK_LEN   RW   |  is 1. Power-up values are the Params defaults.
 //   0x34 ARM_HOLDOFF RW   |
-//   0x38 INPUT_STAGE RW   |
+//   0x38 INPUT_STAGE RW   |  0 LPF output, 1 20 Msps, 2 40 Msps (half-band in the PL)
 //   0x3C DC_SHIFT    RW   |
 //   0x40 TONE_LIN    RW  /   threshold as a linear ratio, Q.16 (firmware: tone_thresh_lin)
 //
@@ -117,7 +119,7 @@ module pd_axi (
     (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 M_AXIS TREADY" *)
     input  wire        m_axis_tready
 );
-    localparam [31:0] ID = 32'h5044_0100;
+    localparam [31:0] ID = 32'h5044_0200;     // "PD", version 2.0 (2.0: input stage 2)
     localparam integer EV_DEPTH = 256;           // words (32 events)
     localparam integer EV_LIMIT = EV_DEPTH - 96; // hold the input above this (>= 11 events room)
     localparam integer DBG_BITS = 6;             // debug FIFO 64 records
@@ -127,7 +129,7 @@ module pd_axi (
     reg        ctrl_reset, ctrl_debug, ctrl_loop;
     reg [15:0] r_eta_hi, r_eta_lo, r_qual, r_ncfo;
     reg [31:0] r_blank, r_hold;
-    reg        r_stage;
+    reg [1:0]  r_stage;
     reg [3:0]  r_shift;
     reg [23:0] r_lin;
 
@@ -162,7 +164,11 @@ module pd_axi (
         .ev_tone_num(det_ev_num), .ev_tone_den(det_ev_den), .ev_tone_fail(det_ev_fail),
         .busy(det_busy), .open_n(det_open_n), .open_t(det_open_t));
 
+    wire       stage2 = (r_stage == 2'd2);
     reg [31:0] samp_cnt;                          // accepted samples since reset
+    // a debug record is due with this beat (stage 2: with the second sample of each pair)
+    wire       rec_due = accept && (!stage2 || samp_cnt[0]);
+    wire [31:0] rec_of_beat = stage2 ? {1'b0, samp_cnt[31:1]} : samp_cnt;
     always @(posedge aclk) begin
         if (!det_rst_n)  samp_cnt <= 32'd0;
         else if (accept) samp_cnt <= samp_cnt + 32'd1;
@@ -231,12 +237,12 @@ module pd_axi (
             if (dbg_push) dbg_wr <= dbg_wr + 1'b1;
             if (dbg_pop) begin dbg_rd <= dbg_rd + 1'b1; dbg_sent <= dbg_sent + 32'd1; end
             dbg_cnt <= dbg_cnt + {{DBG_BITS{1'b0}}, dbg_push} - {{DBG_BITS{1'b0}}, dbg_pop};
-            res     <= res + {7'd0, accept} - {7'd0, dbg_pop} - {7'd0, dbg_drop};
+            res     <= res + {7'd0, rec_due} - {7'd0, dbg_pop} - {7'd0, dbg_drop};
             if (det_dbg_valid) rec_n <= rec_n + 32'd1;
-            if (accept && s_axis_tlast && ctrl_debug) begin
-                tl[tl_wr] <= samp_cnt; tl_wr <= tl_wr + 2'd1;
+            if (rec_due && s_axis_tlast && ctrl_debug) begin
+                tl[tl_wr] <= rec_of_beat; tl_wr <= tl_wr + 2'd1;
             end
-            tl_n <= tl_n + {2'd0, accept && s_axis_tlast && ctrl_debug} - {2'd0, det_dbg_valid && tl_hit};
+            tl_n <= tl_n + {2'd0, rec_due && s_axis_tlast && ctrl_debug} - {2'd0, det_dbg_valid && tl_hit};
             if (det_dbg_valid && tl_hit) tl_rd <= tl_rd + 2'd1;
         end
     end
@@ -273,7 +279,7 @@ module pd_axi (
             awready_r <= 1'b0; wready_r <= 1'b0; s_axi_bvalid <= 1'b0;
             ctrl_reset <= 1'b1; ctrl_debug <= 1'b0; ctrl_loop <= 1'b0;
             r_eta_hi <= 16'd8028; r_eta_lo <= 16'd2621; r_qual <= 16'd128; r_ncfo <= 16'd2048;
-            r_blank <= 32'd288; r_hold <= 32'd131072; r_stage <= 1'b0; r_shift <= 4'd10;
+            r_blank <= 32'd288; r_hold <= 32'd131072; r_stage <= 2'd0; r_shift <= 4'd10;
             r_lin <= 24'd1307615;
         end else begin
             awready_r <= 1'b0;
@@ -291,7 +297,7 @@ module pd_axi (
                     6'h0B: r_ncfo   <= s_axi_wdata[15:0];
                     6'h0C: r_blank  <= s_axi_wdata;
                     6'h0D: r_hold   <= s_axi_wdata;
-                    6'h0E: r_stage  <= s_axi_wdata[0];
+                    6'h0E: r_stage  <= s_axi_wdata[1:0];
                     6'h0F: r_shift  <= s_axi_wdata[3:0];
                     6'h10: r_lin    <= s_axi_wdata[23:0];
                     default: ;
@@ -328,7 +334,7 @@ module pd_axi (
                     6'h0B: s_axi_rdata <= {16'd0, r_ncfo};
                     6'h0C: s_axi_rdata <= r_blank;
                     6'h0D: s_axi_rdata <= r_hold;
-                    6'h0E: s_axi_rdata <= {31'd0, r_stage};
+                    6'h0E: s_axi_rdata <= {30'd0, r_stage};
                     6'h0F: s_axi_rdata <= {28'd0, r_shift};
                     6'h10: s_axi_rdata <= {8'd0, r_lin};
                     default: s_axi_rdata <= 32'd0;

@@ -18,7 +18,7 @@ its word lengths:
 
     python pd_bittrue_check.py                 # everything (~5 minutes)
     python pd_bittrue_check.py --quick         # fewer trials (~1 minute)
-    python pd_bittrue_check.py --only sweeps   # or: mc, noise, interferers
+    python pd_bittrue_check.py --only sweeps   # or: mc, noise, interferers, decim
 
 Results: printed, and written to ../BITTRUE_results.json (the numbers in ../BITTRUE.md);
 --quick writes ../BITTRUE_results_quick.json instead, so it never replaces the full run.
@@ -83,9 +83,10 @@ def load_tx(root: Path) -> np.ndarray:
 
 
 def make_trials(tx: np.ndarray, snr_db: float, n: int, rng, cfo_max=500e3, payload40=2000,
-                extra=None, packet=True, idle=IDLE):
+                extra=None, packet=True, idle=IDLE, return40=False):
     """(n, N20) complex decimated signals, CFOs, Preamble A start in the LPF domain.
-    packet=False: noise (at the level SNR snr_db would give) plus `extra` only."""
+    packet=False: noise (at the level SNR snr_db would give) plus `extra` only.
+    return40: also return the (n, N40) signals at 40 Msps, before decimation."""
     pkt = tx[:12480 + payload40] * (1.0 if packet else 0.0)
     p_pre = float(np.mean(np.abs(tx[:12480]) ** 2))
     n40 = 2 * idle + pkt.size
@@ -99,6 +100,8 @@ def make_trials(tx: np.ndarray, snr_db: float, n: int, rng, cfo_max=500e3, paylo
     if extra is not None:
         sig += extra(t)
     x20 = signal.resample_poly(sig, 1, 2, axis=1) * np.sqrt(2)   # Decimate_Payload_Rx "filter"
+    if return40:
+        return x20, cfo, idle + PA_OFFSET + R.LPF_DELAY, sig
     return x20, cfo, idle + PA_OFFSET + R.LPF_DELAY
 
 
@@ -265,6 +268,42 @@ def monte_carlo(tx, sim, snrs, n_trials, rng) -> list[dict]:
     return out
 
 
+def decimator_compare(tx, snrs, n_trials, rng) -> list[dict]:
+    """40 -> 20 Msps on the same trials, three ways, then the bit-true detector:
+    resample_poly (simulator, float, then quantised at 20 Msps: the reference so far),
+    halfband (bit-true: quantised at 40 Msps, R.halfband, input_stage 2), and every other
+    sample without a filter (the simulator's 'simple' decimator)."""
+    p = params()
+    out = []
+    for snr in snrs:
+        x20, cfo, pa0, x40 = make_trials(tx, snr, n_trials, rng, return40=True)
+        lpfs = {"resample_poly": (R.front_end(quantise(x20), 10), pa0),
+                "halfband": (R.front_end(R.halfband(quantise(x40)), 10), pa0 + R.HB_DELAY // 2),
+                "every_other": (R.front_end(quantise(x40[:, ::2]), 10), pa0)}
+        r = {"snr_db": snr, "trials": n_trials}
+        for name, (xl, pa) in lpfs.items():
+            det, ferr, tones, late = 0, [], [], 0
+            for k in range(n_trials):
+                t, f, tone, _ = bittrue_chain(xl[:, :, k], p)
+                if t is None or not pa - 300 <= t < pa + L_A:
+                    continue
+                det += 1
+                if f is None or t - pa + 2048 > L_A:
+                    late += 1
+                    continue
+                ferr.append(f - cfo[k])
+                tones.append(tone)
+            r[name] = {"pd": det / n_trials, "late": late, "cfo_err_hz": stats(ferr),
+                       "tone_min_db": float(min(tones)) if tones else None,
+                       "tone_below_13": int(sum(t < 13 for t in tones))}
+        out.append(r)
+        print(f"  {snr:+5.0f} dB  " + " | ".join(
+            f"{n}: Pd {r[n]['pd']:.3f}, late {r[n]['late']}, CFO rms {r[n]['cfo_err_hz'].get('rms', float('nan')):5.0f} Hz, "
+            f"ToneCheck min {r[n]['tone_min_db'] if r[n]['tone_min_db'] is None else round(r[n]['tone_min_db'], 1)}"
+            for n in lpfs), flush=True)
+    return out
+
+
 def tone_sweep(tx, sim, rng, n_trials) -> list[dict]:
     """ToneCheck error of the integer DFT (LUT bits / amplitude / power width) vs float."""
     x20, cfo, _ = make_trials(tx, -12, n_trials, rng)
@@ -389,7 +428,7 @@ def interferers(tx, sim, rng, n=10) -> list[dict]:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Check the bit-true packet-detector model")
     ap.add_argument("--quick", action="store_true")
-    ap.add_argument("--only", choices=("sweeps", "mc", "noise", "interferers"))
+    ap.add_argument("--only", choices=("sweeps", "mc", "noise", "interferers", "decim"))
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--out", type=Path,
                     help="results file (default ../BITTRUE_results.json; with --quick ../BITTRUE_results_quick.json)")
@@ -433,6 +472,9 @@ def main(argv=None) -> int:
     if a.only in (None, "interferers"):
         print("4. DC offset and CW interferer (no packet)")
         res["interferers"] = interferers(tx, sim, rng, 5 if a.quick else 10)
+    if a.only in (None, "decim"):
+        print("5. 40 -> 20 Msps: resample_poly vs bit-true half-band vs every other sample")
+        res["decimator"] = decimator_compare(tx, (-14, -13, -12, -10, -6, 10), nt, rng)
     a.out.write_text(json.dumps(res, indent=1))
     print(f"Wrote {a.out}")
     return 0

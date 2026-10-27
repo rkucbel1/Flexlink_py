@@ -20,6 +20,8 @@
  *                  samples have not all arrived) as a truncated event, once, in the RUN in which
  *                  it was triggered. The detector state carries over to the next RUN.
  *   RUN + loopback samples DDR -> MM2S -> PL (detector bypassed) -> S2MM -> debug buffer.
+ * Input stage 2 (40 Msps samples, half-band decimator in the PL): RUN counts must be even
+ * (whole input pairs); events, debug records and the truncation check are in 20 Msps samples.
  * The firmware converts the detector's integers to the event record: cfo_valid_cnt = t + N_CFO,
  * ToneCheck dB = 10 log10(num / den) (Q8.8), TONE_THRESH (Q8.8 dB) -> linear threshold.
  *
@@ -28,7 +30,10 @@
  *
  * Protocol summary (little-endian; header 16 bytes):
  *     u32 magic 0x44504C46, u16 cmd, u16 status, u32 seq, u32 length, then payload
- *     PING 1, RESET 2, SET_PARAMS 3, LOAD_SAMPLES 4, READ_SAMPLES 5, RUN 6, GET_DEBUG 7
+ *     PING 1, RESET 2, SET_PARAMS 3, LOAD_SAMPLES 4, READ_SAMPLES 5, RUN 6, GET_DEBUG 7,
+ *     MEMTEST 8 (diagnostic: board-local DDR test, no network involved)
+ *     REG_READ 9 / REG_WRITE 10 (diagnostic: a 32-bit register in the PL range
+ *     0x40000000..0x7FFFFFFF, e.g. the AXI DMA or the detector)
  */
 #include <stdio.h>
 #include <string.h>
@@ -40,6 +45,7 @@
 #include "xstatus.h"
 #include "xaxidma.h"
 #include "xil_io.h"
+#include "sleep.h"
 
 #include "lwip/err.h"
 #include "lwip/tcp.h"
@@ -49,7 +55,7 @@
 /* ---------------------------------------------------------------------------------- */
 #define PD_PORT                 5001
 #define PD_PROTOCOL_VERSION     1u
-#define PD_BUILD                3u              /* bump when the firmware changes */
+#define PD_BUILD                9u              /* bump when the firmware changes */
 
 #define SAMPLE_BUF_ADDR         0x10000000u
 #define DEBUG_BUF_ADDR          0x18000000u
@@ -71,7 +77,9 @@
 #else
 #define PD_BASE 0x43C00000u
 #endif
-#define PD_ID_VALUE             0x50440100u
+#define PD_ID_MASK              0xFFFF0000u     /* "PD"; low half = register map version */
+#define PD_ID_VALUE             0x50440000u
+#define PD_ID_V2                0x0200u         /* 2.0: input stage 2 (40 Msps, half-band) */
 #define R_ID                    0x00u
 #define R_CTRL                  0x04u
 #define R_STATUS                0x08u
@@ -98,7 +106,9 @@
 #define PARAMS_SIZE             36u
 
 enum { CMD_PING = 1, CMD_RESET = 2, CMD_SET_PARAMS = 3, CMD_LOAD_SAMPLES = 4,
-       CMD_READ_SAMPLES = 5, CMD_RUN = 6, CMD_GET_DEBUG = 7 };
+       CMD_READ_SAMPLES = 5, CMD_RUN = 6, CMD_GET_DEBUG = 7, CMD_MEMTEST = 8,
+       CMD_REG_READ = 9, CMD_REG_WRITE = 10, CMD_FPU_TEST = 11,
+       CMD_PATTERN_CHECK = 12, CMD_SEG_LOG = 13 };
 enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG = 4,
        ST_INTERNAL = 5 };
 
@@ -119,12 +129,26 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 static XAxiDma dma;
 static int dma_ok;
 static int det_ok;                  /* detector found (ID register) */
+static int det_cfg;                 /* build 7: detector configured (first SET_PARAMS or RUN);
+                                     * until then it stays in its power-on reset, as with build 3 */
+static u32 det_version;             /* register map version, 0x0100 or 0x0200 */
 
 static struct tcp_pcb *client;
 
 static u8  rx_buf[HDR_SIZE + MAX_PAYLOAD] __attribute__((aligned(64)));
 static u32 rx_have;                 /* bytes of the current message received */
 static u32 rx_len;                  /* payload length from its header */
+
+/* Diagnostic (build 8): where each received pbuf's payload sat in memory, so the PC can turn a
+ * bad sample into the memory address it passed through. Cleared by RESET. */
+#define SEG_LOG_MAX             32768u
+#define LOAD_LOG_MAX            1024u
+static u32 rx_stream;               /* bytes received on this connection */
+static u32 msg_start;               /* stream position of the current message's header */
+static u32 seg_log[SEG_LOG_MAX][3]; /* stream position, payload address, length */
+static u32 seg_n;
+static u32 load_log[LOAD_LOG_MAX][3]; /* sample offset, count, stream position of sample 0 */
+static u32 load_n;
 
 static u8        tx_hdr[HDR_SIZE];
 static u8        tx_small[256];     /* short replies and error messages */
@@ -231,6 +255,9 @@ static s16 tone_db_q8(u64 num, u64 den)
 
 static void reset_connection_state(void)
 {
+    rx_stream = 0;
+    seg_n = 0;
+    load_n = 0;
     rx_have = 0;
     rx_len = 0;
     tx_total = 0;
@@ -310,7 +337,7 @@ static void drain_events(void)
 static void detector_reset(void)
 {
     u32 i;
-    if (!det_ok) {
+    if (!det_ok || !det_cfg) {
         return;
     }
     pd_wr(R_CTRL, CTRL_RESET);
@@ -329,23 +356,24 @@ static void detector_reset(void)
 /*
  * Stream `bytes` from src through the PL, in chunks; with dst != 0 the PL's output stream is
  * written to dst (each MM2S transfer ends with TLAST, which ends the matching S2MM transfer).
+ * The output has 1 / div of the input's length (div 2: the half-band, one record per pair).
  * With events != 0 the detector's event FIFO is read while the DMA runs.
  * Returns 0 or a negative error code (message in err).
  */
-static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, int events, char *err, u32 err_len)
+static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, u32 div, int events, char *err, u32 err_len)
 {
     u32 off;
 
     Xil_DCacheFlushRange(src, bytes);
     if (dst) {
-        Xil_DCacheInvalidateRange(dst, bytes);
+        Xil_DCacheInvalidateRange(dst, bytes / div);
     }
     for (off = 0; off < bytes; off += DMA_CHUNK_BYTES) {
         u32 n = bytes - off < DMA_CHUNK_BYTES ? bytes - off : DMA_CHUNK_BYTES;
         u32 polls = DMA_TIMEOUT_POLLS;
         u32 sr_rx = 0, sr_tx, got;
 
-        if (dst && XAxiDma_SimpleTransfer(&dma, dst + off, n, XAXIDMA_DEVICE_TO_DMA) != XST_SUCCESS) {
+        if (dst && XAxiDma_SimpleTransfer(&dma, dst + off / div, n / div, XAXIDMA_DEVICE_TO_DMA) != XST_SUCCESS) {
             snprintf(err, err_len, "S2MM start failed at byte %lu", (unsigned long)off);
             dma_reset();
             return -1;
@@ -381,15 +409,15 @@ static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, int events, char *err
         }
         if (dst) {
             got = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_RX_OFFSET, XAXIDMA_BUFFLEN_OFFSET);
-            if (got != n) {
+            if (got != n / div) {
                 snprintf(err, err_len, "S2MM received %lu bytes, expected %lu",
-                         (unsigned long)got, (unsigned long)n);
+                         (unsigned long)got, (unsigned long)(n / div));
                 return -5;
             }
         }
     }
     if (dst) {
-        Xil_DCacheInvalidateRange(dst, bytes);
+        Xil_DCacheInvalidateRange(dst, bytes / div);
     }
     return 0;
 }
@@ -400,13 +428,15 @@ static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, int events, char *err
  */
 static int detector_run(u32 count, int debug, char *err, u32 err_len)
 {
-    u32 start, polls, st, n_cfo = rd32(params + 12);
+    u32 start, start20, polls, st, n_cfo = rd32(params + 12);
+    u32 div = rd32(params + 28) == 2u ? 2u : 1u;    /* input stage 2: 2 input samples per detector sample */
 
     ev_n = 0;
     ev_lost = 0;
     start = pd_rd(R_SAMPLES);
+    start20 = start / div;
     pd_wr(R_CTRL, debug ? CTRL_DEBUG : 0u);
-    if (count > 0 && dma_stream(SAMPLE_BUF_ADDR, debug ? DEBUG_BUF_ADDR : 0, 4u * count, 1, err, err_len) != 0) {
+    if (count > 0 && dma_stream(SAMPLE_BUF_ADDR, debug ? DEBUG_BUF_ADDR : 0, 4u * count, div, 1, err, err_len) != 0) {
         pd_wr(R_CTRL, 0);
         return -1;
     }
@@ -436,7 +466,7 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
         return -5;
     }
     /* a window still waiting for samples: report it once, in the RUN that triggered it */
-    if ((st & STATUS_OPEN) && pd_rd(R_OPEN_T) - start < count) {
+    if ((st & STATUS_OPEN) && pd_rd(R_OPEN_T) - start20 < count / div) {
         u32 t = pd_rd(R_OPEN_T);
         u8 *r = ev_out + 8u + EV_SIZE * ev_n;
         memset(r, 0, EV_SIZE);
@@ -540,6 +570,8 @@ static void handle_message(struct tcp_pcb *pcb)
         return;
 
     case CMD_RESET:
+        seg_n = 0;
+        load_n = 0;
         samples_stored = 0;
         debug_count = 0;
         detector_reset();
@@ -555,8 +587,13 @@ static void handle_message(struct tcp_pcb *pcb)
             reply_error(pcb, cmd, ST_BAD_ARG, seq, "tone_thresh must be 0..24 dB (Q8.8 0..6144)");
             return;
         }
-        if (rd32(pl + 28) > 1u) {
-            reply_error(pcb, cmd, ST_BAD_ARG, seq, "input_stage must be 0 (LPF output) or 1 (decimated input)");
+        if (rd32(pl + 28) > 2u) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq,
+                        "input_stage must be 0 (LPF output), 1 (20 Msps input) or 2 (40 Msps input)");
+            return;
+        }
+        if (rd32(pl + 28) == 2u && det_ok && det_version < PD_ID_V2) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "input_stage 2 needs the bitstream with the half-band (ID 2.0)");
             return;
         }
         if (rd32(pl + 12) < 128u || rd32(pl + 12) > 4096u) {
@@ -568,6 +605,7 @@ static void handle_message(struct tcp_pcb *pcb)
             return;
         }
         memcpy(params, pl, PARAMS_SIZE);
+        det_cfg = 1;
         detector_reset();                   /* new parameters take effect from a reset */
         reply(pcb, cmd, ST_OK, seq, NULL, 0);
         return;
@@ -587,6 +625,12 @@ static void handle_message(struct tcp_pcb *pcb)
             return;
         }
         memcpy((u8 *)(UINTPTR)SAMPLE_BUF_ADDR + 4u * offset, pl + 4, 4u * count);
+        if (load_n < LOAD_LOG_MAX) {
+            load_log[load_n][0] = offset;
+            load_log[load_n][1] = count;
+            load_log[load_n][2] = msg_start + HDR_SIZE + 4u;
+            load_n++;
+        }
         if (offset + count > samples_stored) {
             samples_stored = offset + count;
         }
@@ -640,22 +684,35 @@ static void handle_message(struct tcp_pcb *pcb)
                             "no detector in this bitstream - use RUN with the PL-loopback flag");
                 return;
             }
+            if (rd32(params + 28) == 2u && (count & 1u)) {
+                reply_error(pcb, cmd, ST_BAD_ARG, seq,
+                            "input_stage 2: RUN count must be even (whole 40 Msps sample pairs)");
+                return;
+            }
+            if (!det_cfg) {
+                det_cfg = 1;
+                detector_reset();
+            }
             debug_count = 0;
             if (detector_run(count, (flags & RUN_FLAG_DEBUG) != 0, msg, sizeof(msg)) != 0) {
                 reply_error(pcb, cmd, ST_INTERNAL, seq, msg);
                 return;
             }
             if (flags & RUN_FLAG_DEBUG) {
-                debug_count = count;
+                debug_count = rd32(params + 28) == 2u ? count / 2u : count;
             }
             reply(pcb, cmd, ST_OK, seq, ev_out, 8u + EV_SIZE * ev_n);
             return;
         }
         debug_count = 0;
+        if (det_ok && !det_cfg) {
+            det_cfg = 1;
+            detector_reset();
+        }
         if (det_ok) {
             pd_wr(R_CTRL, CTRL_LOOPBACK);
         }
-        if (count > 0 && dma_stream(SAMPLE_BUF_ADDR, DEBUG_BUF_ADDR, 4u * count, 0, msg, sizeof(msg)) != 0) {
+        if (count > 0 && dma_stream(SAMPLE_BUF_ADDR, DEBUG_BUF_ADDR, 4u * count, 1, 0, msg, sizeof(msg)) != 0) {
             if (det_ok) {
                 pd_wr(R_CTRL, 0);
             }
@@ -669,6 +726,151 @@ static void handle_message(struct tcp_pcb *pcb)
         wr32(tx_small + 0, 0);          /* no events */
         wr32(tx_small + 4, count);      /* samples processed */
         reply(pcb, cmd, ST_OK, seq, tx_small, 8);
+        return;
+    }
+
+    case CMD_MEMTEST: {
+        /* u32 addr, u32 bytes, u32 wait_ms, u32 flags (bit0: detector held in reset,
+         * bit1: ~address instead of address as the pattern). Fill, flush to DDR, wait,
+         * invalidate, compare. Reply: u32 bad words, u32 n listed, n x (u32 addr, u32 value). */
+        u32 addr, bytes, wait_ms, mflags, i, n_bad = 0, n_list = 0;
+        volatile u32 *mp;
+        u8 *out = ev_out;
+        if (len < 16) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "MEMTEST: payload must be u32 addr, bytes, wait_ms, flags");
+            return;
+        }
+        addr = rd32(pl); bytes = rd32(pl + 4); wait_ms = rd32(pl + 8); mflags = rd32(pl + 12);
+        if (addr < 0x04000000u || (addr & 63u) || (bytes & 63u) || bytes == 0 ||
+            bytes > 0x20000000u - addr || wait_ms > 60000u) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq,
+                        "MEMTEST: addr >= 0x04000000, 64-byte aligned, inside DDR (< 0x20000000), wait <= 60 s");
+            return;
+        }
+        if ((mflags & 1u) && det_ok) {
+            pd_wr(R_CTRL, CTRL_RESET);
+        }
+        mp = (volatile u32 *)(UINTPTR)addr;
+        for (i = 0; i < bytes / 4u; i++) {
+            u32 a = addr + 4u * i;
+            mp[i] = (mflags & 2u) ? ~a : a;
+        }
+        Xil_DCacheFlushRange(addr, bytes);
+        if (wait_ms) {
+            usleep(1000u * wait_ms);
+        }
+        Xil_DCacheInvalidateRange(addr, bytes);
+        for (i = 0; i < bytes / 4u; i++) {
+            u32 a = addr + 4u * i;
+            u32 want = (mflags & 2u) ? ~a : a;
+            u32 got = mp[i];
+            if (got != want) {
+                if (n_list < 1000u) {
+                    wr32(out + 8u + 8u * n_list, a);
+                    wr32(out + 12u + 8u * n_list, got);
+                    n_list++;
+                }
+                n_bad++;
+            }
+        }
+        if ((mflags & 1u) && det_ok) {
+            detector_reset();
+        }
+        samples_stored = 0;                 /* the test overwrote the buffers */
+        debug_count = 0;
+        wr32(out, n_bad);
+        wr32(out + 4, n_list);
+        xil_printf("MEMTEST 0x%08x + 0x%x, wait %d ms: %d bad words\r\n",
+                   (unsigned int)addr, (unsigned int)bytes, (int)wait_ms, (int)n_bad);
+        reply(pcb, cmd, ST_OK, seq, out, 8u + 8u * n_list);
+        return;
+    }
+
+    case CMD_REG_READ:
+    case CMD_REG_WRITE: {
+        u32 a;
+        if (len < (cmd == CMD_REG_READ ? 4u : 8u)) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "REG_READ: u32 addr; REG_WRITE: u32 addr, u32 value");
+            return;
+        }
+        a = rd32(pl);
+        if (a < 0x40000000u || a > 0x7FFFFFFCu || (a & 3u)) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "register address must be 4-byte aligned in 0x40000000..0x7FFFFFFF");
+            return;
+        }
+        if (cmd == CMD_REG_WRITE) {
+            Xil_Out32(a, rd32(pl + 4));
+        }
+        wr32(tx_small, Xil_In32(a));
+        reply(pcb, cmd, ST_OK, seq, tx_small, 4);
+        return;
+    }
+
+    case CMD_FPU_TEST: {
+        /* Diagnostic (build 7): u32 q8 dB, u32 iterations. Runs the double-precision code of
+         * tone_thresh_lin / tone_db_q8 without touching the PL. Reply: u32 lin, u32 db_q8. */
+        u32 q8, iters, i, lin = 0;
+        s16 db = 0;
+        if (len < 8) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "FPU_TEST: payload must be u32 q8, u32 iterations");
+            return;
+        }
+        q8 = rd32(pl);
+        iters = rd32(pl + 4);
+        if (q8 > TONE_THRESH_MAX_Q8 || iters == 0 || iters > 100000u) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "FPU_TEST: q8 0..6144, iterations 1..100000");
+            return;
+        }
+        for (i = 0; i < iters; i++) {
+            lin = tone_thresh_lin(q8);
+            db = tone_db_q8((u64)lin, 65536u);
+        }
+        wr32(tx_small, lin);
+        wr32(tx_small + 4, (u32)(s32)db);
+        reply(pcb, cmd, ST_OK, seq, tx_small, 8);
+        return;
+    }
+
+    case CMD_PATTERN_CHECK: {
+        /* Diagnostic (build 7): compare the sample buffer, on the board, with the pattern
+         * sample k = (k & 0x7FF, (k >> 11) & 0x7FF) that pd_bisect.py loads. Bad words found
+         * here came in on the receive path (or were written into DDR afterwards); words that
+         * are only wrong in a READ_SAMPLES reply were damaged on the send path.
+         * Reply: u32 bad, u32 n listed, n x (u32 sample index, u32 value). */
+        u32 k, n_bad = 0, n_list = 0;
+        const volatile u32 *sp = (const volatile u32 *)(UINTPTR)SAMPLE_BUF_ADDR;
+        u8 *out = ev_out;
+        for (k = 0; k < samples_stored; k++) {
+            u32 want = (k & 0x7FFu) | (((k >> 11) & 0x7FFu) << 16);
+            u32 got = sp[k];
+            if (got != want) {
+                if (n_list < 1000u) {
+                    wr32(out + 8u + 8u * n_list, k);
+                    wr32(out + 12u + 8u * n_list, got);
+                    n_list++;
+                }
+                n_bad++;
+            }
+        }
+        wr32(out, n_bad);
+        wr32(out + 4, n_list);
+        reply(pcb, cmd, ST_OK, seq, out, 8u + 8u * n_list);
+        return;
+    }
+
+    case CMD_SEG_LOG: {
+        /* Diagnostic (build 8). Reply: u32 n_loads, u32 n_segs, n_loads x (offset, count,
+         * stream pos of sample 0), n_segs x (stream pos, payload address, length). */
+        u8 *out = ev_out;
+        u32 nl = load_n, ns = seg_n;
+        if (8u + 12u * (nl + ns) > sizeof(ev_out)) {
+            ns = (u32)((sizeof(ev_out) - 8u) / 12u) - nl;
+        }
+        wr32(out, nl);
+        wr32(out + 4, ns);
+        memcpy(out + 8, load_log, 12u * nl);
+        memcpy(out + 8 + 12u * nl, seg_log, 12u * ns);
+        reply(pcb, cmd, ST_OK, seq, out, 8u + 12u * (nl + ns));
         return;
     }
 
@@ -753,7 +955,24 @@ static err_t recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     }
 
     total = p->tot_len;
+    {
+        const struct pbuf *q;
+        u32 pos = rx_stream;
+        for (q = p; q != NULL && seg_n < SEG_LOG_MAX; q = q->next) {
+            seg_log[seg_n][0] = pos;
+            seg_log[seg_n][1] = (u32)(UINTPTR)q->payload;
+            seg_log[seg_n][2] = q->len;
+            seg_n++;
+            pos += q->len;
+            if (q->len == q->tot_len) {
+                break;
+            }
+        }
+    }
     while (off < total) {
+        if (rx_have == 0) {
+            msg_start = rx_stream + off;
+        }
         u32 want = rx_have < HDR_SIZE ? HDR_SIZE - rx_have : HDR_SIZE + rx_len - rx_have;
         u32 n = total - off < want ? total - off : want;
 
@@ -782,6 +1001,7 @@ static err_t recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
             rx_len = 0;
         }
     }
+    rx_stream += total;
     tcp_recved(pcb, (u16_t)total);
     pbuf_free(p);
     return ERR_OK;
@@ -840,10 +1060,10 @@ int start_application(void)
     }
     {
         u32 id = pd_rd(R_ID);
-        det_ok = (id == PD_ID_VALUE);
+        det_ok = ((id & PD_ID_MASK) == PD_ID_VALUE);
+        det_version = id & 0xFFFFu;
         if (det_ok) {
-            pr_default_params();
-            detector_reset();
+            pr_default_params();            /* build 7: configured at the first SET_PARAMS / RUN */
             xil_printf("Detector found (ID 0x%08x)\r\n", (unsigned int)id);
         } else {
             xil_printf("WARNING: no detector at 0x%08x (ID 0x%08x) - PL loopback only\r\n",

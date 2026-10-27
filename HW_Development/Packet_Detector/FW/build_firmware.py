@@ -103,10 +103,12 @@ PHY_WAIT_S = 20
 
 
 def patch_phy_timeout(platform):
+    vec_files = patch_irq_fpu_save()
     files = glob.glob(os.path.join(WS, PLATFORM, "**", "libsrc", "lwip220", "**", "xemacpsif_physpeed.c"),
                       recursive=True)
     if not files:
         print("Warning: xemacpsif_physpeed.c not found in the platform - PHY timeout not patched")
+        platform.build()
         return
     patched = 0
     for path in files:
@@ -124,16 +126,73 @@ def patch_phy_timeout(platform):
             patched += 1
     if patched == 0:
         print("Warning: Marvell timeout not found in xemacpsif_physpeed.c - not patched")
+        platform.build()
         return
     print(f"Patched the Marvell PHY auto-negotiation timeout to {PHY_WAIT_S} s in {patched} file(s); rebuilding platform")
     try:
         platform.build()
     except Exception as exc:
         print(f"Platform rebuild error: {exc}")
+    for path in vec_files:
+        with open(path) as f:
+            if FPU_FIXED not in f.read():
+                print(f"Warning: the platform build restored the original {path} - VFP save NOT patched")
     for path in files:                                   # make sure the build did not regenerate it
         with open(path) as f:
             if f"timeout_counter == {PHY_WAIT_S})" not in f.read():
                 print(f"Warning: the platform build restored the original {path} - timeout NOT patched")
+
+
+# The standalone BSP's IRQ / FIQ entry (asm_vectors.S) saves the VFP/NEON registers only when
+# FPU_HARD_FLOAT_ABI_ENABLED is set, and the 2025.2 SDT flow never sets it. The Ethernet
+# interrupt handler uses them (XEmacPs_GetQxOffset copies its table with memcpy, which uses
+# d0-d7), so an interrupt in the middle of a memcpy in lwIP or pd_server.c left 8 or 16 bytes of
+# that table (0x404 0x408 / 0x624 0x628) in the copied data: about 0.13 % of the samples were
+# wrong on LOAD and READ (firmware builds 4-8; build 3 probably escaped by its memory layout). Patch the
+# platform's copy so the handlers always save d0-d7, d16-d31, FPSCR and FPEXC.
+FPU_GUARD = "#if FPU_HARD_FLOAT_ABI_ENABLED"
+FPU_FIXED = "#if 1 /* Flexlink: always save VFP state (was FPU_HARD_FLOAT_ABI_ENABLED) */"
+
+
+def patch_irq_fpu_save():
+    files = [f for f in glob.glob(os.path.join(WS, PLATFORM, "**", "asm_vectors.S"), recursive=True)
+             if "cortexa9" in f]
+    patched = 0
+    for path in files:
+        with open(path) as f:
+            text = f.read()
+        if FPU_GUARD in text:
+            with open(path, "w") as f:
+                f.write(text.replace(FPU_GUARD, FPU_FIXED))
+            patched += 1
+    print(f"Patched the IRQ/FIQ VFP save in {patched} of {len(files)} asm_vectors.S file(s)")
+    return files
+
+
+def check_irq_fpu_save(elf):
+    """The vector code (start of .text) must contain vpush {d0-d7} (0xED2D0B10)."""
+    with open(elf, "rb") as f:
+        data = f.read()
+    vpush = bytes.fromhex("100b2ded")
+    # .text starts at 0x00100000 = file offset 0x1000 in this ELF; the handlers are in the first 1 KB
+    ok = vpush in data[0x1000:0x1400]
+    print("IRQ handler saves the VFP registers: OK" if ok else
+          "*** WARNING: the IRQ handler does NOT save the VFP registers - LOAD/READ data will be "
+          "corrupted (see patch_irq_fpu_save in build_firmware.py) ***")
+    return ok
+
+
+def patch_irq_stack(lscript):
+    """The VFP save takes ~200 bytes of the 1 KB IRQ stack; give it 4 KB."""
+    with open(lscript) as f:
+        text = f.read()
+    new, n = re.subn(r"(_IRQ_STACK_SIZE\s*:\s*)1024;", r"\g<1>4096;", text)
+    if n:
+        with open(lscript, "w") as f:
+            f.write(new)
+        print("IRQ stack: 4 KB")
+    else:
+        print(f"Warning: _IRQ_STACK_SIZE not found in {lscript} - IRQ stack left as it is")
 
 
 def patch_board_ip(main_c):
@@ -189,10 +248,15 @@ def main():
             print(f"Warning: echo.c not listed in {cmake} - add pd_server.c to the sources by hand")
 
         patch_board_ip(os.path.join(src, "main.c"))
+        patch_irq_stack(os.path.join(src, "lscript.ld"))
 
         app.build()
         elf = os.path.join(WS, APP, "build", f"{APP}.elf")
-        print(f"Done: {elf}" if os.path.isfile(elf) else "Build finished - look for pd_server.elf under workspace/")
+        if os.path.isfile(elf):
+            check_irq_fpu_save(elf)
+            print(f"Done: {elf}")
+        else:
+            print("Build finished - look for pd_server.elf under workspace/")
     finally:
         vitis.dispose()
 

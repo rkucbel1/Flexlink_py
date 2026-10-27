@@ -21,7 +21,9 @@ GET_DEBUG, then compare with the bit-true model's expected events:
                                             integer; the dB value is the firmware's log10
     debug records (--debug)                 every dbg_metric and flag word, exact
 --input-stage 0 sends the LPF output (<vector>.bin, PC did the front end); 1 sends the
-decimated input (<vector>_dec.bin) and the board runs the DC blocker and LPF itself.
+decimated input (<vector>_dec.bin) and the board runs the DC blocker and LPF itself; 2 sends
+the 40 Msps input (<vector>_40.bin) and the board also runs the half-band decimator (expected
+events: "expected_events_s2"; --chunk is rounded down to an even number).
 Exit status 0 = PASS, 1 = FAIL, 2 = communication error.
 Results are saved to <vector>_result.json (and <vector>_debug.png with --plot).
 """
@@ -194,8 +196,9 @@ def main(argv=None) -> int:
                     help="stream the samples through the PL and back (DMA path check, no detector)")
     ap.add_argument("--debug", action="store_true", help="capture dbg_metric and flag bits")
     ap.add_argument("--plot", action="store_true", help="plot the debug capture (implies --debug)")
-    ap.add_argument("--input-stage", type=int, choices=(0, 1), default=0,
-                    help="0: send the LPF output (default); 1: send the decimated input, board runs the front end")
+    ap.add_argument("--input-stage", type=int, choices=(0, 1, 2), default=0,
+                    help="0: send the LPF output (default); 1: send the decimated input, board runs the front "
+                         "end; 2: send the 40 Msps input, board runs the half-band and the front end")
     ap.add_argument("--cfo-tol", type=int, default=0, help="cfo_inc tolerance, LSB (bit-true: 0)")
     ap.add_argument("--angle-tol", type=int, default=0, help="CORDIC angle tolerance, LSB (bit-true: 0)")
     ap.add_argument("--tone-tol", type=float, default=0.01, help="ToneCheck dB tolerance")
@@ -203,7 +206,16 @@ def main(argv=None) -> int:
     a.debug |= a.plot
 
     meta = json.loads(a.vector.with_suffix(".json").read_text())
-    if a.input_stage == 1:
+    expected = meta["expected_events"]
+    div = 1
+    if a.input_stage == 2:
+        name = meta.get("files", {}).get("input40")
+        if not name or meta.get("expected_events_s2") is None:
+            print("Error: this vector has no 40 Msps input - rebuild it with pd_make_vector.py")
+            return 2
+        bin_path = a.vector.with_name(name)
+        expected, div = meta["expected_events_s2"], 2
+    elif a.input_stage == 1:
         name = meta.get("files", {}).get("decimated")
         if not name:
             print("Error: this vector has no decimated input - rebuild it with pd_make_vector.py")
@@ -212,8 +224,9 @@ def main(argv=None) -> int:
     else:
         bin_path = a.vector.with_suffix(".bin")
     iq = np.fromfile(bin_path, dtype=pr.SAMPLE_DTYPE).reshape(-1, 2)
-    if iq.shape[0] != meta["samples"]:
-        print(f"Error: {bin_path.name} has {iq.shape[0]} samples, json says {meta['samples']}")
+    want = meta.get("samples_40") if div == 2 else meta["samples"]
+    if iq.shape[0] != want:
+        print(f"Error: {bin_path.name} has {iq.shape[0]} samples, json says {want}")
         return 2
     known = {f.name for f in fields(pr.Params)}
     params = pr.Params(**{k: v for k, v in meta["params"].items() if k in known})
@@ -222,7 +235,7 @@ def main(argv=None) -> int:
         print("Note: vector built before the bit-true model - rebuild it with pd_make_vector.py "
               "for exact comparisons")
     print(f"Vector {a.vector.stem} ({bin_path.name}, input_stage {a.input_stage}): {iq.shape[0]} samples, "
-          f"{len(meta['expected_events'])} expected event(s)")
+          f"{len(expected)} expected event(s)")
     print(f"Params {params.describe()}")
 
     try:
@@ -240,6 +253,8 @@ def main(argv=None) -> int:
         if chunk > info.max_samples:
             chunk = info.max_samples
             print(f"Vector larger than the board buffer - running in pieces of {chunk}")
+        if div == 2 and chunk % 2:
+            chunk -= 1                         # whole 40 Msps pairs
         b.call(pr.RESET)
         b.call(pr.SET_PARAMS, params.pack())
 
@@ -280,7 +295,7 @@ def main(argv=None) -> int:
             for e in evs:                      # a truncated event is re-reported once complete
                 events[e.t_trig] = e
             if a.debug:
-                dbg_parts.append(b.get_debug(done))
+                dbg_parts.append(b.get_debug(done // div))
         mb = iq.nbytes / 1e6
         print(f"Loaded {mb:.2f} MB in {t_load:.2f} s ({8 * mb / max(t_load, 1e-9):.0f} Mbit/s)"
               + ("" if a.no_loopback else f", loopback {'OK' if loop_ok else 'FAIL'}"))
@@ -300,17 +315,18 @@ def main(argv=None) -> int:
         return 2
 
     got = sorted(events.values(), key=lambda e: e.t_trig)
-    ok, lines = compare(got, meta["expected_events"], a)
+    ok, lines = compare(got, expected, a)
     ok &= loop_ok
     if a.debug and dbg_parts:
         ok &= check_debug(np.concatenate(dbg_parts), iq, params, lines)
     print("Events (board vs reference):")
     print("\n".join(lines) if lines else "  none")
     truth = meta.get("truth", [])
+    lag = 10 if div == 2 else 0                # half-band delay at 20 Msps (truth is for stages 0 / 1)
     for e in got:
-        hit = [t for t in truth if t["preamble_a_start"] - 300 <= e.t_trig <= t["packet_end"]]
+        hit = [t for t in truth if t["preamble_a_start"] - 300 <= e.t_trig - lag <= t["packet_end"]]
         if hit:
-            print(f"  t_trig {e.t_trig}: {e.t_trig - hit[0]['preamble_a_start']} samples into Preamble A"
+            print(f"  t_trig {e.t_trig}: {e.t_trig - lag - hit[0]['preamble_a_start']} samples into Preamble A"
                   + (f", CFO error {e.cfo_hz - meta['defects']['FrequencyOffset']:+.0f} Hz"
                      if "FrequencyOffset" in meta.get("defects", {}) and e.status & pr.EV_CFO_VALID else ""))
         else:

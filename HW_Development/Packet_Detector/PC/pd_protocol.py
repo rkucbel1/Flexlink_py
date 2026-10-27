@@ -93,6 +93,7 @@ DBG_BELOW_LO = 0x02
 DBG_ARMED = 0x04                       # trigger enabled (after blanking, not in holdoff)
 DBG_TRIG = 0x08                        # this sample is t_trig
 DBG_BLANK = 0x10                       # inside the post-reset blanking
+DBG_LOW_POWER = 0x20                   # R0 or R_D below the power floor E_MIN (counts as below_lo)
 
 
 def q16(x: float) -> int:
@@ -118,6 +119,10 @@ class Params:
     input_stage: int = 0               # 0 = samples are the LPF output (DC blocker + LPF on PC)
     #                                    1 = samples are the decimated 12-bit stream; the board runs
     #                                        the DC blocker and LPF (pd_reference.front_end)
+    #                                    2 = samples are the 12-bit stream at 40 Msps; the board runs
+    #                                        the half-band decimator too (pd_reference.halfband).
+    #                                        RUN counts must be even; t_trig, debug records and
+    #                                        all other sample indices are at 20 Msps
     dc_shift: int = 10                 # DC blocker alpha = 1 - 2^-dc_shift, 0 = bypass (spec 5.2);
     #                                    used with input_stage 1 (was "reserved", same position)
 

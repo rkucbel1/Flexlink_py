@@ -14,6 +14,8 @@ Noise sources (generated block by block on the PC, 4M samples = 0.2 s each):
           scaled to -12 dBFS rms and quantised to 12 bits: the noise of pd_bittrue_check.py;
           input stage 1 (the board runs the DC blocker and LPF)               [default]
   white   complex white noise at 20 Msps, -12 dBFS rms, input stage 1
+  With --input-stage 2 both generate complex white noise at 40 Msps (-12 dBFS rms) and the
+  board's half-band decimates it: the radio's noise as the detector would see it.
   FILE    int16 I/Q pairs (.bin, like TestVectors/*_dec.bin), e.g. noise from your channel
           model, decimated to 20 Msps; used once from start to end (--seconds is ignored)
 
@@ -47,19 +49,21 @@ BLOCK = 4 * 1024 * 1024            # samples per LOAD + RUN
 X_MAX = 2047
 
 
-def noise_blocks(source: str, seconds: float, seed: int):
-    """Yield int16 (n, 2) blocks of noise."""
+def noise_blocks(source: str, seconds: float, seed: int, rate40: bool = False):
+    """Yield int16 (n, 2) blocks of noise (rate40: at 40 Msps, twice the samples)."""
     if source not in ("sim", "white"):
         iq = np.fromfile(source, "<i2").reshape(-1, 2)
         for i in range(0, iq.shape[0], BLOCK):
             yield iq[i:i + BLOCK]
         return
     rng = np.random.default_rng(seed)
-    total = int(round(seconds * pr.FS))
+    total = int(round(seconds * pr.FS)) * (2 if rate40 else 1)
     scale = X_MAX * 10 ** (-12 / 20)                  # rms of |x| = -12 dBFS (as pd_bittrue_check.quantise)
     for i in range(0, total, BLOCK):
         n = min(BLOCK, total - i)
-        if source == "sim":
+        if rate40:
+            x = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) / math.sqrt(2)
+        elif source == "sim":
             from scipy import signal
             w = (rng.standard_normal(2 * n) + 1j * rng.standard_normal(2 * n)) / math.sqrt(2)
             x = signal.resample_poly(w, 1, 2) * math.sqrt(2)
@@ -85,7 +89,7 @@ def main(argv=None) -> int:
     ap.add_argument("--source", default="sim", help="sim, white, or an int16 I/Q .bin file")
     ap.add_argument("--seconds", type=float, default=100.0, help="noise duration at 20 Msps (sim / white)")
     ap.add_argument("--eta", default="0.35", help="eta_hi values, comma-separated")
-    ap.add_argument("--input-stage", type=int, choices=(0, 1), default=1)
+    ap.add_argument("--input-stage", type=int, choices=(0, 1, 2), default=1)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--holdoff", type=int, default=1,
                     help="arm_holdoff (default 1: re-arm after the N_CFO window, as the receiver does when "
@@ -112,7 +116,10 @@ def main(argv=None) -> int:
         b.call(pr.SET_PARAMS, p.pack())
         n_tot, events, t_load, t_run, t0 = 0, [], 0.0, 0.0, time.perf_counter()
         print(f"\neta_hi {eta:.2f}: {p.describe()}")
-        for blk in noise_blocks(a.source, a.seconds, a.seed):
+        div = 2 if a.input_stage == 2 else 1
+        for blk in noise_blocks(a.source, a.seconds, a.seed, rate40=div == 2):
+            if div == 2 and blk.shape[0] % 2:
+                blk = blk[:-1]                      # whole 40 Msps pairs
             t1 = time.perf_counter()
             b.load(blk)
             t2 = time.perf_counter()
@@ -124,12 +131,12 @@ def main(argv=None) -> int:
                 events[:] = [x for x in events if x.t_trig != e.t_trig]   # truncated -> final
                 events.append(e)
             n_tot += done
-            secs = n_tot / pr.FS
+            secs = n_tot / (pr.FS * div)
             print(f"\r  {secs:7.1f} s of noise, {len(events)} trigger(s); "
                   f"{8 * 4 * n_tot / 1e6 / max(t_load, 1e-9):.0f} Mbit/s load, "
                   f"{time.perf_counter() - t0:.0f} s elapsed", end="", flush=True)
         print()
-        secs = n_tot / pr.FS
+        secs = n_tot / (pr.FS * div)
         final = [e for e in events if e.status & pr.EV_CFO_VALID]
         passed = [e for e in final if not e.status & pr.EV_TONE_FAIL]
         lo, hi = poisson_ci(len(events), secs)

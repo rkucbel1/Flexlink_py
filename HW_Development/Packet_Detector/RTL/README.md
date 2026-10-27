@@ -6,9 +6,10 @@ Verilog-2001, bit-true to `../PC/pd_reference.py`. The checks are in `../SIM`.
 
 | File | Block | Model function |
 | --- | --- | --- |
+| `pd_halfband.v` | 43-tap half-band decimator 40 → 20 Msps (`input_stage` 2), 18-bit coefficients, 11 multipliers per rail | `halfband` |
 | `pd_dc_blocker.v` | DC blocker, 10 fractional bits, 24-bit accumulator; `dc_shift` 0 = bypass | `dc_blocker` |
 | `pd_lpf.v` | 17-tap LPF, symmetric (9 multipliers per rail), 18-bit coefficients | `lpf` |
-| `pd_detect_core.v` | products, 256-sample running sums (BRAM history), R_D, 18-bit comparator, blanking / qualifier / holdoff, `t_trig` | `comparator_inputs`, `find_triggers` |
+| `pd_detect_core.v` | products, 256-sample running sums (BRAM history), R_D, 18-bit comparator, power floor (R0, R_D ≥ 1024), blanking / qualifier / holdoff, `t_trig` | `comparator_inputs`, `find_triggers` |
 | `pd_div16.v` | pipelined divider for `dbg_metric` = min(65535, num / den) | debug metric |
 | `pd_cfo_lane.v` | CFO lane: release FIFO (a sample enters the lane once the core has decided on it), window control, four lag accumulators (16 multipliers), CORDIC sequence | `cfo_accumulators` |
 | `pd_cordic.v` | iterative vectoring CORDIC, 16 iterations, 22-bit angle accumulator; 21 clocks per angle | `cordic_angle` |
@@ -16,17 +17,17 @@ Verilog-2001, bit-true to `../PC/pd_reference.py`. The checks are in `../SIM`.
 | `pd_tone_check.v` | tone-structure check: 8192-sample window buffer, `NU` = 4 DFT units (13 bins in 4 passes), common shift, powers, integer threshold decision; one event per window | `tone_check`, abort decision in `detect` |
 | `pd_sdp_ram.v` | simple dual-port block RAM (the tone check's 8192 × 24 sample buffer), kept as its own hierarchy so it stays block RAM | – |
 | `pd_tone_rom.v` | cosine table 1024 × 16 bit, two read ports (cos and sin = cos − 256); **generated** by `gen_tone_rom.py` from `pd_reference.TONE_COS` | `TONE_COS` |
-| `pd_detect_top.v` | `input_stage` 0: LPF output in; 1: decimated input, front end here | `detect(..., debug=True)` |
+| `pd_detect_top.v` | `input_stage` 0: LPF output in; 1: 20 Msps input, front end here; 2: 40 Msps input, half-band + front end here | `detect(..., debug=True)` |
 | `pd_axi.v` | board wrapper: AXI-Lite registers (map in the file header), event FIFO (32 events), debug FIFO with TLAST per DMA transfer, loopback mode, input flow control | firmware + `pd_board_emulator.py` |
 
 **Interface.**
-- Input is one complex sample per `s_iq_tvalid` && `s_iq_tready` beat, I in `[11:0]` and Q in `[27:16]`, the same layout the PC and the DMA use.
+- Input is one complex sample per `s_iq_tvalid` && `s_iq_tready` beat, I in `[11:0]` and Q in `[27:16]`, the same layout the PC and the DMA use. With `input_stage` 2 the input is at 40 Msps and every index the block reports (`t_trig`, debug records, `open_t`) counts 20 Msps samples.
 - Throughput is at most one sample per clock. Gaps in `tvalid` are allowed, and all state changes only on accepted samples, so results depend on sample order, not on timing.
 - Back-pressure: `tready` stays 1 at the real sample rate (one sample per 5 clocks or slower; checked with N_CFO 4096 and back-to-back windows). With faster input, it goes low while a check is running and a CFO result is waiting, or when the buffer would overwrite a window not yet checked.
 - Outputs:
   - `trig`: a one-clock pulse, with `t_trig` = the index of the triggering sample, counted from reset.
   - `lpf_*`: the detector input.
-  - A debug stream with one record per sample: `dbg_metric` and `dbg_bits` = {blank, trig, armed, below_lo, above_hi}.
+  - A debug stream with one record per sample: `dbg_metric` and `dbg_bits` = {low_power, blank, trig, armed, below_lo, above_hi}.
 - Latency from input to debug record: about 31 clocks (front end 8, core 12, divider 17).
 - CFO result: `cfo_valid` pulse with `cfo_t` (= `t_trig`), `cfo_inc` (NCO increment for −f̂, LSB Fs/2²⁴), the four 16-bit angles and the four lag accumulators.
   - The CFO lane takes each LPF sample from a small FIFO when the core releases it (with its debug record, after the trigger decision), so the trigger for sample t is known before sample t reaches the lane, and the lane keeps going when the input stops.

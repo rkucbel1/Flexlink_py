@@ -6,7 +6,10 @@
 // (debug=True).
 //
 //   input_stage 0: s_iq is the LPF output, the front end is bypassed
-//   input_stage 1: s_iq is the decimated 12-bit stream; DC blocker (dc_shift) and LPF run here
+//   input_stage 1: s_iq is the decimated 12-bit stream (20 Msps); DC blocker (dc_shift) and
+//                  LPF run here
+//   input_stage 2: s_iq is the 12-bit radio stream at 40 Msps; half-band decimator, DC blocker
+//                  and LPF run here. All sample indices (t_trig, ...) count 20 Msps samples.
 //
 // s_iq_tdata: one complex sample per beat, I = [11:0], Q = [27:16] (12-bit values sign-extended
 // to 16 bits by the PC, as in pd_protocol). s_iq_tready: AXI-stream back-pressure. It stays 1 at
@@ -19,7 +22,7 @@ module pd_detect_top (
     input  wire        clk,
     input  wire        rst_n,
     // configuration (constant while samples flow; change only in reset)
-    input  wire        input_stage,
+    input  wire [1:0]  input_stage,    // 0 LPF output in, 1 20 Msps in, 2 40 Msps in
     input  wire [3:0]  dc_shift,
     input  wire [15:0] eta_hi_sq,
     input  wire [15:0] eta_lo_sq,
@@ -76,7 +79,16 @@ module pd_detect_top (
     wire signed [11:0] in_i = s_iq_tdata[11:0];
     wire signed [11:0] in_q = s_iq_tdata[27:16];
 
-    // front end
+    // front end: [half-band] -> DC blocker -> LPF
+    wire               hb_valid;
+    wire signed [11:0] hb_i, hb_q;
+    wire               stage2 = (input_stage == 2'd2);
+    wire               stage1 = (input_stage == 2'd1);
+    pd_halfband u_hb (
+        .clk(clk), .rst_n(rst_n),
+        .in_valid(s_fire & stage2), .in_i(in_i), .in_q(in_q),
+        .out_valid(hb_valid), .out_i(hb_i), .out_q(hb_q));
+
     wire               dc_valid;
     wire signed [11:0] dc_i, dc_q;
     wire               fe_valid;
@@ -84,7 +96,8 @@ module pd_detect_top (
 
     pd_dc_blocker u_dc (
         .clk(clk), .rst_n(rst_n), .shift(dc_shift),
-        .in_valid(s_fire & input_stage), .in_i(in_i), .in_q(in_q),
+        .in_valid(stage2 ? hb_valid : (s_fire & stage1)),
+        .in_i(stage2 ? hb_i : in_i), .in_q(stage2 ? hb_q : in_q),
         .out_valid(dc_valid), .out_i(dc_i), .out_q(dc_q));
 
     pd_lpf u_lpf (
@@ -92,9 +105,10 @@ module pd_detect_top (
         .in_valid(dc_valid), .in_i(dc_i), .in_q(dc_q),
         .out_valid(fe_valid), .out_i(fe_i), .out_q(fe_q));
 
-    assign lpf_valid = input_stage ? fe_valid : s_fire;
-    assign lpf_i     = input_stage ? fe_i     : in_i;
-    assign lpf_q     = input_stage ? fe_q     : in_q;
+    wire   fe_on     = stage1 || stage2;
+    assign lpf_valid = fe_on ? fe_valid : s_fire;
+    assign lpf_i     = fe_on ? fe_i     : in_i;
+    assign lpf_q     = fe_on ? fe_q     : in_q;
 
     pd_detect_core u_core (
         .clk(clk), .rst_n(rst_n),
@@ -126,13 +140,21 @@ module pd_detect_top (
         .ev_num(ev_tone_num), .ev_den(ev_tone_den), .ev_fail(ev_tone_fail),
         .busy(tone_busy), .open_n(open_n), .open_t(open_t));
 
-    // samples inside the front end and core: accepted minus debug records out
+    // samples inside the front end and core: debug records due minus records out. With the
+    // half-band, a record is due with every second input (the first of a pair waits for its
+    // partner and is not counted as in flight).
+    reg       ph;
     reg [7:0] inflight;
+    wire      rec_due = s_fire && (!stage2 || ph);
     always @(posedge clk) begin
-        if (!rst_n) inflight <= 8'd0;
-        else        inflight <= inflight + {7'd0, s_fire} - {7'd0, dbg_valid};
+        if (!rst_n) begin
+            ph <= 1'b0; inflight <= 8'd0;
+        end else begin
+            if (s_fire && stage2) ph <= !ph;
+            inflight <= inflight + {7'd0, rec_due} - {7'd0, dbg_valid};
+        end
     end
-    assign busy = (inflight != 8'd0) || s_fire || lane_busy || tone_busy;
+    assign busy = (inflight != 8'd0) || rec_due || lane_busy || tone_busy;
 endmodule
 
 `default_nettype wire

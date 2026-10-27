@@ -18,7 +18,7 @@ module tb_pd_detect;
     always #5   clk = ~clk;                     // 100 MHz
 
     reg         rst_n;
-    reg         input_stage;
+    reg  [1:0]  input_stage;
     reg  [3:0]  dc_shift;
     reg  [15:0] eta_hi_sq, eta_lo_sq, qual_len;
     reg  [31:0] blank_len, arm_holdoff;
@@ -63,7 +63,7 @@ module tb_pd_detect;
 
     // ------------------------------------------------------------------ files and settings
     integer f_cfg, f_in, f_lpf, f_dbg, f_trig, f_cfo, f_tone, f_open, r, rc, x_open, x_open_t, guard;
-    integer n_samples, n_trig, n_cfo_ev, gap, seed, maxerr, fixgap;
+    integer n_samples, n_trig, n_cfo_ev, gap, seed, maxerr, fixgap, n_out;
     integer cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q, cfg_blank, cfg_hold, cfg_ncfo, cfg_lin;
 
     // ------------------------------------------------------------------ checkers
@@ -196,13 +196,13 @@ module tb_pd_detect;
             $display("FAIL: cannot open the vector files (cfg.txt ...) in the current directory");
             $finish;
         end
-        r = $fscanf(f_cfg, "%d %d %d %d %d %d %d %d %d %d %d %d", cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q,
-                    cfg_blank, cfg_hold, n_samples, n_trig, cfg_ncfo, n_cfo_ev, cfg_lin);
-        if (r != 12) begin
-            $display("FAIL: cfg.txt has %0d fields, expected 12 - rerun make_tb_vectors.py", r);
+        r = $fscanf(f_cfg, "%d %d %d %d %d %d %d %d %d %d %d %d %d", cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q,
+                    cfg_blank, cfg_hold, n_samples, n_trig, cfg_ncfo, n_cfo_ev, cfg_lin, n_out);
+        if (r != 13) begin
+            $display("FAIL: cfg.txt has %0d fields, expected 13 - rerun make_tb_vectors.py", r);
             $finish;
         end
-        input_stage = cfg_stage[0];  dc_shift  = cfg_shift[3:0];
+        input_stage = cfg_stage[1:0];  dc_shift  = cfg_shift[3:0];
         eta_hi_sq   = cfg_hi[15:0];  eta_lo_sq = cfg_lo[15:0];  qual_len = cfg_q[15:0];
         blank_len   = cfg_blank;     arm_holdoff = cfg_hold;  n_cfo = cfg_ncfo[15:0];
         tone_lin    = cfg_lin[23:0];
@@ -245,11 +245,11 @@ module tb_pd_detect;
         end else if (x_open != 0)
             $display("  window open at the end (truncated): t_trig %0d (ok)", open_t);
 
-        if (lpf_seen != n_samples) begin
-            errors = errors + 1; $display("ERROR: %0d LPF samples out, expected %0d", lpf_seen, n_samples);
+        if (lpf_seen != n_out) begin
+            errors = errors + 1; $display("ERROR: %0d LPF samples out, expected %0d", lpf_seen, n_out);
         end
-        if (dbg_seen != n_samples) begin
-            errors = errors + 1; $display("ERROR: %0d debug records out, expected %0d", dbg_seen, n_samples);
+        if (dbg_seen != n_out) begin
+            errors = errors + 1; $display("ERROR: %0d debug records out, expected %0d", dbg_seen, n_out);
         end
         if (trig_seen != n_trig) begin
             errors = errors + 1; $display("ERROR: %0d triggers, expected %0d", trig_seen, n_trig);

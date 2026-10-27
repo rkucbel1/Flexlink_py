@@ -64,6 +64,47 @@ table are new.
    sample rate. The spec's estimate of two complex MAC units would not keep up with back-to-back
    windows. The decision and the integers are exactly those of the model.
 
+7. **§8 item 4, front-end decimation: a 43-tap half-band in the PL** (`input_stage 2`). The
+   board can now take the radio's 40 Msps stream. `pd_reference.halfband`: causal, 18-bit
+   coefficients (exact unity DC gain), one output per input pair after its second sample;
+   passband ±8.2 MHz with 0.0065 dB ripple, stopband from 11.8 MHz at 62.7 dB (the level of
+   12-bit quantisation at −12 dBFS). 11 multipliers per rail. It delays the stream by 10.5
+   samples at 20 Msps, so `t_trig` comes 10 samples later than with the simulator's
+   zero-phase `resample_poly`. Bit-true Monte Carlo on the same trials (200 per SNR,
+   `pd_bittrue_check.py --only decim`):
+
+   | SNR | `resample_poly` (float, as before) | half-band (bit-true) | every other sample, no filter |
+   | --- | --- | --- | --- |
+   | −14 dB | Pd 0.825, CFO 1370 Hz rms | Pd 0.825, CFO 1372 Hz rms | Pd 0.075 |
+   | −13 dB | Pd 0.990, CFO 1192 Hz rms | Pd 0.990, CFO 1194 Hz rms | Pd 0.140 |
+   | −12 dB | Pd 1.000, CFO 889 Hz rms | Pd 1.000, CFO 889 Hz rms | Pd 0.370 |
+   | −10 dB | Pd 1.000, CFO 595 Hz rms | Pd 1.000, CFO 595 Hz rms | Pd 0.985 |
+
+   The half-band costs nothing. Without a filter the folded noise costs far more than the
+   3 dB estimated in §8: at −12 dB only 37% of the packets are detected.
+
+8. **§4.2, power floor: near-silent input can't trigger.** With the gain fixed for the packet
+   and very high SNR (+60 dB at −12 dBFS), the idle noise is about 0.5 LSB rms: after the
+   filters the detector sees mostly zeros and a few isolated ±1 values, and the normalised
+   ratio |P|²/(R0·R_D) of such patterns is meaningless. Two −1s 32 samples apart look
+   perfectly periodic and stay in the 256-sample sums long enough to pass the qualifier. In
+   200 packets at +60 dB this triggered 2 times about 1000 samples before Preamble A; the
+   window still reached the preamble, so the tone check passed them. Now a sample with
+   R0 < E_MIN or R_D < E_MIN (exact sums, E_MIN = 1024: an average of 4 LSB², 2 LSB rms,
+   about 48 dB below a packet at −12 dBFS) never counts as above η_hi and always counts as
+   below η_lo; debug bit 0x20 marks it. A real AGC keeps the idle noise well above this.
+
+   | SNR | idle noise (40 Msps) | without floor | with floor |
+   | --- | --- | --- | --- |
+   | −14 / −12 dB | 355 LSB rms | Pd 0.835 / 1.000 | Pd 0.835 / 1.000 |
+   | +30 … +55 dB | 13 … 0.8 LSB rms | Pd 1.000, 0 early | Pd 1.000, 0 early |
+   | +60 dB | 0.47 LSB rms | Pd 0.990, 2 early | Pd 1.000, 0 early |
+   | +65 dB, noise-free | ≤ 0.3 LSB rms | Pd 1.000 | Pd 1.000 |
+
+   All real-packet vectors give identical events. In the stress vector the floor removes two
+   false triggers on near-silence (the DC blocker's decaying tail, about 1 LSB rms); the
+   periodic triggers after them shift by 2 samples through the holdoff.
+
 ## Verification
 
 ### Word-length sweeps (each block against its floating-point version)
