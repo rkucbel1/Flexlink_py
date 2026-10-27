@@ -113,7 +113,8 @@ class Params:
     blank_len: int = 288
     tone_thresh: int = q8(13.0)        # Q8.8 dB, 0 = off
     arm_holdoff: int = 131072          # samples from t_trig until the trigger re-arms; stands in
-    #                                    for the Rx FSM's arm pulse (spec 6), must exceed a packet
+    #                                    for the Rx FSM's arm pulse (spec 6), must exceed a packet.
+    #                                    Effective value max(arm_holdoff, n_cfo, 1): one CFO lane
     input_stage: int = 0               # 0 = samples are the LPF output (DC blocker + LPF on PC)
     #                                    1 = samples are the decimated 12-bit stream; the board runs
     #                                        the DC blocker and LPF (pd_reference.front_end)

@@ -50,7 +50,11 @@ table are new.
    triggers once, right after blanking (sample 415). The tone check rejects that trigger every
    time (50/50 below). Set `BLANK_LEN` ≥ 5120 after reset to avoid it, or leave the front end
    running across detector resets. In steady state, DC never triggers.
-4. **§5.1 input.** The model and the test bench accept either the LPF output
+4. **§4.2, re-arm: the effective holdoff is at least `N_CFO`.** The detector re-arms
+   `max(ARM_HOLDOFF, N_CFO, 1)` samples after a trigger, because there is one CFO lane. This is
+   what spec §4.2 describes: "ignores further triggers until it is re-armed". `N_CFO` is
+   128…4096; the hardware's CORDIC sequence needs about 95 clocks between windows.
+5. **§5.1 input.** The model and the test bench accept either the LPF output
    (`input_stage 0`) or the decimated stream (`input_stage 1`, the board runs the front end). The
    half-band decimator 40 → 20 Msps (§8 item 4) is still floating point on the PC.
 

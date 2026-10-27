@@ -12,7 +12,7 @@ throw-away build output.
 | `FW/build_firmware.py` | Vitis 2025.2: platform + lwIP + app from the echo-server template, with `pd_server.c` |
 | `FW/run_board.tcl` | XSDB: program the FPGA over JTAG and start the firmware |
 | `BITTRUE.md` | Bit-true model: word lengths, spec changes, verification against the simulator |
-| `RTL/` | Verilog of the detector (step 1: DC blocker, LPF, detection core → `t_trig`, debug stream); see `RTL/README.md` |
+| `RTL/` | Verilog of the detector: DC blocker, LPF, detection core → `t_trig`, debug stream; CFO lane → `cfo_inc`; see `RTL/README.md` |
 | `SIM/` | Testbench against the bit-true model, `run_sim.sh` (xsim or Verilator); see `SIM/README.md` |
 | `HW/synth_detect.tcl` | Out-of-context synthesis + place & route of `RTL/` at 100 MHz: timing and resources |
 | `TestVectors/` | Output of `PC/pd_make_vector.py` |
@@ -96,7 +96,13 @@ Tx defect file and a full-scale stress vector; both input stages; random `tvalid
 clocks; up to 532 triggers per run. Three injected faults were caught. xsim (Vivado 2025.2): stress vector
 PASS. Out-of-context place & route on the Zynq-7020 (`HW/synth_detect.tcl`): **100 MHz met, WNS
 +1.299 ns**; 2834 LUT (5%), 3026 FF (3%), 33 DSP48 (15%; 18 of them in the LPF), 1 BRAM tile.
-Next: the CFO lane and the tone check, then the AXI wrapper that replaces `pl_core`.
+Step 3 done: **CFO lane RTL** (`RTL/pd_cfo_lane.v`, `pd_cordic.v`, `pd_cfo_cascade.v`). It
+matches the bit-true model in Verilator: four lag accumulators, four angles and `cfo_inc` for
+every trigger. Vectors: 40 real packets at ±600 kHz, the stress vector and rep3. The unit tests
+cover 22025 CORDIC vectors and 101000 cascade sets with exact rounding boundaries. 6 of 7
+injected faults were caught; the 7th turned out to be logically equivalent. To do: xsim and
+timing (`HW/synth_detect.tcl`). Next: the tone check, then the AXI wrapper that replaces
+`pl_core`.
 
 
 The AXIS FIFO in `build_hw.tcl` (`pl_core`) is replaced by the detector RTL with the same stream

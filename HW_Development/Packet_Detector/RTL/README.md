@@ -2,7 +2,7 @@
 
 Verilog-2001, bit-true to `../PC/pd_reference.py`. The checks are in `../SIM`.
 
-## Step 1: detection lane (this version)
+## Steps 1 and 2: detection lane and CFO lane (this version)
 
 | File | Block | Model function |
 | --- | --- | --- |
@@ -10,6 +10,9 @@ Verilog-2001, bit-true to `../PC/pd_reference.py`. The checks are in `../SIM`.
 | `pd_lpf.v` | 17-tap LPF, symmetric (9 multipliers per rail), 18-bit coefficients | `lpf` |
 | `pd_detect_core.v` | products, 256-sample running sums (BRAM history), R_D, 18-bit comparator, blanking / qualifier / holdoff, `t_trig` | `comparator_inputs`, `find_triggers` |
 | `pd_div16.v` | pipelined divider for `dbg_metric` = min(65535, num / den) | debug metric |
+| `pd_cfo_lane.v` | CFO lane: 32-sample input delay, window control, four lag accumulators (16 multipliers), CORDIC sequence | `cfo_accumulators` |
+| `pd_cordic.v` | iterative vectoring CORDIC, 16 iterations, 22-bit angle accumulator; 21 clocks per angle | `cordic_angle` |
+| `pd_cfo_cascade.v` | integer cascade 16 → 32 → 128 → 256 in NCO units, 3-clock pipeline | `cfo_cascade` |
 | `pd_detect_top.v` | `input_stage` 0: LPF output in; 1: decimated input, front end here | `detect(..., debug=True)` |
 
 **Interface.**
@@ -20,10 +23,14 @@ Verilog-2001, bit-true to `../PC/pd_reference.py`. The checks are in `../SIM`.
   - `lpf_*`: the detector input.
   - A debug stream with one record per sample: `dbg_metric` and `dbg_bits` = {blank, trig, armed, below_lo, above_hi}.
 - Latency from input to debug record: about 31 clocks (front end 8, core 12, divider 17).
+- CFO result: `cfo_valid` pulse with `cfo_t` (= `t_trig`), `cfo_inc` (NCO increment for −f̂, LSB Fs/2²⁴), the four 16-bit angles and the four lag accumulators.
+  - The CFO lane works on the LPF stream delayed by 32 samples, so the trigger for sample t is known before sample t reaches it.
+  - A window is therefore complete 32 samples after its last sample, and the result follows about 95 clocks later: 4 angles × 21 clocks, plus the cascade.
+- One CFO window at a time. The detection core re-arms only `max(arm_holdoff, n_cfo, 1)` samples after a trigger; the model does the same.
 - Reset is synchronous and active low (`rst_n`). It clears all state; the history RAM is masked until it holds 256 samples.
 
-**Parameters.** `dc_shift`, `eta_hi_sq`, `eta_lo_sq`, `qual_len`, `blank_len` and `arm_holdoff` are ports, constant while samples flow. They become AXI-Lite registers when the block goes into the Zedboard design.
+**Parameters.** `dc_shift`, `eta_hi_sq`, `eta_lo_sq`, `qual_len`, `blank_len`, `arm_holdoff` and `n_cfo` (128…4096, default 2048) are ports, constant while samples flow. They become AXI-Lite registers when the block goes into the Zedboard design.
 
 **Next steps.**
-1. The CFO lane: four lag accumulators with products kept inside the window, the CORDIC and the cascade. Then the tone check.
+1. The tone check: 13 single-bin DFTs over the CFO window, with an integer threshold decision.
 2. The AXI wrappers: AXI-Lite registers, an event FIFO, and the debug stream to the S2MM DMA. The block then replaces `pl_core` in `../HW/build_hw.tcl`.

@@ -7,7 +7,8 @@
 //     signed; num = (Re'^2 + Im'^2) << 16, den = R0' * R_D'
 //     above_hi = num > ETA_HI_SQ * den,  below_lo = num < ETA_LO_SQ * den
 //   blanking (n < BLANK_LEN), qualifier (count of above_hi, reset by below_lo, held between),
-//   trigger when the count reaches QUAL_LEN, re-arm ARM_HOLDOFF samples after t_trig.
+//   trigger when the count reaches QUAL_LEN, re-arm max(ARM_HOLDOFF, N_CFO, 1) samples after
+//   t_trig (the detector cannot re-arm before the CFO window is over).
 //   dbg_metric = min(65535, floor(num / den)), 0 if den = 0.
 //
 // Samples are processed in order, one per in_valid (at most one per clock). sample_cnt counts
@@ -26,7 +27,8 @@ module pd_detect_core (
     input  wire [15:0]        eta_lo_sq,
     input  wire [15:0]        qual_len,      // 0 is treated as 1
     input  wire [31:0]        blank_len,
-    input  wire [31:0]        arm_holdoff,   // 0 is treated as 1
+    input  wire [31:0]        arm_holdoff,   // effective: max(arm_holdoff, n_cfo, 1)
+    input  wire [15:0]        n_cfo,         // CFO window length (1..4096)
     // samples (LPF output)
     input  wire               in_valid,
     input  wire signed [11:0] in_i,
@@ -264,7 +266,9 @@ module pd_detect_core (
     reg [31:0] arm_at;                       // first armed sample index
     reg [15:0] count;
     wire [15:0] q_need  = (qual_len == 16'd0) ? 16'd1 : qual_len;
-    wire [31:0] holdoff = (arm_holdoff == 32'd0) ? 32'd1 : arm_holdoff;
+    wire [31:0] n_cfo32 = {16'd0, n_cfo};
+    wire [31:0] hold_a  = (arm_holdoff > n_cfo32) ? arm_holdoff : n_cfo32;
+    wire [31:0] holdoff = (hold_a == 32'd0) ? 32'd1 : hold_a;
     wire        armed   = (n12 >= arm_at);
     wire        blank   = (n12 < blank_len);
     wire [15:0] count_n = below11 ? 16'd0 : (above11 ? count + 16'd1 : count);

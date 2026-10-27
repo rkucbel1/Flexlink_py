@@ -1,6 +1,7 @@
 # synth_detect.tcl  (Flexlink_py/HW_Development/Packet_Detector/HW)
 #
-# Out-of-context synthesis and implementation of the detection lane (RTL/pd_detect_top.v) on the
+# Out-of-context synthesis and implementation of the detector (RTL/pd_detect_top.v: front end,
+# detection core, CFO lane) on the
 # Zynq-7020 at 100 MHz, to check timing and resources before the block goes into the board
 # design. No project, no block design; about 3-5 minutes.
 #
@@ -18,12 +19,13 @@ file mkdir $out
 
 read_verilog [list \
     [file join $rtl pd_dc_blocker.v] [file join $rtl pd_lpf.v] [file join $rtl pd_div16.v] \
-    [file join $rtl pd_detect_core.v] [file join $rtl pd_detect_top.v]]
+    [file join $rtl pd_detect_core.v] [file join $rtl pd_cordic.v] [file join $rtl pd_cfo_cascade.v] \
+    [file join $rtl pd_cfo_lane.v] [file join $rtl pd_detect_top.v]]
 
 synth_design -top pd_detect_top -part $part -mode out_of_context
 create_clock -name clk -period $period [get_ports clk]
 # configuration ports are quasi-static (set in reset): no timing paths from them
-set_false_path -from [get_ports {input_stage dc_shift* eta_* qual_len* blank_len* arm_holdoff*}]
+set_false_path -from [get_ports {input_stage dc_shift* eta_* qual_len* blank_len* arm_holdoff* n_cfo*}]
 
 opt_design
 place_design

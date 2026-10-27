@@ -10,7 +10,9 @@
 #   GAP=0 ./run_sim.sh                             # one sample per clock
 #   SIM=verilator ./run_sim.sh                     # Verilator instead of xsim
 #   MAX=20000 ./run_sim.sh                         # first 20000 samples only
-#   HOLDOFF=300 ./run_sim.sh                       # short re-arm holdoff: many triggers
+#   HOLDOFF=300 ./run_sim.sh                       # short re-arm holdoff (effective >= N_CFO)
+#   ./run_sim.sh stress 1 / ./run_sim.sh cfo 1     # synthetic vectors (full scale / CFO sweep)
+#   ./run_sim.sh units                             # CORDIC + cascade unit tests
 #
 # Python: uses the project venv (Flexlink_py/.venv) if it exists, else python3 (or PYTHON=...).
 # xsim:   source the Vivado settings script first (any terminal; the venv need not be active).
@@ -33,13 +35,20 @@ if [[ "$SIM" == xsim ]] && ! command -v xvlog > /dev/null; then
   exit 2
 fi
 
+if [[ "$VEC" == units ]]; then
+  "$PYTHON" make_tb_vectors.py units
+  DIR=work/units; TOP=tb_pd_units; TB=tb_pd_units.v
+  RTL=(../RTL/pd_cordic.v ../RTL/pd_cfo_cascade.v)
+else
+  TOP=tb_pd_detect; TB=tb_pd_detect.v
+  RTL=(../RTL/pd_dc_blocker.v ../RTL/pd_lpf.v ../RTL/pd_div16.v ../RTL/pd_detect_core.v
+       ../RTL/pd_cordic.v ../RTL/pd_cfo_cascade.v ../RTL/pd_cfo_lane.v ../RTL/pd_detect_top.v)
 args=("$VEC" --input-stage "$STAGE")
 [[ -n "${MAX:-}" ]] && args+=(--max-samples "$MAX")
 [[ -n "${HOLDOFF:-}" ]] && args+=(--holdoff "$HOLDOFF")
 "$PYTHON" make_tb_vectors.py "${args[@]}"
 DIR="work/$(basename "${VEC%.json}")_s${STAGE}"
-
-RTL=(../RTL/pd_dc_blocker.v ../RTL/pd_lpf.v ../RTL/pd_div16.v ../RTL/pd_detect_core.v ../RTL/pd_detect_top.v)
+fi
 
 case "$SIM" in
   xsim)
@@ -48,17 +57,17 @@ case "$SIM" in
     # xelab compiles the design to C with its own compiler; LIBRARY_PATH from the environment can
     # make that compiler pick up the wrong system libraries (xelab warns, and may crash).
     unset LIBRARY_PATH
-    xvlog --nolog -d PD_SIM_CHECKS "${RTL[@]/#/../../}" ../../tb_pd_detect.v
+    xvlog --nolog -d PD_SIM_CHECKS "${RTL[@]/#/../../}" "../../$TB"
     # extra options, e.g. XELAB_OPTS="-mt off -v 1" (single-threaded, verbose) to diagnose a crash
     # shellcheck disable=SC2086
-    xelab --nolog --debug off ${XELAB_OPTS:-} tb_pd_detect -s tb_pd_detect_sim
-    xsim tb_pd_detect_sim --nolog -R \
+    xelab --nolog --debug off ${XELAB_OPTS:-} "$TOP" -s "${TOP}_sim"
+    xsim "${TOP}_sim" --nolog -R \
         -testplusarg "gap=$GAP" -testplusarg "seed=$SEED" | tee ../../sim.log
     ;;
   verilator)
-    verilator --binary --timing -Wno-fatal -DPD_SIM_CHECKS --top-module tb_pd_detect \
-        --Mdir work/obj_dir -o tb_pd_detect -j 2 "${RTL[@]}" tb_pd_detect.v > work/verilator_build.log
-    (cd "$DIR" && ../obj_dir/tb_pd_detect "+gap=$GAP" "+seed=$SEED") | tee sim.log
+    verilator --binary --timing -Wno-fatal -DPD_SIM_CHECKS --top-module "$TOP" \
+        --Mdir "work/obj_$TOP" -o "$TOP" -j 2 "${RTL[@]}" "$TB" > work/verilator_build.log
+    (cd "$DIR" && "../obj_$TOP/$TOP" "+gap=$GAP" "+seed=$SEED") | tee sim.log
     ;;
   *)
     echo "SIM must be xsim or verilator" >&2; exit 2 ;;

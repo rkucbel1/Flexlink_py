@@ -42,8 +42,10 @@ Detector conventions
     Blanking: samples n < blank_len never count towards the qualifier.
     Qualifier: count += 1 on above_hi, count = 0 on below_lo, held otherwise; the trigger
       fires on the sample where count reaches qual_len: t_trig = that sample's index.
-    Holdoff: the trigger is disabled from t_trig + 1 and re-arms at t_trig + arm_holdoff,
-      count restarting from 0 (stands in for the Rx FSM's arm pulse).
+    Holdoff: the trigger is disabled from t_trig + 1 and re-arms at t_trig + H, count
+      restarting from 0 (stands in for the Rx FSM's arm pulse), H = holdoff(p) =
+      max(arm_holdoff, n_cfo, 1): the detector cannot re-arm before the CFO window is over
+      (one CFO lane; spec 4.2: "ignores further triggers until it is re-armed").
     CFO window: samples t_trig .. t_trig + N_CFO - 1 only. The lag-l accumulator adds
       x(n) x*(n - l) for n = t_trig + l .. t_trig + N_CFO - 1 (N_CFO - l terms), so both
       samples of every product lie in the window, as in the simulator. (Reaching back before
@@ -75,6 +77,8 @@ H_LP = (-0.0015, -0.0107, -0.0271, -0.0388, -0.0216, 0.0431, 0.1452, 0.2418, 0.2
 LPF_FRAC = 17                             # coefficients: signed 18-bit, value / 2^17
 H_LP_Q = tuple(int(round(h * (1 << LPF_FRAC))) for h in H_LP)
 LPF_DELAY = (len(H_LP) - 1) // 2          # 8 samples
+LANE_DELAY = 32                           # RTL CFO lane runs this many samples behind the input:
+#                                           a window is complete LANE_DELAY samples after its end
 
 L = 256                                   # running-sum length
 D = 32                                    # detection lag
@@ -211,6 +215,11 @@ def comparator_inputs(xi: np.ndarray, xq: np.ndarray):
     return (pr >> s, pi >> s, r0 >> s, rd >> s), (pr, pi, r0, rd)
 
 
+def holdoff(p: Params) -> int:
+    """Effective re-arm holdoff: max(arm_holdoff, n_cfo, 1)."""
+    return max(int(p.arm_holdoff), int(p.n_cfo), 1)
+
+
 def find_triggers(above: np.ndarray, below: np.ndarray, p: Params) -> list[int]:
     """Qualifier with hysteresis, blanking and holdoff (vectorised)."""
     n = above.size
@@ -229,7 +238,7 @@ def find_triggers(above: np.ndarray, below: np.ndarray, p: Params) -> list[int]:
             break
         t = arm + int(hit[0])
         trig.append(t)
-        arm = t + max(int(p.arm_holdoff), 1)
+        arm = t + holdoff(p)
     return trig
 
 
@@ -367,6 +376,9 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False) -> Result:
     below = num < p.eta_lo_sq * den
     trig = find_triggers(above, below, p)
 
+    if not 128 <= p.n_cfo <= 4096:
+        raise ValueError(f"n_cfo {p.n_cfo} outside 128..4096 (accumulator widths; the hardware's "
+                         "CORDIC sequence needs about 80 clocks between windows)")
     if not 0 <= p.tone_thresh <= TONE_THRESH_MAX_Q8:
         raise ValueError(f"tone_thresh {p.tone_thresh / 256:g} dB outside 0..24 dB")
     lin = tone_thresh_lin(p.tone_thresh) if p.tone_thresh > 0 else 0
@@ -405,7 +417,7 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False) -> Result:
         start = p.blank_len
         for t in trig:
             armed[start:t + 1] = True
-            start = t + max(int(p.arm_holdoff), 1)
+            start = t + holdoff(p)
         armed[start:] = True
         bits[armed] |= DBG_ARMED
         bits[trig] |= DBG_TRIG
