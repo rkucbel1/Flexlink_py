@@ -42,6 +42,7 @@ class Board:
         self.buf = np.zeros((0, 2), np.int16)
         self.history = np.zeros((0, 2), np.int16)      # every sample run since RESET
         self.final = set()                              # t_trig of events already reported complete
+        self.tm_done = set()                            # t_trig of timing records already reported
         self.debug = None                               # DEBUG_DTYPE records of the last RUN
 
     # ---- commands -------------------------------------------------------- #
@@ -93,11 +94,14 @@ class Board:
         elif self.fault == "cfo":
             for e in out:
                 e.cfo_inc += 100
+        tm = [r for r in res.timing if r.t_trig not in self.tm_done]
+        self.tm_done.update(r.t_trig for r in tm)
         self.debug = None
         if want_dbg:
             self.debug = np.empty(count // div, pr.DEBUG_DTYPE)
             self.debug["metric"], self.debug["bits"] = res.metric[start:], res.bits[start:]
-        return struct.pack("<II", len(out), count) + b"".join(e.pack() for e in out)
+        return (struct.pack("<II", len(out), count) + b"".join(e.pack() for e in out)
+                + struct.pack("<I", len(tm)) + b"".join(r.pack() for r in tm))
 
     def get_debug(self, payload: bytes) -> bytes:
         offset, count = struct.unpack_from("<II", payload)
@@ -109,7 +113,7 @@ class Board:
 
     def handle(self, cmd: int, payload: bytes) -> bytes:
         if cmd == pr.PING:
-            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR).pack()
+            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR | pr.BOARD_TIMING).pack()
         if cmd == pr.RESET:
             self.reset()
             return b""
@@ -120,6 +124,8 @@ class Board:
             if p.input_stage not in (0, 1, 2):
                 raise BoardError(pr.ST_BAD_ARG, "input_stage must be 0 (LPF output), 1 (20 Msps input) "
                                                 "or 2 (40 Msps input)")
+            if not 0 <= p.t_pk <= 0xFFFF:
+                raise BoardError(pr.ST_BAD_ARG, "t_pk is 16-bit (Q8.8)")
             self.params = p
             return b""
         if cmd == pr.LOAD_SAMPLES:

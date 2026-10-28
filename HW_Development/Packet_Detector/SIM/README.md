@@ -5,9 +5,12 @@
 - **every** debug record (metric and flag bits);
 - **every** trigger;
 - **every** CFO result: window start, the four lag accumulators, the four CORDIC angles and `cfo_inc`;
-- **every** event after the tone check: its CFO fields, tone `num` and `den`, and the abort flag.
+- **every** event after the tone check: its CFO fields, tone `num` and `den`, and the abort flag;
+- **every** Preamble B timing record (input stages 1 and 2): `n_end`, status (peak check, late trigger, busy), `n_pos`, `p_max`, `p_sum`. Records are matched by `t_trig`, because a BUSY record can come out before the result of an earlier search.
 
-It obeys `tready`: with fast input the tone check holds the input back, and the log says for how many clocks. Inputs change on the falling clock edge, so the testbench never races the DUT.
+It obeys `tready`: with fast input the tone check holds the input back, and so does a running timing search (one sample per 5 clocks); the log says for how many clocks. At exactly 5 clocks per sample (`FIXGAP=1 GAP=4`) nothing stalls. Inputs change on the falling clock edge, so the testbench never races the DUT.
+
+`tb_pd_timing.v` tests the Preamble B timing block alone (`./run_sim.sh timing`) on directed cases from `make_tm_vectors.py`: samples exactly on the de-rotator's rounding boundary, the late-trigger and one-search-at-a-time limits exactly and one sample off, full-scale samples, no Preamble B, failed tone checks, silent windows (all P equal), N_CFO 128 / 4096 and T_pk 0 / 60.
 
 `tb_pd_units.v` runs directed unit tests:
 - the CORDIC on 22025 vectors: random values plus ±π, the axes, zero, and tiny and full-scale values;

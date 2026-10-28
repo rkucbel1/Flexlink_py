@@ -7,7 +7,8 @@ the normal protocol (RESET, SET_PARAMS, LOAD_SAMPLES, RUN in one or more pieces,
 and the same command sequence run through pd_board_emulator's Board in this process (the
 bit-true model with the board's RUN semantics). Every RUN reply must match: the events
 (t_trig, status, cfo_inc, cfo_valid_cnt, angles exact; ToneCheck within --tone-tol, the abort
-decision exact) and, for cases with debug, every debug record.
+decision exact), the Preamble B timing records (every field exact; firmware build 10 and
+bitstream 3.0, input stages 1 and 2) and, for cases with debug, every debug record.
 
 Cases (the RTL simulation's coverage, on the board):
   rep3 / defects     real packets from TestVectors/, all three input stages (s2 = 40 Msps,
@@ -21,7 +22,7 @@ Cases (the RTL simulation's coverage, on the board):
   pieces             rep3 in uneven RUNs, with windows split across RUNs (truncated events)
   noise_k            noise only, 5 x 0.2 s: false-trigger rate (they should all fail the tone check)
 
-    python pd_board_regression.py                         # board at 192.168.50.10 (29 cases)
+    python pd_board_regression.py                         # board at 192.168.50.10 (33 cases)
     python pd_board_regression.py --only stress,pieces    # some cases (substring match)
     python pd_board_regression.py --quick                 # one short noise record
     python pd_board_regression.py --list
@@ -100,6 +101,14 @@ def cases(quick: bool):
     yield ("cfo_s1", "40 packets, CFO +-600 kHz, SNR -6..30 dB", lambda: cfo(1), None, True)
     yield ("cfo_s2", "the same at 40 Msps", lambda: cfo(2), None, True)
     yield ("cfo_s0_n4096", "same, N_CFO 4096", lambda: (cfo(0)[0], p_of(arm_holdoff=4000, n_cfo=4096)), None, False)
+    yield ("cfo_s1_n4096", "same at 20 Msps, N_CFO 4096 (timing window 969 positions)",
+           lambda: (cfo(1)[0], p_of(arm_holdoff=4000, n_cfo=4096, input_stage=1)), None, False)
+    yield ("cfo_s1_n128", "same, N_CFO 128 (timing window 4937 positions)",
+           lambda: (cfo(1)[0], p_of(arm_holdoff=4000, n_cfo=128, input_stage=1)), None, False)
+    yield ("cfo_s2_tpk0", "40 Msps, timing peak check off (T_pk 0)",
+           lambda: (cfo(2)[0], p_of(arm_holdoff=4000, input_stage=2, t_pk=0)), None, False)
+    yield ("cfo_s1_tpk100", "timing peak check 100 (aborts the weaker packets)",
+           lambda: (cfo(1)[0], p_of(arm_holdoff=4000, input_stage=1, t_pk=100 * 256)), None, False)
 
     def high(stage):
         iq = mk.high_snr_vector(rate40=stage == 2)
@@ -164,20 +173,29 @@ def session(target, iq: np.ndarray, p: pr.Params, sizes: list[int], debug: bool,
         reply = target.call(pr.RUN, struct.pack("<II", n, pr.RUN_FLAG_DEBUG if debug else 0))
         n_ev, done = struct.unpack_from("<II", reply)
         evs = pr.EventRecord.unpack_many(reply[8:], n_ev)
+        off = 8 + pr.EventRecord.FMT.size * n_ev
+        tms = []
+        if len(reply) >= off + 4:
+            (n_tm,) = struct.unpack_from("<I", reply, off)
+            tms = sorted(pr.TimingRecord.unpack_many(reply[off + 4:], n_tm), key=lambda r: r.t_trig)
         dbg = None
         if debug:
             if board:
                 dbg = target.get_debug(done // (2 if p.input_stage == 2 else 1))
             else:
                 dbg = target.b.debug.copy()       # the whole capture (GET_DEBUG is limited to 1 MB)
-        out.append((evs, done, dbg))
+        out.append((evs, done, dbg, tms))
         i += n
     return out
 
 
-def compare(got, exp, tone_tol_q8: int) -> list[str]:
+def compare(got, exp, tone_tol_q8: int, timing: bool) -> list[str]:
     errs = []
-    for k, ((ge, gd, gdbg), (ee, ed, edbg)) in enumerate(zip(got, exp)):
+    for k, ((ge, gd, gdbg, gt), (ee, ed, edbg, et)) in enumerate(zip(got, exp)):
+        if timing and gt != et:
+            bad = [(g, e) for g, e in zip(gt, et) if g != e]
+            errs.append(f"RUN {k}: timing records differ ({len(gt)} board, {len(et)} model)"
+                        + (f", first: board {astuple(bad[0][0])} model {astuple(bad[0][1])}" if bad else ""))
         if gd != ed:
             errs.append(f"RUN {k}: {gd} samples processed, expected {ed}")
         if len(ge) != len(ee):
@@ -228,8 +246,13 @@ def main(argv=None) -> int:
         print("This bitstream has no detector")
         return 2
     tol = int(round(a.tone_tol * 256))
+    timing = bool(info.flags & pr.BOARD_TIMING)
+    if not timing:
+        print("Note: no Preamble B timing on this board (bitstream before 3.0 or firmware before build 10): "
+              "timing records not compared\n")
     report, n_fail = [], 0
-    print(f"{'case':22s} {'samples':>9s} {'RUNs':>4s} {'events':>6s} {'fail':>4s} {'trunc':>5s} {'debug':>9s} {'board s':>7s}  result")
+    print(f"{'case':22s} {'samples':>9s} {'RUNs':>4s} {'events':>6s} {'fail':>4s} {'trunc':>5s} {'timing':>11s} "
+          f"{'debug':>9s} {'board s':>7s}  result")
     for name, desc, build, plan, debug in todo:
         try:
             iq, p = build()
@@ -247,19 +270,23 @@ def main(argv=None) -> int:
             print(f"{name:22s} communication error: {exc}")
             return 2
         exp = session(EmuTarget(), iq, p, sizes, debug, False)
-        errs = compare(got, exp, tol)
+        errs = compare(got, exp, tol, timing)
         evs = [e for r in got for e in r[0]]
         n_tf = sum(1 for e in evs if e.status & pr.EV_TONE_FAIL)
         n_tr = sum(1 for e in evs if e.status & pr.EV_TRUNCATED)
         n_dbg = sum(r[2].size for r in got if r[2] is not None)
+        tms = [t for r in (got if timing else exp) for t in r[3]]
+        n_good = sum(t.status == pr.TM_GOOD for t in tms)
+        tm_col = f"{len(tms)}/{n_good}" if p.input_stage in (1, 2) else "-"
         ok = not errs
         n_fail += not ok
-        print(f"{name:22s} {n:9d} {len(sizes):4d} {len(evs):6d} {n_tf:4d} {n_tr:5d} "
+        print(f"{name:22s} {n:9d} {len(sizes):4d} {len(evs):6d} {n_tf:4d} {n_tr:5d} {tm_col:>11s} "
               f"{(str(n_dbg) if debug else '-'):>9s} {t_board:7.1f}  {'PASS' if ok else 'FAIL'}")
         for e in errs[:5]:
             print(f"    {e}")
         rec = {"case": name, "description": desc, "samples": n, "runs": len(sizes), "events": len(evs),
-               "tone_fail": n_tf, "truncated": n_tr, "debug_records": n_dbg, "board_s": round(t_board, 2),
+               "tone_fail": n_tf, "truncated": n_tr, "timing_records": len(tms), "timing_good": n_good,
+               "debug_records": n_dbg, "board_s": round(t_board, 2),
                "result": "PASS" if ok else "FAIL", "errors": errs[:20], "params": p.as_dict()}
         report.append(rec)
     noise = [r for r in report if r["case"].startswith("noise") and r["result"] != "skipped"]

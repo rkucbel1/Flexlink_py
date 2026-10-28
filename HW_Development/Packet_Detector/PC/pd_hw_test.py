@@ -17,6 +17,7 @@ Steps: PING, RESET, SET_PARAMS, LOAD_SAMPLES (64k-sample messages), READ_SAMPLES
 compare (loopback), RUN (all at once or in --chunk pieces, state carries over), optional
 GET_DEBUG, then compare with the bit-true model's expected events:
     t_trig, status, cfo_inc, lag angles     exact (--cfo-tol / --angle-tol to relax)
+    Preamble B timing (input stage 1, 2)    every field exact (bitstream 3.0, firmware build 10)
     ToneCheck dB                            within --tone-tol (0.01 dB): the decision is exact
                                             integer; the dB value is the firmware's log10
     debug records (--debug)                 every dbg_metric and flag word, exact
@@ -81,9 +82,15 @@ class Board:
         return np.concatenate(out) if out else np.zeros((0, 2), np.int16)
 
     def run(self, count: int, debug: bool, flags: int = 0) -> tuple[list[pr.EventRecord], int]:
+        """Events of this RUN; its timing records (firmware build 10) are left in self.timing."""
         flags |= pr.RUN_FLAG_DEBUG if debug else 0
         reply = self.call(pr.RUN, struct.pack("<II", count, flags))
         n_ev, done = struct.unpack_from("<II", reply)
+        off = 8 + pr.EventRecord.FMT.size * n_ev
+        self.timing = []
+        if len(reply) >= off + 4:
+            (n_tm,) = struct.unpack_from("<I", reply, off)
+            self.timing = pr.TimingRecord.unpack_many(reply[off + 4:], n_tm)
         return pr.EventRecord.unpack_many(reply[8:], n_ev), done
 
     def get_debug(self, count: int) -> np.ndarray:
@@ -130,6 +137,37 @@ def compare(got: list[pr.EventRecord], exp: list[dict], a) -> tuple[bool, list[s
     for t, e in by_t.items():
         ok = False
         lines.append(f"  MISSING t_trig {t}, cfo_inc {e['cfo_inc']}")
+    return ok, lines
+
+
+def describe_timing(r: pr.TimingRecord) -> str:
+    if r.status & pr.TM_BUSY:
+        return "BUSY (a search was still running)"
+    verdict = "good" if r.status == pr.TM_GOOD else (
+        "abort: no peak" if not r.status & pr.TM_PEAK_OK else "abort: late trigger")
+    return f"n_end {r.n_end:8d}, peak/mean {r.peak_to_mean:6.1f}, {verdict}"
+
+
+def compare_timing(got: list[pr.TimingRecord], exp: list[pr.TimingRecord]) -> tuple[bool, list[str]]:
+    """Every field exact; records matched by t_trig."""
+    lines, ok = [], True
+    if len(got) != len(exp):
+        ok = False
+        lines.append(f"  timing record count: board {len(got)}, expected {len(exp)}")
+    by_t = {r.t_trig: r for r in exp}
+    for g in got:
+        e = by_t.pop(g.t_trig, None)
+        if e is None:
+            ok = False
+            lines.append(f"  EXTRA    timing t_trig {g.t_trig}: {describe_timing(g)}")
+            continue
+        same = g == e
+        ok &= same
+        lines.append(f"  {'ok      ' if same else 'MISMATCH'} timing t_trig {g.t_trig:8d}: {describe_timing(g)}"
+                     + ("" if same else f"   [expected {describe_timing(e)}, p_max {e.p_max} p_sum {e.p_sum}]"))
+    for t, e in by_t.items():
+        ok = False
+        lines.append(f"  MISSING  timing t_trig {t}: {describe_timing(e)}")
     return ok, lines
 
 
@@ -260,6 +298,8 @@ def main(argv=None) -> int:
 
         result = {"vector": a.vector.stem, "target": kind, "host": a.host, "chunk": chunk}
         events: dict[int, pr.EventRecord] = {}
+        timing: dict[int, pr.TimingRecord] = {}
+        has_timing = bool(info.flags & pr.BOARD_TIMING) and a.input_stage in (1, 2)
         dbg_parts = []
         t_load = t_run = 0.0
         loop_ok = pl_ok = True
@@ -294,6 +334,8 @@ def main(argv=None) -> int:
             t_run += time.perf_counter() - t0
             for e in evs:                      # a truncated event is re-reported once complete
                 events[e.t_trig] = e
+            for r in b.timing:
+                timing[r.t_trig] = r
             if a.debug:
                 dbg_parts.append(b.get_debug(done // div))
         mb = iq.nbytes / 1e6
@@ -317,6 +359,16 @@ def main(argv=None) -> int:
     got = sorted(events.values(), key=lambda e: e.t_trig)
     ok, lines = compare(got, expected, a)
     ok &= loop_ok
+    tm_got = sorted(timing.values(), key=lambda r: r.t_trig)
+    tm_exp: list[pr.TimingRecord] = []
+    if has_timing:
+        import pd_reference as ref
+        tm_exp = ref.detect(iq, params).timing
+        tok, tlines = compare_timing(tm_got, tm_exp)
+        ok &= tok
+        lines += tlines
+    elif a.input_stage in (1, 2):
+        lines.append("  (no Preamble B timing: the board's bitstream or firmware predates it)")
     if a.debug and dbg_parts:
         ok &= check_debug(np.concatenate(dbg_parts), iq, params, lines)
     print("Events (board vs reference):")
@@ -331,9 +383,14 @@ def main(argv=None) -> int:
                      if "FrequencyOffset" in meta.get("defects", {}) and e.status & pr.EV_CFO_VALID else ""))
         else:
             print(f"  t_trig {e.t_trig}: not on a packet (false trigger)")
+    for r in tm_got:
+        if r.status == pr.TM_GOOD:
+            print(f"  timing for t_trig {r.t_trig}: Preamble B ends at sample {r.n_end}, payload from "
+                  f"{r.payload_start} (peak/mean {r.peak_to_mean:.1f})")
     print("PASS" if ok else "FAIL")
 
-    result.update({"pass": ok, "events": [vars(e) for e in got], "report": lines})
+    result.update({"pass": ok, "events": [vars(e) for e in got], "timing": [vars(r) for r in tm_got],
+                   "report": lines})
     a.vector.with_name(a.vector.stem + "_result.json").write_text(json.dumps(result, indent=2))
     if a.plot and dbg_parts:
         png = a.vector.with_name(a.vector.stem + "_debug.png")

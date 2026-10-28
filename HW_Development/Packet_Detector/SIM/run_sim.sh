@@ -17,6 +17,7 @@
 #   NCFO=4096 ./run_sim.sh cfo 1                   # other CFO window length (128..4096)
 #   ./run_sim.sh stress 1 / ./run_sim.sh cfo 1     # synthetic vectors (full scale / CFO sweep)
 #   ./run_sim.sh units                             # CORDIC, cascade, tone-check unit tests
+#   ./run_sim.sh timing                            # Preamble B timing alone: directed boundary cases
 #
 # Python: uses the project venv (Flexlink_py/.venv) if it exists, else python3 (or PYTHON=...).
 # xsim:   source the Vivado settings script first (any terminal; the venv need not be active).
@@ -40,6 +41,27 @@ if [[ "$SIM" == xsim ]] && ! command -v xvlog > /dev/null; then
   exit 2
 fi
 
+if [[ "$VEC" == timing ]]; then
+  "$PYTHON" make_tm_vectors.py
+  RTL=(../RTL/pd_tone_rom.v ../RTL/pd_sdp_ram.v ../RTL/pd_timing.v)
+  : > sim.log
+  for c in bounds n128 n4096 tpk0 tpk60; do
+    echo "== tm_$c" | tee -a sim.log
+    case "$SIM" in
+      xsim)
+        (cd "work/tm_$c" && unset LIBRARY_PATH && xvlog --nolog "${RTL[@]/#/../../}" ../../tb_pd_timing.v > /dev/null &&
+         xelab --nolog --debug off tb_pd_timing -s tbt > /dev/null &&
+         xsim tbt --nolog -R -testplusarg "gap=$GAP" -testplusarg "seed=$SEED" -testplusarg "fixgap=$FIXGAP") | tee -a sim.log ;;
+      verilator)
+        [[ -x work/obj_tb_pd_timing/tb_pd_timing ]] || verilator --binary --timing -Wno-fatal --top-module tb_pd_timing \
+            --Mdir work/obj_tb_pd_timing -o tb_pd_timing -j 2 "${RTL[@]}" tb_pd_timing.v > work/verilator_build.log
+        (cd "work/tm_$c" && ../obj_tb_pd_timing/tb_pd_timing "+gap=$GAP" "+seed=$SEED" "+fixgap=$FIXGAP") | tee -a sim.log ;;
+    esac
+  done
+  ! grep -q "^FAIL" sim.log && [[ $(grep -c "^PASS" sim.log) -eq 5 ]]
+  exit
+fi
+
 if [[ "$VEC" == units ]]; then
   "$PYTHON" make_tb_vectors.py units
   DIR=work/units; TOP=tb_pd_units; TB=tb_pd_units.v
@@ -48,7 +70,7 @@ else
   TOP=tb_pd_detect; TB=tb_pd_detect.v
   RTL=(../RTL/pd_halfband.v ../RTL/pd_dc_blocker.v ../RTL/pd_lpf.v ../RTL/pd_div16.v ../RTL/pd_detect_core.v
        ../RTL/pd_cordic.v ../RTL/pd_cfo_cascade.v ../RTL/pd_cfo_lane.v ../RTL/pd_tone_rom.v
-       ../RTL/pd_sdp_ram.v ../RTL/pd_tone_check.v ../RTL/pd_detect_top.v)
+       ../RTL/pd_sdp_ram.v ../RTL/pd_tone_check.v ../RTL/pd_timing.v ../RTL/pd_detect_top.v)
 args=("$VEC" --input-stage "$STAGE")
 [[ -n "${MAX:-}" ]] && args+=(--max-samples "$MAX")
 [[ -n "${HOLDOFF:-}" ]] && args+=(--holdoff "$HOLDOFF")

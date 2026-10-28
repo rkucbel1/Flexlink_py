@@ -18,7 +18,7 @@ its word lengths:
 
     python pd_bittrue_check.py                 # everything (~5 minutes)
     python pd_bittrue_check.py --quick         # fewer trials (~1 minute)
-    python pd_bittrue_check.py --only sweeps   # or: mc, noise, interferers, decim
+    python pd_bittrue_check.py --only sweeps   # or: mc, noise, interferers, decim, timing
 
 Results: printed, and written to ../BITTRUE_results.json (the numbers in ../BITTRUE.md);
 --quick writes ../BITTRUE_results_quick.json instead, so it never replaces the full run.
@@ -425,10 +425,99 @@ def interferers(tx, sim, rng, n=10) -> list[dict]:
 
 
 # --------------------------------------------------------------------------------------- #
+def load_timing_sim(root: Path):
+    """The simulator's timing module and its 20 Msps Preamble B (Preamble.h5, needs h5py)."""
+    tim = load_module(root / "Flexlink_BasicModules" / "Preamble" / "Receive_Get_Timing_Offset.py")
+    return tim, tim.load_preamble_b()
+
+
+def timing_compare(tx, sim, snrs, n_trials, rng, widths=(R.TIM_BITS, 4)) -> list[dict]:
+    """Preamble B timing (spec 4.5): the simulator's float 1-bit search (its own detection, CFO
+    and tone check, then de-rotation in float) against the bit-true search (bit-true detector
+    events, de-rotator, TIM_BITS-bit samples) on the same trials. Decision as in the receiver:
+    abort if peak/mean < T_pk (18) or late trigger; otherwise the timing is right or wrong
+    (truth: last Preamble B sample at IDLE + 100 + 5000 + 1139). Records are long enough for the
+    whole window (payload40 = 8000)."""
+    tim, pb = load_timing_sim(find_root(HERE))
+    truth = IDLE + PA_OFFSET + L_A + R.PB_LEN - 1
+    out = []
+    for snr in snrs:
+        x20, _, _ = make_trials(tx, snr, n_trials, rng, payload40=8000)
+        iq = quantise(x20)
+        cnt = {k: {"correct": 0, "wrong": 0, "abort_peak": 0, "abort_late": 0, "none": 0, "pm_correct": []}
+               for k in ["float", *widths]}
+
+        def put(key, pos, pm, t):
+            c = cnt[key]
+            if pos is None:
+                c["none"] += 1
+            elif pm < 18:
+                c["abort_peak"] += 1
+            elif pos < t + 2048 + R.TIM_LATE_OFF:
+                c["abort_late"] += 1
+            else:
+                c["correct" if pos == truth else "wrong"] += 1
+                if pos == truth:
+                    c["pm_correct"].append(pm)
+        for k in range(n_trials):
+            y = R.dc_blocker(iq[:, :, k], 10)
+            res = R.detect(R.lpf(y), params())
+            ev = [e for e in res.events if e.status & 1 and not e.status & 2]
+            lf = sim["lpf"]
+            xd = lf.dc_blocker(x20[k])
+            xl = lf.lp_filter_flexlink(xd)
+            flag, _, _, _ = sim["det"].packet_detector_flexlink(xl, R.L, 0.2, 0.35, normaliser="Bounded", qualifier=128)
+            ok = flag.any() and np.flatnonzero(flag)[0] + 2048 <= xl.size
+            if ok:
+                c, f, fd = sim["freq"].detect_frequency_offset_cascade(flag, xl)
+                tone, _, _ = sim["freq"].tone_structure_check(xl, int(fd["StartOfPacket"]), c + f)
+                ok = tone >= 13
+            if ok:
+                n = np.arange(1, xd.size + 1)
+                xc = xd * np.exp(-2j * np.pi * n * (c + f) / FS)
+                sop = int(fd["StartOfPacket"])
+                pos, _, _, info = tim.detect_timing_offset(xc, pb, "1-bit Taps", start_of_packet=sop,
+                                                           cfo_window=2048, lpf_delay=R.LPF_DELAY, return_info=True)
+                put("float", pos - 1 if pos else None, info["PeakToMean"], sop)
+            else:
+                put("float", None, 0, 0)
+            for w in widths:
+                rec = R.timing_search(y, ev[0].t_trig, 2048, ev[0].cfo_inc & 0xFFFFFF, 0, w) if ev else None
+                put(w, None if rec is None else rec.n_end, 0 if rec is None else rec.peak_to_mean,
+                    ev[0].t_trig if ev else 0)
+        row = {"snr_db": snr, "trials": n_trials}
+        for key, c in cnt.items():
+            pm = c.pop("pm_correct")
+            c["pm_correct_min"] = float(min(pm)) if pm else None
+            row[str(key)] = c
+        out.append(row)
+        print(f"  {snr:+5.0f} dB: correct / wrong / aborted (peak) / aborted (late) / not detected")
+        for key in cnt:
+            c = row[str(key)]
+            name = "float" if key == "float" else f"{key}-bit"
+            print(f"     {name:>6}: {c['correct']:4d} / {c['wrong']:3d} / {c['abort_peak']:3d} / "
+                  f"{c['abort_late']:3d} / {c['none']:3d}   min peak/mean (correct) {c['pm_correct_min']}")
+    # windows without Preamble B: the peak/mean T_pk must stay above
+    x20, _, _ = make_trials(tx, -12, n_trials, rng, payload40=8000, packet=False)
+    iq = quantise(x20)
+    pm = {w: [] for w in widths}
+    for k in range(n_trials):
+        y = R.dc_blocker(iq[:, :, k], 10)
+        inc = int(rng.integers(-(1 << 17), 1 << 17)) & 0xFFFFFF
+        for w in widths:
+            pm[w].append(R.timing_search(y, 1600, 2048, inc, 0, w).peak_to_mean)
+    nopb = {str(w): {"max": float(np.max(v)), "p99": float(np.percentile(v, 99)), "median": float(np.median(v))}
+            for w, v in pm.items()}
+    print(f"  no Preamble B in the window ({n_trials} records), peak/mean max / p99 / median: "
+          + ", ".join(f"{w}-bit {v['max']:.1f} / {v['p99']:.1f} / {v['median']:.1f}" for w, v in nopb.items()))
+    out.append({"no_preamble_b": nopb, "records": n_trials})
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Check the bit-true packet-detector model")
     ap.add_argument("--quick", action="store_true")
-    ap.add_argument("--only", choices=("sweeps", "mc", "noise", "interferers", "decim"))
+    ap.add_argument("--only", choices=("sweeps", "mc", "noise", "interferers", "decim", "timing"))
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--out", type=Path,
                     help="results file (default ../BITTRUE_results.json; with --quick ../BITTRUE_results_quick.json)")
@@ -475,6 +564,9 @@ def main(argv=None) -> int:
     if a.only in (None, "decim"):
         print("5. 40 -> 20 Msps: resample_poly vs bit-true half-band vs every other sample")
         res["decimator"] = decimator_compare(tx, (-14, -13, -12, -10, -6, 10), nt, rng)
+    if a.only in (None, "timing"):
+        print("6. Preamble B timing: float 1-bit search vs bit-true (T_pk 18, late-trigger rule)")
+        res["timing"] = timing_compare(tx, sim, (-14, -13, -12, -10, 10), nt, rng)
     a.out.write_text(json.dumps(res, indent=1))
     print(f"Wrote {a.out}")
     return 0

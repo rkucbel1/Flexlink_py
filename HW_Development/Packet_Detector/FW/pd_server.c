@@ -55,7 +55,7 @@
 /* ---------------------------------------------------------------------------------- */
 #define PD_PORT                 5001
 #define PD_PROTOCOL_VERSION     1u
-#define PD_BUILD                9u              /* bump when the firmware changes */
+#define PD_BUILD                10u              /* bump when the firmware changes */
 
 #define SAMPLE_BUF_ADDR         0x10000000u
 #define DEBUG_BUF_ADDR          0x18000000u
@@ -80,6 +80,7 @@
 #define PD_ID_MASK              0xFFFF0000u     /* "PD"; low half = register map version */
 #define PD_ID_VALUE             0x50440000u
 #define PD_ID_V2                0x0200u         /* 2.0: input stage 2 (40 Msps, half-band) */
+#define PD_ID_V3                0x0300u         /* 3.0: Preamble B timing (T_PK, timing FIFO) */
 #define R_ID                    0x00u
 #define R_CTRL                  0x04u
 #define R_STATUS                0x08u
@@ -89,12 +90,17 @@
 #define R_EV_DATA               0x18u
 #define R_DBG_SENT              0x1Cu
 #define R_PARAM0                0x20u           /* ETA_HI_SQ ... TONE_LIN, 4 bytes apart */
+#define R_T_PK                  0x44u
+#define R_TM_LEVEL              0x48u
+#define R_TM_DATA               0x4Cu
 #define CTRL_RESET              0x1u
 #define CTRL_DEBUG              0x2u
 #define CTRL_LOOPBACK           0x4u
 #define STATUS_BUSY             0x1u
 #define STATUS_OPEN             0x2u
 #define STATUS_EV_OVF           0x100u
+#define STATUS_TM_OVF           0x800u
+#define STATUS_TM_ERR           0x1000u
 #define IDLE_TIMEOUT_POLLS      10000000u
 
 /* ---------------------------------------------------------------------------------- */
@@ -103,7 +109,9 @@
 #define PD_MAGIC                0x44504C46u
 #define HDR_SIZE                16u
 #define MAX_PAYLOAD             (1u << 20)
-#define PARAMS_SIZE             36u
+#define PARAMS_SIZE_V1          36u             /* SET_PARAMS without t_pk (PC software before build 10) */
+#define PARAMS_SIZE             40u
+#define T_PK_DEFAULT            4608u           /* 18.0 in Q8.8 */
 
 enum { CMD_PING = 1, CMD_RESET = 2, CMD_SET_PARAMS = 3, CMD_LOAD_SAMPLES = 4,
        CMD_READ_SAMPLES = 5, CMD_RUN = 6, CMD_GET_DEBUG = 7, CMD_MEMTEST = 8,
@@ -116,11 +124,14 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define RUN_FLAG_PL_LOOPBACK    0x2u
 #define BOARD_FLAG_EMULATOR     0x1u
 #define BOARD_FLAG_NO_DETECTOR  0x2u
+#define BOARD_FLAG_TIMING       0x4u            /* bitstream has the Preamble B timing (ID 3.0) */
 #define EV_CFO_VALID            0x1u
 #define EV_TONE_FAIL            0x2u
 #define EV_TRUNCATED            0x4u
 #define EV_SIZE                 24u
-#define MAX_EVENTS              ((MAX_PAYLOAD - 8u) / EV_SIZE)
+#define TM_SIZE                 32u             /* timing record (pd_protocol.TimingRecord) */
+#define MAX_TM                  4096u           /* timing records per RUN */
+#define MAX_EVENTS              ((MAX_PAYLOAD - 12u - MAX_TM * TM_SIZE) / EV_SIZE)
 #define TONE_THRESH_MAX_Q8      (24u * 256u)
 
 /* ---------------------------------------------------------------------------------- */
@@ -162,6 +173,9 @@ static u32 debug_count;             /* records in the debug buffer from the last
 static u8  ev_out[8u + MAX_EVENTS * EV_SIZE];   /* RUN reply: n_events, count, records */
 static u32 ev_n;                    /* events in ev_out */
 static int ev_lost;                 /* more than MAX_EVENTS in one RUN */
+static u8  tm_out[MAX_TM * TM_SIZE]; /* timing records of the RUN */
+static u32 tm_n;
+static int tm_lost;
 
 /* ---------------------------------------------------------------------------------- */
 /* Helpers                                                                             */
@@ -333,6 +347,41 @@ static void drain_events(void)
     }
 }
 
+/* Read every complete timing record (8 words) into tm_out (pd_protocol.TimingRecord). */
+static void drain_timing(void)
+{
+    if (det_version < PD_ID_V3) {
+        return;
+    }
+    while (pd_rd(R_TM_LEVEL) >= 8u) {
+        u32 w[8], i;
+        u8 *r;
+        for (i = 0; i < 8u; i++) {
+            w[i] = pd_rd(R_TM_DATA);
+        }
+        if (tm_n >= MAX_TM) {
+            tm_lost = 1;
+            continue;
+        }
+        r = tm_out + TM_SIZE * tm_n;
+        wr32(r + 0, w[0]);                                      /* t_trig */
+        wr32(r + 4, w[1]);                                      /* n_end */
+        wr32(r + 8, w[2]);                                      /* status */
+        wr32(r + 12, w[3]);                                     /* n_pos */
+        wr32(r + 16, w[4]);                                     /* p_max (u64) */
+        wr32(r + 20, w[5]);
+        wr32(r + 24, w[6]);                                     /* p_sum (u64) */
+        wr32(r + 28, w[7]);
+        tm_n++;
+    }
+}
+
+static void drain_all(void)
+{
+    drain_events();
+    drain_timing();
+}
+
 /* Hold the detector in reset, write the parameters, release it. */
 static void detector_reset(void)
 {
@@ -350,6 +399,9 @@ static void detector_reset(void)
         pd_wr(R_PARAM0 + 4u * (i < 5u ? i : i - 1u), v);
     }
     pd_wr(R_PARAM0 + 4u * 8u, tone_thresh_lin(rd32(params + 20)));
+    if (det_version >= PD_ID_V3) {
+        pd_wr(R_T_PK, rd32(params + 36));
+    }
     pd_wr(R_CTRL, 0);
 }
 
@@ -386,7 +438,7 @@ static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, u32 div, int events, 
         while (XAxiDma_Busy(&dma, XAXIDMA_DMA_TO_DEVICE) ||
                (dst && XAxiDma_Busy(&dma, XAXIDMA_DEVICE_TO_DMA))) {
             if (events) {
-                drain_events();
+                drain_all();
             }
             if (--polls == 0) {
                 sr_tx = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_TX_OFFSET, XAXIDMA_SR_OFFSET);
@@ -433,6 +485,8 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
 
     ev_n = 0;
     ev_lost = 0;
+    tm_n = 0;
+    tm_lost = 0;
     start = pd_rd(R_SAMPLES);
     start20 = start / div;
     pd_wr(R_CTRL, debug ? CTRL_DEBUG : 0u);
@@ -442,9 +496,9 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     }
     /* the last samples, CFO results and tone checks finish without further input */
     for (polls = IDLE_TIMEOUT_POLLS; (pd_rd(R_STATUS) & STATUS_BUSY) && polls > 0; polls--) {
-        drain_events();
+        drain_all();
     }
-    drain_events();
+    drain_all();
     st = pd_rd(R_STATUS);
     pd_wr(R_CTRL, 0);
     if (st & STATUS_BUSY) {
@@ -454,6 +508,15 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     if (st & STATUS_EV_OVF) {
         snprintf(err, err_len, "detector event FIFO overflow (STATUS 0x%08lx)", (unsigned long)st);
         return -3;
+    }
+    if (st & (STATUS_TM_OVF | STATUS_TM_ERR)) {
+        snprintf(err, err_len, "timing FIFO overflow or start queue overflow (STATUS 0x%08lx)", (unsigned long)st);
+        return -3;
+    }
+    if (tm_lost) {
+        snprintf(err, err_len, "more than %lu timing records in one RUN - run in smaller pieces",
+                 (unsigned long)MAX_TM);
+        return -5;
     }
     if (pd_rd(R_SAMPLES) - start != count) {
         snprintf(err, err_len, "detector took %lu of %lu samples",
@@ -477,6 +540,9 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     }
     wr32(ev_out + 0, ev_n);
     wr32(ev_out + 4, count);
+    /* reply: n_events, count, events, then n_timing and the timing records */
+    wr32(ev_out + 8u + EV_SIZE * ev_n, tm_n);
+    memcpy(ev_out + 12u + EV_SIZE * ev_n, tm_out, TM_SIZE * tm_n);
     return 0;
 }
 
@@ -565,7 +631,7 @@ static void handle_message(struct tcp_pcb *pcb)
         wr32(tx_small + 0, PD_PROTOCOL_VERSION);
         wr32(tx_small + 4, PD_BUILD);
         wr32(tx_small + 8, MAX_SAMPLES);
-        wr32(tx_small + 12, det_ok ? 0u : BOARD_FLAG_NO_DETECTOR);
+        wr32(tx_small + 12, !det_ok ? BOARD_FLAG_NO_DETECTOR : (det_version >= PD_ID_V3 ? BOARD_FLAG_TIMING : 0u));
         reply(pcb, cmd, ST_OK, seq, tx_small, 16);
         return;
 
@@ -579,7 +645,7 @@ static void handle_message(struct tcp_pcb *pcb)
         return;
 
     case CMD_SET_PARAMS:
-        if (len < PARAMS_SIZE) {
+        if (len < PARAMS_SIZE_V1) {
             reply_error(pcb, cmd, ST_BAD_ARG, seq, "SET_PARAMS payload too short");
             return;
         }
@@ -604,7 +670,12 @@ static void handle_message(struct tcp_pcb *pcb)
             reply_error(pcb, cmd, ST_BAD_ARG, seq, "eta_*_sq and qual_len are 16-bit, dc_shift 0..15");
             return;
         }
-        memcpy(params, pl, PARAMS_SIZE);
+        if (len >= PARAMS_SIZE && rd32(pl + 36) > 0xFFFFu) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "t_pk is 16-bit (Q8.8)");
+            return;
+        }
+        memcpy(params, pl, PARAMS_SIZE_V1);
+        wr32(params + 36, len >= PARAMS_SIZE ? rd32(pl + 36) : T_PK_DEFAULT);
         det_cfg = 1;
         detector_reset();                   /* new parameters take effect from a reset */
         reply(pcb, cmd, ST_OK, seq, NULL, 0);
@@ -701,7 +772,7 @@ static void handle_message(struct tcp_pcb *pcb)
             if (flags & RUN_FLAG_DEBUG) {
                 debug_count = rd32(params + 28) == 2u ? count / 2u : count;
             }
-            reply(pcb, cmd, ST_OK, seq, ev_out, 8u + EV_SIZE * ev_n);
+            reply(pcb, cmd, ST_OK, seq, ev_out, 12u + EV_SIZE * ev_n + TM_SIZE * tm_n);
             return;
         }
         debug_count = 0;
@@ -1031,9 +1102,9 @@ static err_t accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
 /* pd_protocol.Params defaults, until the PC sends SET_PARAMS */
 static void pr_default_params(void)
 {
-    static const u32 def[9] = {8028u, 2621u, 128u, 2048u, 288u, 3328u, 131072u, 0u, 10u};
+    static const u32 def[10] = {8028u, 2621u, 128u, 2048u, 288u, 3328u, 131072u, 0u, 10u, T_PK_DEFAULT};
     u32 i;
-    for (i = 0; i < 9u; i++) {
+    for (i = 0; i < 10u; i++) {
         wr32(params + 4u * i, def[i]);
     }
 }

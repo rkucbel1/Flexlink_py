@@ -7,17 +7,19 @@
 //           stage 2 one per input pair): {dbg_bits, dbg_metric}; TLAST on the record of each
 //           input beat that had TLAST, so every S2MM transfer ends with its MM2S transfer
 //           (stage 2: transfers must hold whole pairs, i.e. an even number of samples)
-//   S_AXI   AXI4-Lite registers: control, status, parameters, event FIFO
+//   S_AXI   AXI4-Lite registers: control, status, parameters, event FIFO, timing FIFO
 //
 // Register map (byte offsets; RW = read/write, RO = read only):
-//   0x00 ID          RO  0x50440200 ("PD", version 2.0; 1.0 had no input stage 2)
+//   0x00 ID          RO  0x50440300 ("PD", version 3.0: Preamble B timing; 2.0 had no timing,
+//                        1.0 no input stage 2)
 //   0x04 CTRL        RW  bit0 RESET (1 = detector held in reset; 1 after power-up)
 //                        bit1 DEBUG (send debug records on M_AXIS; change only when not BUSY)
 //                        bit2 LOOPBACK (S_AXIS -> M_AXIS unchanged, detector not fed)
 //   0x08 STATUS      RO  bit0 BUSY (samples, CFO or tone results, events or debug records in
 //                        flight), bit1 OPEN (a window still waits for samples), bits 7:4 number
 //                        of open windows, bit8 EV_OVF (event lost; sticky until RESET),
-//                        bit9 in reset, bit10 loopback
+//                        bit9 in reset, bit10 loopback, bit11 TM_OVF (timing record lost),
+//                        bit12 TM_ERR (timing start queue overflow); both sticky, cannot happen
 //   0x0C SAMPLES     RO  input samples taken since RESET (stage 2: 40 Msps samples, twice the
 //                        detector's sample_cnt)
 //   0x10 OPEN_T      RO  t_trig of the first open window (valid when OPEN)
@@ -33,12 +35,19 @@
 //   0x38 INPUT_STAGE RW   |  0 LPF output, 1 20 Msps, 2 40 Msps (half-band in the PL)
 //   0x3C DC_SHIFT    RW   |
 //   0x40 TONE_LIN    RW  /   threshold as a linear ratio, Q.16 (firmware: tone_thresh_lin)
+//   0x44 T_PK        RW      timing: minimum peak / mean, Q8.8 (default 18.0 = 4608), 0 = off
+//   0x48 TM_LEVEL    RO  words in the timing FIFO (8 per record)
+//   0x4C TM_DATA     RO  next timing word (reading removes it)
 //
 // Event (8 words, in this order): t_trig, cfo_inc, {ang32, ang16}, {ang256, ang128},
 //   num[31:0], {fail, 23'b0, num[39:32]}, den[31:0], {24'b0, den[39:32]}
 //
+// Timing record (8 words): t_trig, n_end, status (bit0 PEAK_OK, bit1 LATE, bit2 BUSY), n_pos,
+//   p_max[31:0], p_max[33:32], p_sum[31:0], p_sum[47:32]
+//
 // Flow control: the sample input is held back (S_AXIS tready = 0) while the tone check is
-// catching up, while the event FIFO is nearly full (the firmware reads it during the DMA), and
+// catching up, while a timing search runs (one sample per 5 clocks), while the event or the
+// timing FIFO is nearly full (the firmware reads them during the DMA), and
 // with DEBUG while the debug FIFO and the records in flight would exceed its 64 entries. Nothing
 // is ever dropped, and none of this changes the results.
 `timescale 1ns / 1ps
@@ -119,7 +128,9 @@ module pd_axi (
     (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 M_AXIS TREADY" *)
     input  wire        m_axis_tready
 );
-    localparam [31:0] ID = 32'h5044_0200;     // "PD", version 2.0 (2.0: input stage 2)
+    localparam [31:0] ID = 32'h5044_0300;     // "PD", version 3.0 (3.0: timing, 2.0: input stage 2)
+    localparam integer TM_DEPTH = 32;            // timing records
+    localparam integer TM_LIMIT = TM_DEPTH - 8;  // hold the input above this
     localparam integer EV_DEPTH = 256;           // words (32 events)
     localparam integer EV_LIMIT = EV_DEPTH - 96; // hold the input above this (>= 11 events room)
     localparam integer DBG_BITS = 6;             // debug FIFO 64 records
@@ -132,6 +143,7 @@ module pd_axi (
     reg [1:0]  r_stage;
     reg [3:0]  r_shift;
     reg [23:0] r_lin;
+    reg [15:0] r_tpk;
 
     // detector reset: registered, from the bus reset and CTRL.RESET
     reg det_rst_n;
@@ -145,6 +157,12 @@ module pd_axi (
     wire [39:0] det_ev_num, det_ev_den;
     wire [3:0]  det_open_n;
     wire [31:0] det_open_t;
+    wire        det_tm_valid, det_tm_err;
+    wire [31:0] det_tm_t, det_tm_n_end;
+    wire [2:0]  det_tm_status;
+    wire [15:0] det_tm_n_pos;
+    wire [33:0] det_tm_p_max;
+    wire [47:0] det_tm_p_sum;
     reg         gate;                             // input allowed (registered)
     wire        det_tvalid = s_axis_tvalid && gate;
     wire        accept     = det_tvalid && det_tready;
@@ -153,7 +171,7 @@ module pd_axi (
         .clk(aclk), .rst_n(det_rst_n),
         .input_stage(r_stage), .dc_shift(r_shift),
         .eta_hi_sq(r_eta_hi), .eta_lo_sq(r_eta_lo), .qual_len(r_qual),
-        .blank_len(r_blank), .arm_holdoff(r_hold), .n_cfo(r_ncfo), .tone_lin(r_lin),
+        .blank_len(r_blank), .arm_holdoff(r_hold), .n_cfo(r_ncfo), .tone_lin(r_lin), .t_pk(r_tpk),
         .s_iq_tvalid(det_tvalid), .s_iq_tdata(s_axis_tdata), .s_iq_tready(det_tready),
         .lpf_valid(), .lpf_i(), .lpf_q(), .trig(), .t_trig(),
         .dbg_valid(det_dbg_valid), .dbg_metric(det_dbg_metric), .dbg_bits(det_dbg_bits),
@@ -162,6 +180,8 @@ module pd_axi (
         .ev_valid(det_ev_valid), .ev_t(det_ev_t), .ev_cfo_inc(det_ev_inc),
         .ev_ang16(det_ev_a16), .ev_ang32(det_ev_a32), .ev_ang128(det_ev_a128), .ev_ang256(det_ev_a256),
         .ev_tone_num(det_ev_num), .ev_tone_den(det_ev_den), .ev_tone_fail(det_ev_fail),
+        .tm_valid(det_tm_valid), .tm_t(det_tm_t), .tm_n_end(det_tm_n_end), .tm_status(det_tm_status),
+        .tm_n_pos(det_tm_n_pos), .tm_p_max(det_tm_p_max), .tm_p_sum(det_tm_p_sum), .tm_err(det_tm_err),
         .busy(det_busy), .open_n(det_open_n), .open_t(det_open_t));
 
     wire       stage2 = (r_stage == 2'd2);
@@ -209,6 +229,38 @@ module pd_axi (
         end
     end
 
+    // ------------------------------------------------------------------ timing FIFO
+    // whole records (8 words) per entry; TM_DATA reads the head record word by word
+    reg  [255:0] tm_mem [0:TM_DEPTH-1];
+    reg  [4:0]   tm_wr, tm_rd;
+    reg  [5:0]   tm_cnt;                          // records
+    reg  [2:0]   tm_w;                            // next word of the head record
+    reg          tm_ovf, tm_err_r;
+    reg          tm_pop;                          // from the register read below
+    wire         tm_push = det_tm_valid && (tm_cnt != TM_DEPTH);
+    wire         tm_last = tm_pop && (tm_w == 3'd7);
+    always @(posedge aclk) begin
+        if (tm_push)
+            tm_mem[tm_wr] <= {16'd0, det_tm_p_sum[47:32], det_tm_p_sum[31:0], 30'd0, det_tm_p_max[33:32],
+                              det_tm_p_max[31:0], 16'd0, det_tm_n_pos, 29'd0, det_tm_status,
+                              det_tm_n_end, det_tm_t};
+    end
+    always @(posedge aclk) begin
+        if (!det_rst_n) begin
+            tm_wr <= 5'd0; tm_rd <= 5'd0; tm_cnt <= 6'd0; tm_w <= 3'd0; tm_ovf <= 1'b0; tm_err_r <= 1'b0;
+        end else begin
+            if (tm_push) tm_wr <= tm_wr + 5'd1;
+            if (det_tm_valid && tm_cnt == TM_DEPTH) tm_ovf <= 1'b1;
+            if (det_tm_err) tm_err_r <= 1'b1;
+            if (tm_pop) tm_w <= tm_w + 3'd1;
+            if (tm_last) tm_rd <= tm_rd + 5'd1;
+            tm_cnt <= tm_cnt + {5'd0, tm_push} - {5'd0, tm_last};
+        end
+    end
+    wire [255:0] tm_head  = tm_mem[tm_rd];
+    wire [31:0]  tm_word  = tm_head[{tm_w, 5'd0} +: 32];
+    wire [8:0]   tm_level = {tm_cnt, 3'd0} - {6'd0, tm_w};
+
     // ------------------------------------------------------------------ debug FIFO
     // res = records reserved: accepted samples whose record has not left the FIFO (or been
     // dropped with DEBUG = 0). The input is held while res is near the FIFO size.
@@ -252,7 +304,7 @@ module pd_axi (
     always @(posedge aclk) begin
         if (!det_rst_n) gate <= 1'b0;
         else gate <= !ctrl_loop && (ev_cnt < EV_LIMIT) && (!ctrl_debug || res < DBG_LIMIT) &&
-                     (tl_n < 3'd3);
+                     (tl_n < 3'd3) && (tm_cnt < TM_LIMIT);
     end
 
     // ------------------------------------------------------------------ streams
@@ -264,7 +316,7 @@ module pd_axi (
 
     // ------------------------------------------------------------------ AXI4-Lite
     wire busy = det_busy || (ser_n != 4'd0) || (dbg_cnt != 0);
-    wire [31:0] status = {21'd0, ctrl_loop, !det_rst_n, ev_ovf, det_open_n, 2'd0,
+    wire [31:0] status = {19'd0, tm_err_r, tm_ovf, ctrl_loop, !det_rst_n, ev_ovf, det_open_n, 2'd0,
                           det_open_n != 4'd0, busy};
     reg  awready_r, wready_r, arready_r;
     reg  [11:0] wa;
@@ -280,7 +332,7 @@ module pd_axi (
             ctrl_reset <= 1'b1; ctrl_debug <= 1'b0; ctrl_loop <= 1'b0;
             r_eta_hi <= 16'd8028; r_eta_lo <= 16'd2621; r_qual <= 16'd128; r_ncfo <= 16'd2048;
             r_blank <= 32'd288; r_hold <= 32'd131072; r_stage <= 2'd0; r_shift <= 4'd10;
-            r_lin <= 24'd1307615;
+            r_lin <= 24'd1307615; r_tpk <= 16'd4608;
         end else begin
             awready_r <= 1'b0;
             wready_r  <= 1'b0;
@@ -300,6 +352,7 @@ module pd_axi (
                     6'h0E: r_stage  <= s_axi_wdata[1:0];
                     6'h0F: r_shift  <= s_axi_wdata[3:0];
                     6'h10: r_lin    <= s_axi_wdata[23:0];
+                    6'h11: r_tpk    <= s_axi_wdata[15:0];
                     default: ;
                 endcase
             end
@@ -310,10 +363,11 @@ module pd_axi (
 
     always @(posedge aclk) begin
         if (!aresetn) begin
-            arready_r <= 1'b0; s_axi_rvalid <= 1'b0; ev_pop <= 1'b0;
+            arready_r <= 1'b0; s_axi_rvalid <= 1'b0; ev_pop <= 1'b0; tm_pop <= 1'b0;
         end else begin
             arready_r <= 1'b0;
             ev_pop    <= 1'b0;
+            tm_pop    <= 1'b0;
             if (!arready_r && !s_axi_rvalid && s_axi_arvalid) begin
                 arready_r <= 1'b1;
                 case (s_axi_araddr[7:2])
@@ -337,6 +391,12 @@ module pd_axi (
                     6'h0E: s_axi_rdata <= {30'd0, r_stage};
                     6'h0F: s_axi_rdata <= {28'd0, r_shift};
                     6'h10: s_axi_rdata <= {8'd0, r_lin};
+                    6'h11: s_axi_rdata <= {16'd0, r_tpk};
+                    6'h12: s_axi_rdata <= {23'd0, tm_level};
+                    6'h13: begin
+                        s_axi_rdata <= (tm_cnt != 0) ? tm_word : 32'd0;
+                        tm_pop      <= (tm_cnt != 0) && det_rst_n;
+                    end
                     default: s_axi_rdata <= 32'd0;
                 endcase
             end

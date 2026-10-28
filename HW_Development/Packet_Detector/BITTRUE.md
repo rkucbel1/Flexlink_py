@@ -105,6 +105,55 @@ table are new.
    false triggers on near-silence (the DC blocker's decaying tail, about 1 LSB rms); the
    periodic triggers after them shift by 2 samples through the holdoff.
 
+9. **§4.5, Preamble B timing: the 1-bit tap correlator is in the model and the PL** (input
+   stages 1 and 2; it needs the unfiltered stream). `pd_reference.timing_records`, RTL
+   `pd_timing.v`. For each event that passed the tone check:
+
+   | Step | Definition |
+   | --- | --- |
+   | Window | positions n = t + N + 1099 … t + 6163 for the last Preamble B sample (§4.5: latency 0 … L_A − N, D_LPF = 8, guard 32) |
+   | Input | DC blocker output y(n0 … hi), n0 = lo − 1139, same sample index as t_trig |
+   | De-rotator | φ(n0) = 0, φ += cfo_inc (24 bit); tone-check table, a = φ[23:14]; `xr = sat6(rnd((yi·c − yq·s) >> 21))`, `xi = sat6(rnd((yi·s + yq·c) >> 21))` |
+   | Taps | signs of Re and Im of the 20 Msps Preamble B (`Preamble.h5`), 1140 each, stored as constants |
+   | Output | Y(n) = Σ x(n−1139+j)(s_I(j) − j s_Q(j)) exact (18 bit), P = \|Y\|² (34 bit), first maximum, Σ P (48 bit) |
+   | Decision | PEAK_OK: `p_max > 0` and `p_max · n_pos · 256 ≥ T_pk · p_sum` (T_pk Q8.8, 18.0 default, 0 = off; a silent window has no peak); LATE: `n_end < t + N + 1131` (§4.3) |
+   | One search at a time | an event whose first sample n0 is not after the window end of the last search started gets a BUSY record; a failed tone check gets no record |
+
+   Six bits per rail are enough: on the same trials as the simulator's float 1-bit search
+   (200 per SNR, its own detection, CFO and tone check, AWGN, CFO ±500 kHz), with T_pk 18 and
+   the late-trigger rule:
+
+   | SNR | float 1-bit: correct / wrong / aborted | bit-true, 6-bit samples | bit-true, 4-bit samples |
+   | --- | --- | --- | --- |
+   | −14 dB | 120 / 0 / 25 | 121 / 0 / 23 | 121 / 0 / 23 |
+   | −13 dB | 180 / 0 / 12 | 179 / 0 / 10 | 179 / 0 / 10 |
+   | −12 dB | 200 / 0 / 0 | 200 / 0 / 0 | 200 / 0 / 0 |
+   | −10 dB | 200 / 0 / 0 (min peak/mean 98.1) | 200 / 0 / 0 (98.3) | 200 / 0 / 0 (92.9) |
+
+   The rest of the 200 were not detected (bit-true and float detectors differ by a few packets
+   at −14 dB, as in the Monte Carlo below). Without Preamble B in the window (300 noise
+   records, random CFO), peak/mean reached at most 16.2 (p99 13.2, median 8.6) with 6-bit
+   samples, as with 12: T_pk = 18 still sits in the gap. 12-bit and 8-bit samples gave the
+   same counts as 6; 4-bit loses about 3 % of the peak/mean, 3-bit 10 %.
+
+   Hardware (spec §4.5 table, K = 5 at 100 MHz): 228 lane units, one phase of 228 taps per
+   clock, an output every 5 clocks, which is real time at 20 Msps. The 1140 de-rotated samples
+   sit in 228 LUT RAMs (A = xr + xi and B = xr − xi, 7 bits each), so each tap's term is ±A or
+   ±B selected by its two signs: no multipliers, and a negation is an inversion whose +1s are
+   a constant (599 for Re, 576 for Im). Two 256-input adder trees, 4 DSPs in the de-rotator
+   and 2 for |Y|². The samples come from a 4096-sample buffer (block RAM), because the search
+   only starts once the tone check has passed, about 0.8 N samples after the window that it
+   needs began; a fill at one sample per clock catches up. The spec's 256-sample FIFO is not
+   enough for that.
+
+   Results go to a timing FIFO (pd_axi 3.0) and the RUN reply (firmware build 10). The RTL
+   testbench compares every record with the model: 12 vectors (all stages, N_CFO 128 / 2048 /
+   4096, holdoff 1 … 95044, real time with 0 stalls) match. A directed test of the block alone
+   (`tb_pd_timing.v`, `make_tm_vectors.py`) hits the exact boundaries real vectors miss:
+   rounding at exactly .5, the late and one-search-at-a-time limits, saturation, silent windows.
+   19 of 19 fault-injection mutants of `pd_timing.v` are caught. A silent window (all P = 0)
+   never passes the peak check; that rule came out of the directed test.
+
 ## Verification
 
 ### Word-length sweeps (each block against its floating-point version)
@@ -170,7 +219,7 @@ check and costs one 2048-sample window (0.1 ms, 0.005% of the time at 0.5/s), so
 cd Flexlink_py/HW_Development/Packet_Detector/PC
 python pd_bittrue_check.py              # all four parts, about 10 minutes (the float detector is a Python loop)
 python pd_bittrue_check.py --quick      # about 1 minute
-python pd_bittrue_check.py --only mc    # or sweeps / noise / interferers
+python pd_bittrue_check.py --only mc    # or sweeps / noise / interferers / decim / timing
 ```
 
 ## Next: HDL

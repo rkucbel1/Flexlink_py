@@ -137,7 +137,7 @@ python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json --pl
 python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json                   # detector
 python pd_hw_test.py ../TestVectors/Waveform_Payload_DefectsModeled_Tx.json --input-stage 1 --debug --plot
 python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 --chunk 50000
-python pd_board_regression.py          # 29 cases vs the bit-true model, a few minutes
+python pd_board_regression.py          # 33 cases vs the bit-true model, a few minutes
 python pd_noise_rate.py --seconds 20   # false-trigger rate on noise (spec 3.3)
 ```
 
@@ -163,6 +163,33 @@ left can look periodic: 2 of 200 packets triggered early. A sample now has to ha
 of at least 1024 (2 LSB rms on average) to count as above η_hi. Pd and every real-packet
 result unchanged; +30 to +65 dB and noise-free all clean. New vector `highsnr` (RTL and board
 regression), 5 of 5 injected faults caught.
+
+Step 8: **Preamble B timing in the PL** (`RTL/pd_timing.v`, spec 4.5, `BITTRUE.md` change 9).
+The 1-bit tap correlator finds the last Preamble B sample for every event that passed the
+tone check (input stages 1 and 2): 228 lane units over 5 phases, one output per 5 clocks (real
+time at 20 Msps), LUT RAMs instead of multipliers, a 4096-sample block-RAM buffer so the search
+can start after the tone check. Each event gets a timing record: `n_end` (payload from
+`n_end + 1`), `p_max`, `p_sum`, the peak/mean check against `T_PK` (18.0) and the late-trigger
+check; an event inside a running search gets a BUSY record. Bit-true with 6-bit samples: same
+correct / aborted counts as the simulator's float 1-bit search at −14 … −10 dB, 0 wrong
+timings. Verilator: 12 vectors match the model record for record, 0 stalls at 20 Msps; a
+directed test of the block's exact boundaries (`./run_sim.sh timing`) catches 19 of 19 injected
+faults. Co-simulation (firmware build 10 + Verilated `pd_axi`): `pd_hw_test.py` at 20 and 40
+Msps and 18 regression cases pass. Bitstream ID 3.0 (`T_PK` at 0x44, timing FIFO at 0x48 / 0x4C),
+firmware build 10 (SET_PARAMS takes 40 bytes with `t_pk`; RUN replies carry the timing
+records after the events, PING sets `BOARD_TIMING`). `pd_hw_test.py` and
+`pd_board_regression.py` compare the records exactly when the board has them; older boards
+still work, without timing.
+
+```bash
+cd HW && vivado -mode batch -source synth_detect.tcl && cd ..   # timing / resources first
+cd HW && vivado -mode batch -source build_hw.tcl && cd ..
+cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
+cd PC
+python pd_hw_test.py ../TestVectors/rep3.json --input-stage 2 --debug
+python pd_board_regression.py          # 33 cases, timing records included
+python pd_bittrue_check.py --only timing   # the float vs bit-true timing study (about 15 minutes)
+```
 
 **Board regression** (`PC/pd_board_regression.py`): the RTL simulation's coverage on the board.
 Each case runs on the board and, with the same commands, through `pd_board_emulator`'s logic

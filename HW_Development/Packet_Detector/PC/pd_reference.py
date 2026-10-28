@@ -70,7 +70,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from pd_protocol import (DBG_ABOVE_HI, DBG_ARMED, DBG_BELOW_LO, DBG_BLANK, DBG_LOW_POWER, DBG_TRIG, EV_CFO_VALID,
-                         EV_TONE_FAIL, EV_TRUNCATED, FS, NCO_BITS, EventRecord, Params)
+                         EV_TONE_FAIL, EV_TRUNCATED, FS, NCO_BITS, TM_BUSY, TM_LATE, TM_PEAK_OK, EventRecord,
+                         Params, TimingRecord)
 
 # --------------------------------------------------------------------------------------- #
 # Word lengths and constants (fixed at synthesis)                                          #
@@ -127,6 +128,7 @@ class Result:
     metric: np.ndarray | None = None      # uint16 per sample (debug)
     bits: np.ndarray | None = None        # uint16 per sample (debug)
     extra: list[dict] = field(default_factory=list)   # values per event, for reports
+    timing: list[TimingRecord] = field(default_factory=list)   # Preamble B timing (input_stage 1, 2)
 
 
 # --------------------------------------------------------------------------------------- #
@@ -234,6 +236,109 @@ def halfband(x40) -> np.ndarray:
 def front_end(x_dec, dc_shift: int = 10) -> np.ndarray:
     """Decimated 12-bit I/Q -> LPF output 12-bit I/Q (input_stage 1 path)."""
     return lpf(dc_blocker(as_iq(x_dec), dc_shift))
+
+
+# --------------------------------------------------------------------------------------- #
+# Preamble B timing: 1-bit tap correlator (spec 4.5)                                       #
+# --------------------------------------------------------------------------------------- #
+# Runs on the DC blocker output y (unfiltered, 20 Msps, same sample index as t_trig), so only
+# with input_stage 1 and 2. For an event that passed the tone check, with N = n_cfo:
+#   window   lo = t + N + 1099, hi = t + 6163: candidate positions n of the LAST Preamble B
+#            sample (detection latency 0 .. L_A - N, LPF delay 8, guard 32 each side)
+#   n0       = lo - 1139, first sample used
+#   de-rotator  phi(n0) = 0, phi(n+1) = phi(n) + cfo_inc (mod 2^24), a = phi >> 14,
+#            x(n) = y(n) (COS[a] + j SIN[a]) (tone-check table),
+#            xr = sat6(rnd((yi c - yq s) >> 21)), xi = sat6(rnd((yi s + yq c) >> 21))
+#   taps     s_I(j), s_Q(j) = signs of Re / Im of the 20 Msps Preamble B, j = 0..1139
+#   output   Y(n) = sum_j x(n - 1139 + j) (s_I(j) - j s_Q(j))      (exact)
+#            P(n) = Re Y^2 + Im Y^2
+#   n_end    first n in lo..hi with the largest P;  p_max = P(n_end),  p_sum = sum P
+#   PEAK_OK  T_pk == 0  or  (p_max > 0 and p_max * n_pos * 256 >= T_pk * p_sum)
+#            (T_pk Q8.8, n_pos = hi-lo+1; a silent window, all P = 0, has no peak)
+#   LATE     n_end < t + N + 1131: the CFO window t-8 .. t-8+N-1 reaches the first Preamble B
+#            sample n_end - 1139 (spec 4.3, D_LPF = 8)
+# One search at a time. Events in order; one that failed the tone check gets no record. An
+# event whose first sample n0 is not after the window end hi of the last search started gets
+# a TM_BUSY record and no search. A search whose window runs past the end of the samples
+# gives no record (it would finish with more samples).
+PB_LEN = 1140                             # Preamble B at 20 Msps (116 CP + 1024 body)
+L_A = 5000                                # Preamble A at 20 Msps
+TIM_GUARD = 32
+TIM_BITS = 6                              # de-rotated samples into the correlator, signed
+TIM_SHIFT = 15 + X_BITS - TIM_BITS        # 21
+TIM_LATE_OFF = PB_LEN - 1 - LPF_DELAY     # 1131: late if n_end < t + N + 1131
+T_PK_DEFAULT = 18 * 256
+# Tap signs: bit j set = negative (Preamble.h5, Preamble B every 2nd sample at 40 Msps; checked
+# by gen_pb_signs.py). 599 of s_I and 564 of s_Q are -1.
+_PB_NEG_I = int(
+    "0d99ff6a70e5a3f3267c6d3872b7fcddc0cacff253bf698e12b18249ff258fcd275c963e34cf"
+    "e6a60324c06523c27600dd8f8a58065b004d9ff693fcd4c06cde793303ab3fcd6ff9b300ca60"
+    "1b50f1a9006563c6b603b4c07527f32c7c693ae4b3f9a4ff92638dcc719675cb4ffb5301b13f"
+    "e56f1c963e24cfc4a70e567fc9b00d99ff6a70e5a3f3267c6d3872b7f", 16)
+_PB_NEG_Q = int(
+    "b948fc4b3fcd98065200c99fe691f9b4ffda67c6d9fcd4c076980ca47c6ec01933f99b006b62"
+    "8cb78e4277cdb006938396c01b4e1cd981d2c7c4d8f196ffca47e25bff2d8f1933e349c19b38"
+    "7258032dc0c9300c93ee6a71edb1425600d99fcc9803323e2530192e032b3f9b63e249ff2d9f"
+    "8927f993004b6009b3fcd23f12deb948fc4b3fcd98065200c99fe691f", 16)
+PB_SI = np.array([-1 if (_PB_NEG_I >> j) & 1 else 1 for j in range(PB_LEN)], np.int64)
+PB_SQ = np.array([-1 if (_PB_NEG_Q >> j) & 1 else 1 for j in range(PB_LEN)], np.int64)
+
+
+def timing_window(t: int, n_cfo: int) -> tuple[int, int]:
+    """(lo, hi): positions searched for the last Preamble B sample."""
+    return t + n_cfo + L_A + PB_LEN - 1 - LPF_DELAY - L_A - TIM_GUARD, t + L_A + PB_LEN - 1 - LPF_DELAY + TIM_GUARD
+
+
+def derotate(yi: np.ndarray, yq: np.ndarray, cfo_inc: int, bits: int = TIM_BITS):
+    """De-rotator into the correlator: phase 0 at the first sample, step cfo_inc."""
+    n = np.arange(yi.size, dtype=np.int64)
+    addr = ((int(cfo_inc) * n) % _NCO) >> (NCO_BITS - TONE_LUT_BITS)
+    c, s = np.array(TONE_COS, np.int64)[addr], np.array(TONE_SIN, np.int64)[addr]
+    sh = 15 + X_BITS - bits
+    lo, hi = -(1 << (bits - 1)), (1 << (bits - 1)) - 1
+    xr = _sat(_rnd_shift(yi * c - yq * s, sh), lo, hi)
+    xi = _sat(_rnd_shift(yi * s + yq * c, sh), lo, hi)
+    return xr, xi
+
+
+def timing_search(y: np.ndarray, t: int, n_cfo: int, cfo_inc: int, t_pk: int = T_PK_DEFAULT,
+                  bits: int = TIM_BITS) -> TimingRecord | None:
+    """One search on the DC blocker output y (N, 2); None if y ends before the window does."""
+    lo, hi = timing_window(t, n_cfo)
+    n0 = lo - (PB_LEN - 1)
+    if hi >= y.shape[0]:
+        return None
+    xr, xi = derotate(y[n0:hi + 1, 0], y[n0:hi + 1, 1], cfo_inc, bits)
+    si, sq = PB_SI[::-1], PB_SQ[::-1]
+    re = np.convolve(xr, si, "valid") + np.convolve(xi, sq, "valid")
+    im = np.convolve(xi, si, "valid") - np.convolve(xr, sq, "valid")
+    pw = re * re + im * im
+    k = int(np.argmax(pw))                            # first maximum
+    p_max, p_sum, n_pos = int(pw[k]), int(pw.sum()), int(pw.size)
+    status = 0
+    if t_pk == 0 or (p_max > 0 and p_max * n_pos * 256 >= int(t_pk) * p_sum):
+        status |= TM_PEAK_OK
+    n_end = lo + k
+    if n_end < t + n_cfo + TIM_LATE_OFF:
+        status |= TM_LATE
+    return TimingRecord(t, n_end, status, n_pos, p_max, p_sum)
+
+
+def timing_records(y: np.ndarray, events: list[EventRecord], n_cfo: int, t_pk: int) -> list[TimingRecord]:
+    """Apply the one-search-at-a-time rule to the detector's events."""
+    out, last_hi = [], None
+    for e in events:
+        if not e.status & EV_CFO_VALID or e.status & EV_TONE_FAIL:
+            continue
+        lo, hi = timing_window(e.t_trig, n_cfo)
+        if last_hi is not None and lo - (PB_LEN - 1) <= last_hi:
+            out.append(TimingRecord(e.t_trig, 0, TM_BUSY, 0, 0, 0))
+            continue
+        last_hi = hi
+        r = timing_search(y, e.t_trig, n_cfo, e.cfo_inc & 0xFFFFFF, t_pk)
+        if r is not None:
+            out.append(r)
+    return out
 
 
 # --------------------------------------------------------------------------------------- #
@@ -405,8 +510,10 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False) -> Result:
     iq = as_iq(iq)
     if p.input_stage == 2:
         iq = halfband(iq)
+    y = None
     if p.input_stage in (1, 2):
-        iq = front_end(iq, p.dc_shift)
+        y = dc_blocker(iq, p.dc_shift)
+        iq = lpf(y)
     xi, xq = iq[:, 0], iq[:, 1]
     n = xi.size
     (pr, pi, r0, rd), (_, _, r0_full, rd_full) = comparator_inputs(xi, xq)
@@ -446,6 +553,8 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False) -> Result:
                       "lag_estimates_hz": {lag: angles[lag] * FS / (65536 * lag) for lag in angles}})
 
     res = Result(events, extra=extra)
+    if y is not None:
+        res.timing = timing_records(y, events, int(p.n_cfo), int(p.t_pk))
     if debug:
         with np.errstate(divide="ignore", invalid="ignore"):
             met = np.where(den > 0, num // np.maximum(den, 1), 0)

@@ -21,15 +21,20 @@ Commands (request payload -> reply payload)
     PING          -                         -> BoardInfo
     RESET         -                         -> -       detector reset: sample_cnt = 0, blanking
                                                        restarts, sample buffer emptied
-    SET_PARAMS    Params                    -> -
+    SET_PARAMS    Params (40 bytes; 36 =    -> -
+                  without t_pk, which then
+                  keeps its default)
     LOAD_SAMPLES  u32 offset, then int16    -> u32 samples now stored
                   I,Q pairs (12-bit values
                   sign-extended to 16 bits)
     READ_SAMPLES  u32 offset, u32 count     -> int16 I,Q pairs   (loopback / plumbing check)
     RUN           u32 count (0 = all        -> u32 n_events, u32 samples processed,
-                  stored), u32 flags              then n_events x EventRecord
-                  (bit0 = capture debug,
-                   bit1 = PL loopback)
+                  stored), u32 flags              then n_events x EventRecord, then (firmware
+                  (bit0 = capture debug,          build 10 and later) u32 n_timing and
+                   bit1 = PL loopback)            n_timing x TimingRecord (Preamble B timing,
+                                                  input stages 1 and 2; BoardInfo flag
+                                                  BOARD_TIMING). Older replies end after the
+                                                  events
     GET_DEBUG     u32 offset, u32 count     -> count x DebugRecord (from the last RUN with
                                                        capture enabled); after a PL-loopback RUN
                                                        the 4-byte records are the samples as they
@@ -81,11 +86,19 @@ RUN_FLAG_PL_LOOPBACK = 0x2             # stream the samples through the PL uncha
 # BoardInfo.flags bits
 BOARD_EMULATOR = 0x1
 BOARD_NO_DETECTOR = 0x2                # bitstream has no detector yet (phase 1, PL loopback only)
+BOARD_TIMING = 0x4                     # bitstream has the Preamble B timing (ID 3.0, firmware build 10):
+#                                        the RUN reply carries timing records after the events
 
 # EventRecord.status bits
 EV_CFO_VALID = 0x1                     # N_CFO samples were available, cfo_inc is valid
 EV_TONE_FAIL = 0x2                     # tone-structure check below threshold (packet aborted)
 EV_TRUNCATED = 0x4                     # stream ended inside the CFO window
+
+# TimingRecord.status bits (Preamble B timing, spec 4.5)
+TM_PEAK_OK = 0x1                       # peak / mean >= T_pk (or T_pk = 0)
+TM_LATE = 0x2                          # late trigger: the CFO window ran into Preamble B (abort)
+TM_BUSY = 0x4                          # no search: the previous one was still using the samples
+TM_GOOD = TM_PEAK_OK                   # status == TM_GOOD: timing found, packet continues
 
 # DebugRecord.bits
 DBG_ABOVE_HI = 0x01
@@ -125,14 +138,23 @@ class Params:
     #                                        all other sample indices are at 20 Msps
     dc_shift: int = 10                 # DC blocker alpha = 1 - 2^-dc_shift, 0 = bypass (spec 5.2);
     #                                    used with input_stage 1 (was "reserved", same position)
+    t_pk: int = q8(18.0)               # Preamble B timing: minimum peak / mean, Q8.8, 0 = no check
+    #                                    (spec 4.5, T_pk). The timing search runs with input_stage
+    #                                    1 and 2 (it needs the unfiltered stream)
 
-    FMT = struct.Struct("<9I")
+    FMT = struct.Struct("<10I")
+    FMT_V1 = struct.Struct("<9I")      # firmware builds <= 9: no t_pk
 
     def pack(self) -> bytes:
         return self.FMT.pack(*astuple(self))
 
+    def pack_v1(self) -> bytes:
+        return self.FMT_V1.pack(*astuple(self)[:9])
+
     @classmethod
     def unpack(cls, b: bytes) -> "Params":
+        if len(b) < cls.FMT.size:                       # 36-byte SET_PARAMS (builds <= 9)
+            return cls(*cls.FMT_V1.unpack(b[:cls.FMT_V1.size]))
         return cls(*cls.FMT.unpack(b[:cls.FMT.size]))
 
     def as_dict(self) -> dict:
@@ -141,7 +163,7 @@ class Params:
     def describe(self) -> str:
         return (f"eta_hi {np.sqrt(self.eta_hi_sq / 65536):.3f}, eta_lo {np.sqrt(self.eta_lo_sq / 65536):.3f}, "
                 f"Q {self.qual_len}, N_CFO {self.n_cfo}, blank {self.blank_len}, "
-                f"tone {self.tone_thresh / 256:.1f} dB, holdoff {self.arm_holdoff}")
+                f"tone {self.tone_thresh / 256:.1f} dB, holdoff {self.arm_holdoff}, T_pk {self.t_pk / 256:g}")
 
 
 @dataclass
@@ -191,6 +213,35 @@ class EventRecord:
     @property
     def tone_db(self) -> float:
         return self.tone_db_q8 / 256
+
+
+@dataclass
+class TimingRecord:
+    """Preamble B timing result, one per event that passed the tone check (spec 4.5)."""
+    t_trig: int                        # the event's t_trig
+    n_end: int                         # sample index of the last Preamble B sample (0 with TM_BUSY)
+    status: int                        # TM_* bits
+    n_pos: int                         # positions searched (5065 - N_CFO)
+    p_max: int                         # |y|^2 at n_end
+    p_sum: int                         # sum of |y|^2 over the window
+
+    FMT = struct.Struct("<IIIIQQ")     # 32 bytes
+
+    def pack(self) -> bytes:
+        return self.FMT.pack(*astuple(self))
+
+    @classmethod
+    def unpack_many(cls, b: bytes, n: int) -> list["TimingRecord"]:
+        s = cls.FMT.size
+        return [cls(*cls.FMT.unpack(b[i * s:(i + 1) * s])) for i in range(n)]
+
+    @property
+    def peak_to_mean(self) -> float:
+        return self.p_max * self.n_pos / self.p_sum if self.p_sum else 0.0
+
+    @property
+    def payload_start(self) -> int:
+        return self.n_end + 1
 
 
 DEBUG_DTYPE = np.dtype([("metric", "<u2"), ("bits", "<u2")])   # 4 bytes per sample

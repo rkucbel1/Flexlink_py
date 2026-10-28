@@ -1,9 +1,10 @@
 // pd_detect_top.v  (Flexlink_py/HW_Development/Packet_Detector/RTL)
 //
 // Packet detector (spec 4.1-4.3, 4.6): optional front end (DC blocker + LPF), detection core
-// (t_trig, debug stream), CFO lane (lag accumulators, CORDIC, cascade -> cfo_inc) and
-// tone-structure check (13 DFT bins -> num, den, fail). Bit-true to pd_reference.detect
-// (debug=True).
+// (t_trig, debug stream), CFO lane (lag accumulators, CORDIC, cascade -> cfo_inc),
+// tone-structure check (13 DFT bins -> num, den, fail) and Preamble B timing (spec 4.5, 1-bit
+// tap correlator on the DC blocker output -> n_end; input_stage 1 and 2 only). Bit-true to
+// pd_reference.detect (debug=True).
 //
 //   input_stage 0: s_iq is the LPF output, the front end is bypassed
 //   input_stage 1: s_iq is the decimated 12-bit stream (20 Msps); DC blocker (dc_shift) and
@@ -14,7 +15,8 @@
 // s_iq_tdata: one complex sample per beat, I = [11:0], Q = [27:16] (12-bit values sign-extended
 // to 16 bits by the PC, as in pd_protocol). s_iq_tready: AXI-stream back-pressure. It stays 1 at
 // the real sample rate (one sample per 5 clocks or slower); faster input (DMA from memory) is
-// held back while the tone check catches up. Results don't depend on the stalls.
+// held back while the tone check catches up, and to one sample per 5 clocks while a timing
+// search runs. Results don't depend on the stalls.
 `timescale 1ns / 1ps
 `default_nettype none
 
@@ -31,6 +33,7 @@ module pd_detect_top (
     input  wire [31:0] arm_holdoff,
     input  wire [15:0] n_cfo,          // CFO window, 128..4096 (2048 default)
     input  wire [23:0] tone_lin,       // tone-check threshold, linear Q.16 (13 dB: 1307615); 0 = off
+    input  wire [15:0] t_pk,           // timing: minimum peak / mean, Q8.8 (18: 4608); 0 = no check
     // sample stream
     input  wire        s_iq_tvalid,
     input  wire [31:0] s_iq_tdata,
@@ -67,13 +70,24 @@ module pd_detect_top (
     output wire [39:0] ev_tone_num,    // 9 (sum P_tone - max P_tone)
     output wire [39:0] ev_tone_den,    // sum P_ref; ToneCheck = 10 log10(num / den)
     output wire        ev_tone_fail,
+    // Preamble B timing, one record per event that passed the tone check (BUSY records may
+    // come before the result of an earlier event)
+    output wire        tm_valid,
+    output wire [31:0] tm_t,
+    output wire [31:0] tm_n_end,
+    output wire [2:0]  tm_status,      // bit0 PEAK_OK, bit1 LATE, bit2 BUSY
+    output wire [15:0] tm_n_pos,
+    output wire [33:0] tm_p_max,
+    output wire [47:0] tm_p_sum,
+    output wire        tm_err,
     // state: busy = something still in flight; open_n / open_t = windows still waiting for
     // samples (at most 1 once busy is 0) and the first one's t_trig
     output wire        busy,
     output wire [3:0]  open_n,
     output wire [31:0] open_t
 );
-    wire stall, lane_busy, tone_busy;
+    wire stall_tone, stall_tm, lane_busy, tone_busy, tm_busy;
+    wire stall = stall_tone || stall_tm;
     assign s_iq_tready = !stall;
     wire   s_fire = s_iq_tvalid & !stall;
     wire signed [11:0] in_i = s_iq_tdata[11:0];
@@ -134,11 +148,21 @@ module pd_detect_top (
         .trig(trig), .t_trig(t_trig),
         .cfo_valid(cfo_valid), .cfo_t(cfo_t), .cfo_inc(cfo_inc),
         .ang16(ang16), .ang32(ang32), .ang128(ang128), .ang256(ang256),
-        .stall(stall),
+        .stall(stall_tone),
         .ev_valid(ev_valid), .ev_t(ev_t), .ev_cfo_inc(ev_cfo_inc),
         .ev_ang16(ev_ang16), .ev_ang32(ev_ang32), .ev_ang128(ev_ang128), .ev_ang256(ev_ang256),
         .ev_num(ev_tone_num), .ev_den(ev_tone_den), .ev_fail(ev_tone_fail),
         .busy(tone_busy), .open_n(open_n), .open_t(open_t));
+
+    pd_timing u_tm (
+        .clk(clk), .rst_n(rst_n), .en(fe_on), .n_cfo(n_cfo), .t_pk(t_pk),
+        .y_valid(dc_valid), .y_i(dc_i), .y_q(dc_q),
+        .trig(trig), .t_trig(t_trig),
+        .ev_valid(ev_valid), .ev_t(ev_t), .ev_cfo_inc(ev_cfo_inc), .ev_fail(ev_tone_fail),
+        .stall(stall_tm),
+        .tm_valid(tm_valid), .tm_t(tm_t), .tm_n_end(tm_n_end), .tm_status(tm_status),
+        .tm_n_pos(tm_n_pos), .tm_p_max(tm_p_max), .tm_p_sum(tm_p_sum),
+        .busy(tm_busy), .err(tm_err));
 
     // samples inside the front end and core: debug records due minus records out. With the
     // half-band, a record is due with every second input (the first of a pair waits for its
@@ -154,7 +178,7 @@ module pd_detect_top (
             inflight <= inflight + {7'd0, rec_due} - {7'd0, dbg_valid};
         end
     end
-    assign busy = (inflight != 8'd0) || rec_due || lane_busy || tone_busy;
+    assign busy = (inflight != 8'd0) || rec_due || lane_busy || tone_busy || tm_busy;
 endmodule
 
 `default_nettype wire

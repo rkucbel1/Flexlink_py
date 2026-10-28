@@ -19,6 +19,9 @@ testbench, with the bit-true model's expected outputs for every sample:
                                      tone num, tone den (40-bit), fail (0/1)
   work/<name>_s<stage>/exp_open.txt  "n t": windows still open at the end (truncated, 0 or 1)
                                      and the t_trig of the first
+  work/<name>_s<stage>/exp_tm.txt    Preamble B timing records (hex, any order): t, n_end, status,
+                                     n_pos, p_max, p_sum. cfg.txt then also has t_pk and the
+                                     number of records
 
     python make_tb_vectors.py ../TestVectors/rep3.json --input-stage 1
     python make_tb_vectors.py ../TestVectors/rep3.json --input-stage 0 --max-samples 50000
@@ -272,7 +275,11 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     out.mkdir(parents=True, exist_ok=True)
     (out / "cfg.txt").write_text(
         f"{p.input_stage} {p.dc_shift} {p.eta_hi_sq} {p.eta_lo_sq} {p.qual_len} {p.blank_len} "
-        f"{p.arm_holdoff} {iq.shape[0]} {len(trig)} {p.n_cfo} {len(cfo_lines)} {lin} {lpf.shape[0]}\n")
+        f"{p.arm_holdoff} {iq.shape[0]} {len(trig)} {p.n_cfo} {len(cfo_lines)} {lin} {lpf.shape[0]} "
+        f"{p.t_pk} {len(res.timing)}\n")
+    (out / "exp_tm.txt").write_text("".join(
+        f"{r.t_trig:08x} {r.n_end:08x} {r.status:x} {r.n_pos:04x} {r.p_max:09x} {r.p_sum:012x}\n"
+        for r in res.timing))
     u16 = (iq & 0xFFFF)
     np.savetxt(out / "in.txt", u16, fmt="%04x")
     np.savetxt(out / "exp_lpf.txt", lpf & 0xFFF, fmt="%03x")
@@ -284,8 +291,11 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     (out / "exp_open.txt").write_text(f"{len(trunc)} {trunc[0] if trunc else 0}\n")
     n_fail = sum(int(l.split()[-1]) for l in tone_lines)
     shown = trig if len(trig) <= 12 else trig[:12] + ["..."]
+    good = sum(r.status == pr.TM_GOOD for r in res.timing)
+    busy = sum(bool(r.status & pr.TM_BUSY) for r in res.timing)
     print(f"{out}: {iq.shape[0]} samples, input_stage {stage}, {len(trig)} trigger(s) at {shown}, "
-          f"{len(cfo_lines)} CFO result(s), {n_fail} failing the tone check")
+          f"{len(cfo_lines)} CFO result(s), {n_fail} failing the tone check, {len(res.timing)} timing "
+          f"record(s) ({good} good, {busy} busy)")
     return out
 
 
