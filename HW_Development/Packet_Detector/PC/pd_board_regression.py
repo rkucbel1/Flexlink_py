@@ -99,39 +99,52 @@ def cases(quick: bool):
         iq = mk.cfo_sweep_vector(rate40=stage == 2)
         if stage == 0:
             iq = ref.front_end(iq, 10)
-        return iq.astype(np.int16), p_of(arm_holdoff=4000, input_stage=stage)
+        return iq.astype(np.int16), p_of(rearm=0, arm_holdoff=4000, input_stage=stage)
     yield ("cfo_s1", "40 packets, CFO +-600 kHz, SNR -6..30 dB", lambda: cfo(1), None, True)
     yield ("cfo_s2", "the same at 40 Msps", lambda: cfo(2), None, True)
-    yield ("cfo_s0_n4096", "same, N_CFO 4096", lambda: (cfo(0)[0], p_of(arm_holdoff=4000, n_cfo=4096)), None, False)
+    yield ("cfo_s0_n4096", "same, N_CFO 4096", lambda: (cfo(0)[0], p_of(rearm=0, arm_holdoff=4000, n_cfo=4096)), None, False)
     yield ("cfo_s1_n4096", "same at 20 Msps, N_CFO 4096 (timing window 969 positions)",
-           lambda: (cfo(1)[0], p_of(arm_holdoff=4000, n_cfo=4096, input_stage=1)), None, False)
+           lambda: (cfo(1)[0], p_of(rearm=0, arm_holdoff=4000, n_cfo=4096, input_stage=1)), None, False)
     yield ("cfo_s1_n128", "same, N_CFO 128 (timing window 4937 positions)",
-           lambda: (cfo(1)[0], p_of(arm_holdoff=4000, n_cfo=128, input_stage=1)), None, False)
+           lambda: (cfo(1)[0], p_of(rearm=0, arm_holdoff=4000, n_cfo=128, input_stage=1)), None, False)
     yield ("cfo_s2_tpk0", "40 Msps, timing peak check off (T_pk 0)",
-           lambda: (cfo(2)[0], p_of(arm_holdoff=4000, input_stage=2, t_pk=0)), None, False)
+           lambda: (cfo(2)[0], p_of(rearm=0, arm_holdoff=4000, input_stage=2, t_pk=0)), None, False)
     yield ("cfo_s1_tpk100", "timing peak check 100 (aborts the weaker packets)",
-           lambda: (cfo(1)[0], p_of(arm_holdoff=4000, input_stage=1, t_pk=100 * 256)), None, False)
+           lambda: (cfo(1)[0], p_of(rearm=0, arm_holdoff=4000, input_stage=1, t_pk=100 * 256)), None, False)
 
     def high(stage):
         iq = mk.high_snr_vector(rate40=stage == 2)
         if stage == 0:
             iq = ref.front_end(iq, 10)
-        return iq.astype(np.int16), p_of(arm_holdoff=4000, input_stage=stage)
+        return iq.astype(np.int16), p_of(rearm=0, arm_holdoff=4000, input_stage=stage)
     yield ("highsnr_s1", "30 packets at +40..+65 dB and noise-free", lambda: high(1), None, True)
     yield ("highsnr_s2", "the same at 40 Msps", lambda: high(2), None, True)
 
     st = lambda: mk.stress_vector().astype(np.int16)                      # noqa: E731
-    yield ("stress_s1", "full-scale stress, holdoff 500", lambda: (st(), p_of(arm_holdoff=500, input_stage=1)), None, True)
-    yield ("stress_s0_hold1", "stress into the detector, holdoff 1", lambda: (st(), p_of(arm_holdoff=1)), None, True)
-    yield ("stress_s1_n128", "stress, N_CFO 128 (many events)", lambda: (st(), p_of(arm_holdoff=1, n_cfo=128, input_stage=1)), None, False)
-    yield ("stress_s0_n4096", "stress, N_CFO 4096", lambda: (st(), p_of(arm_holdoff=1, n_cfo=4096)), None, False)
-    yield ("stress_s1_tone_off", "stress, tone check off", lambda: (st(), p_of(arm_holdoff=1, tone_thresh=0, input_stage=1)), None, False)
-    yield ("stress_s1_tone24", "stress, tone threshold 24 dB", lambda: (st(), p_of(arm_holdoff=1, tone_thresh=24 * 256, input_stage=1)), None, False)
-    yield ("stress_s1_dc0", "stress, DC blocker off", lambda: (st(), p_of(arm_holdoff=1, dc_shift=0, input_stage=1)), None, True)
-    yield ("stress_s1_dc4", "stress, DC blocker shift 4", lambda: (st(), p_of(arm_holdoff=1, dc_shift=4, input_stage=1)), None, True)
-    yield ("stress_s2_hold1", "stress at 40 Msps, holdoff 1", lambda: (st(), p_of(arm_holdoff=1, input_stage=2)), None, True)
-    yield ("stress_s2_n128", "stress at 40 Msps, N_CFO 128", lambda: (st(), p_of(arm_holdoff=1, n_cfo=128, input_stage=2)), None, False)
-    yield ("rep3_s1_hold300", "rep3, re-arm after N_CFO", lambda: (vector_from_json("rep3", 1)[0], p_of(arm_holdoff=300, input_stage=1)), None, False)
+    yield ("stress_s1", "full-scale stress, holdoff 500", lambda: (st(), p_of(rearm=0, arm_holdoff=500, input_stage=1)), None, True)
+    yield ("stress_s0_hold1", "stress into the detector, holdoff 1", lambda: (st(), p_of(rearm=0, arm_holdoff=1)), None, True)
+    yield ("stress_s1_n128", "stress, N_CFO 128 (many events)", lambda: (st(), p_of(rearm=0, arm_holdoff=1, n_cfo=128, input_stage=1)), None, False)
+    yield ("stress_s0_n4096", "stress, N_CFO 4096", lambda: (st(), p_of(rearm=0, arm_holdoff=1, n_cfo=4096)), None, False)
+    yield ("stress_s1_tone_off", "stress, tone check off", lambda: (st(), p_of(rearm=0, arm_holdoff=1, tone_thresh=0, input_stage=1)), None, False)
+    yield ("stress_s1_tone24", "stress, tone threshold 24 dB", lambda: (st(), p_of(rearm=0, arm_holdoff=1, tone_thresh=24 * 256, input_stage=1)), None, False)
+    yield ("stress_s1_dc0", "stress, DC blocker off", lambda: (st(), p_of(rearm=0, arm_holdoff=1, dc_shift=0, input_stage=1)), None, True)
+    yield ("stress_s1_dc4", "stress, DC blocker shift 4", lambda: (st(), p_of(rearm=0, arm_holdoff=1, dc_shift=4, input_stage=1)), None, True)
+    yield ("stress_s2_hold1", "stress at 40 Msps, holdoff 1", lambda: (st(), p_of(rearm=0, arm_holdoff=1, input_stage=2)), None, True)
+    yield ("stress_s2_n128", "stress at 40 Msps, N_CFO 128", lambda: (st(), p_of(rearm=0, arm_holdoff=1, n_cfo=128, input_stage=2)), None, False)
+    yield ("rep3_s1_hold300", "rep3, re-arm after N_CFO", lambda: (vector_from_json("rep3", 1)[0], p_of(rearm=0, arm_holdoff=300, input_stage=1)), None, False)
+    # the Rx state machine's re-arm (rearm 1): every decision path
+    yield ("stress_s1_rearm", "stress, re-arm by the state machine", lambda: (st(), p_of(input_stage=1)), None, True)
+    yield ("stress_s2_rearm", "stress at 40 Msps, state machine", lambda: (st(), p_of(input_stage=2)), None, True)
+    yield ("stress_s1_n128_rearm", "stress, N_CFO 128, state machine", lambda: (st(), p_of(n_cfo=128, input_stage=1)), None, False)
+    yield ("stress_s0_rearm", "stress into the detector, state machine (holdoff after a pass)",
+           lambda: (st(), p_of(arm_holdoff=1)), None, True)
+    yield ("cfo_s1_rearm", "40 packets, state machine (truncated control fields: rejected)",
+           lambda: (cfo(1)[0], p_of(input_stage=1)), None, True)
+
+    def cfmod():
+        iq, _ = mk.cfmod_vector()
+        return iq.astype(np.int16), vector_from_json("rep3", 1)[1]
+    yield ("cfmod_s1", "rep3 with an invalid code, a failed CRC and PacketLength 37", cfmod, None, True)
 
     def pieces():
         iq, p = vector_from_json("rep3", 1)
@@ -249,6 +262,9 @@ def main(argv=None) -> int:
     tol = int(round(a.tone_tol * 256))
     timing = bool(info.flags & pr.BOARD_TIMING)
     control = bool(info.flags & pr.BOARD_CF)
+    if not info.flags & pr.BOARD_REARM:
+        print("Note: no state-machine re-arm on this board (bitstream before 5.0 or firmware before build 12): "
+              "all cases run with the fixed holdoff (rearm 0)\n")
     if timing and not control:
         print("Note: no control-field receiver on this board (bitstream before 4.0 or firmware before "
               "build 11): control records not compared\n")
@@ -265,6 +281,8 @@ def main(argv=None) -> int:
             print(f"{name:22s} skipped: {exc}")
             report.append({"case": name, "result": "skipped", "reason": str(exc)})
             continue
+        if not info.flags & pr.BOARD_REARM:
+            p.rearm = 0                                     # older boards: the fixed holdoff
         n = iq.shape[0]
         sizes = [n] if plan is None else [s if s is not None else n - sum(x for x in plan if x) for s in plan]
         try:

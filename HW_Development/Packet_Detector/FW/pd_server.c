@@ -55,7 +55,7 @@
 /* ---------------------------------------------------------------------------------- */
 #define PD_PORT                 5001
 #define PD_PROTOCOL_VERSION     1u
-#define PD_BUILD                11u              /* bump when the firmware changes */
+#define PD_BUILD                12u              /* bump when the firmware changes */
 
 #define SAMPLE_BUF_ADDR         0x10000000u
 #define DEBUG_BUF_ADDR          0x18000000u
@@ -82,6 +82,7 @@
 #define PD_ID_V2                0x0200u         /* 2.0: input stage 2 (40 Msps, half-band) */
 #define PD_ID_V3                0x0300u         /* 3.0: Preamble B timing (T_PK, timing FIFO) */
 #define PD_ID_V4                0x0400u         /* 4.0: control-field receiver (control FIFO) */
+#define PD_ID_V5                0x0500u         /* 5.0: re-arm by the Rx state machine (REARM) */
 #define R_ID                    0x00u
 #define R_CTRL                  0x04u
 #define R_STATUS                0x08u
@@ -96,6 +97,7 @@
 #define R_TM_DATA               0x4Cu
 #define R_CF_LEVEL              0x50u
 #define R_CF_DATA               0x54u
+#define R_REARM                 0x58u
 #define CTRL_RESET              0x1u
 #define CTRL_DEBUG              0x2u
 #define CTRL_LOOPBACK           0x4u
@@ -106,6 +108,7 @@
 #define STATUS_TM_ERR           0x1000u
 #define STATUS_CF_OVF           0x2000u
 #define STATUS_CF_ERR           0x4000u
+#define STATUS_ARM_LATE         0x8000u
 #define IDLE_TIMEOUT_POLLS      10000000u
 
 /* ---------------------------------------------------------------------------------- */
@@ -115,7 +118,8 @@
 #define HDR_SIZE                16u
 #define MAX_PAYLOAD             (1u << 20)
 #define PARAMS_SIZE_V1          36u             /* SET_PARAMS without t_pk (PC software before build 10) */
-#define PARAMS_SIZE             40u
+#define PARAMS_SIZE_V2          40u             /* SET_PARAMS without rearm (PC software of builds 10, 11) */
+#define PARAMS_SIZE             44u
 #define T_PK_DEFAULT            4608u           /* 18.0 in Q8.8 */
 
 enum { CMD_PING = 1, CMD_RESET = 2, CMD_SET_PARAMS = 3, CMD_LOAD_SAMPLES = 4,
@@ -131,6 +135,7 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define BOARD_FLAG_NO_DETECTOR  0x2u
 #define BOARD_FLAG_TIMING       0x4u            /* bitstream has the Preamble B timing (ID 3.0) */
 #define BOARD_FLAG_CF           0x8u            /* bitstream has the control-field receiver (ID 4.0) */
+#define BOARD_FLAG_REARM        0x10u           /* bitstream has the state machine's re-arm (ID 5.0) */
 #define EV_CFO_VALID            0x1u
 #define EV_TONE_FAIL            0x2u
 #define EV_TRUNCATED            0x4u
@@ -442,6 +447,9 @@ static void detector_reset(void)
     if (det_version >= PD_ID_V3) {
         pd_wr(R_T_PK, rd32(params + 36));
     }
+    if (det_version >= PD_ID_V5) {
+        pd_wr(R_REARM, rd32(params + 40));
+    }
     pd_wr(R_CTRL, 0);
 }
 
@@ -553,6 +561,10 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     }
     if (st & (STATUS_TM_OVF | STATUS_TM_ERR)) {
         snprintf(err, err_len, "timing FIFO overflow or start queue overflow (STATUS 0x%08lx)", (unsigned long)st);
+        return -3;
+    }
+    if (st & STATUS_ARM_LATE) {
+        snprintf(err, err_len, "re-arm decision after its sample (STATUS 0x%08lx)", (unsigned long)st);
         return -3;
     }
     if (st & (STATUS_CF_OVF | STATUS_CF_ERR)) {
@@ -687,7 +699,8 @@ static void handle_message(struct tcp_pcb *pcb)
         wr32(tx_small + 8, MAX_SAMPLES);
         wr32(tx_small + 12, !det_ok ? BOARD_FLAG_NO_DETECTOR :
                             (det_version >= PD_ID_V3 ? BOARD_FLAG_TIMING : 0u) |
-                            (det_version >= PD_ID_V4 ? BOARD_FLAG_CF : 0u));
+                            (det_version >= PD_ID_V4 ? BOARD_FLAG_CF : 0u) |
+                            (det_version >= PD_ID_V5 ? BOARD_FLAG_REARM : 0u));
         reply(pcb, cmd, ST_OK, seq, tx_small, 16);
         return;
 
@@ -726,12 +739,17 @@ static void handle_message(struct tcp_pcb *pcb)
             reply_error(pcb, cmd, ST_BAD_ARG, seq, "eta_*_sq and qual_len are 16-bit, dc_shift 0..15");
             return;
         }
-        if (len >= PARAMS_SIZE && rd32(pl + 36) > 0xFFFFu) {
+        if (len >= PARAMS_SIZE_V2 && rd32(pl + 36) > 0xFFFFu) {
             reply_error(pcb, cmd, ST_BAD_ARG, seq, "t_pk is 16-bit (Q8.8)");
             return;
         }
+        if (len >= PARAMS_SIZE && rd32(pl + 40) > 1u) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "rearm must be 0 (holdoff) or 1 (state machine)");
+            return;
+        }
         memcpy(params, pl, PARAMS_SIZE_V1);
-        wr32(params + 36, len >= PARAMS_SIZE ? rd32(pl + 36) : T_PK_DEFAULT);
+        wr32(params + 36, len >= PARAMS_SIZE_V2 ? rd32(pl + 36) : T_PK_DEFAULT);
+        wr32(params + 40, len >= PARAMS_SIZE ? rd32(pl + 40) : 0u);   /* older PCs: the holdoff */
         det_cfg = 1;
         detector_reset();                   /* new parameters take effect from a reset */
         reply(pcb, cmd, ST_OK, seq, NULL, 0);
@@ -1158,9 +1176,9 @@ static err_t accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
 /* pd_protocol.Params defaults, until the PC sends SET_PARAMS */
 static void pr_default_params(void)
 {
-    static const u32 def[10] = {8028u, 2621u, 128u, 2048u, 288u, 3328u, 131072u, 0u, 10u, T_PK_DEFAULT};
+    static const u32 def[11] = {8028u, 2621u, 128u, 2048u, 288u, 3328u, 131072u, 0u, 10u, T_PK_DEFAULT, 1u};
     u32 i;
-    for (i = 0; i < 10u; i++) {
+    for (i = 0; i < 11u; i++) {
         wr32(params + 4u * i, def[i]);
     }
 }

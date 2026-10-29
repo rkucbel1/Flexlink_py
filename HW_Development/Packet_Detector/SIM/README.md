@@ -9,6 +9,8 @@
 - **every** Preamble B timing record (input stages 1 and 2): `n_end`, status (peak check, late trigger, busy), `n_pos`, `p_max`, `p_sum`. Records are matched by `t_trig`, because a BUSY record can come out before the result of an earlier search.
 - **every** control record (input stages 1 and 2): CRC result, message, metric, Viterbi scaling, in order. `MAX=213860 ./run_sim.sh` ends the input just after the last control field, so the decoding finishes after the input (checks `busy`).
 
+`REARM=0` uses the fixed holdoff instead of the Rx state machine's re-arm (the default); `./run_sim.sh cfmod 1` is rep3 with modified control fields (an invalid code, a failed CRC, PacketLength 37), so every re-arm decision is checked through the debug records' `armed` bit.
+
 It obeys `tready`: with fast input the tone check holds the input back, and so does a running timing search (one sample per 5 clocks); the log says for how many clocks. At exactly 5 clocks per sample (`FIXGAP=1 GAP=4`) nothing stalls. Inputs change on the falling clock edge, so the testbench never races the DUT.
 
 `tb_pd_timing.v` tests the Preamble B timing block alone (`./run_sim.sh timing`) on directed cases from `make_tm_vectors.py`: samples exactly on the de-rotator's rounding boundary, the late-trigger and one-search-at-a-time limits exactly and one sample off, full-scale samples, no Preamble B, failed tone checks, silent windows (all P equal), N_CFO 128 / 4096 and T_pk 0 / 60.

@@ -51,7 +51,8 @@ module tb_pd_detect;
     wire [15:0] tm_n_pos;
     wire [33:0] tm_p_max;
     wire [47:0] tm_p_sum;
-    wire        cf_valid, cf_crc_ok, cf_err;
+    wire        cf_valid, cf_crc_ok, cf_err, arm_late;
+    reg         rearm = 1'b0, arm_late_seen = 1'b0;
     wire [31:0] cf_t, cf_n_end;
     wire [53:0] cf_msg;
     wire [5:0]  cf_shift;
@@ -62,6 +63,7 @@ module tb_pd_detect;
         .input_stage(input_stage), .dc_shift(dc_shift),
         .eta_hi_sq(eta_hi_sq), .eta_lo_sq(eta_lo_sq), .qual_len(qual_len),
         .blank_len(blank_len), .arm_holdoff(arm_holdoff), .n_cfo(n_cfo), .tone_lin(tone_lin), .t_pk(t_pk),
+        .rearm(rearm), .arm_late(arm_late),
         .s_iq_tvalid(s_valid), .s_iq_tdata(s_data), .s_iq_tready(s_ready),
         .lpf_valid(lpf_valid), .lpf_i(lpf_i), .lpf_q(lpf_q),
         .trig(trig), .t_trig(t_trig),
@@ -82,7 +84,7 @@ module tb_pd_detect;
     // ------------------------------------------------------------------ files and settings
     integer f_cfg, f_in, f_lpf, f_dbg, f_trig, f_cfo, f_tone, f_open, r, rc, x_open, x_open_t, guard;
     integer n_samples, n_trig, n_cfo_ev, gap, seed, maxerr, fixgap, n_out;
-    integer cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q, cfg_blank, cfg_hold, cfg_ncfo, cfg_lin, cfg_tpk, n_tm;
+    integer cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q, cfg_blank, cfg_hold, cfg_ncfo, cfg_lin, cfg_tpk, n_tm, cfg_rearm;
     integer f_tm, tm_seen, tm_good, tm_busy_n, k2, hit;
     reg [31:0] xt_t [0:4095];
     reg [31:0] xt_n [0:4095];
@@ -247,6 +249,10 @@ module tb_pd_detect;
             if (cf_crc_ok) cf_ok = cf_ok + 1;
             cf_seen = cf_seen + 1;
         end
+        if (rst_n && arm_late && !arm_late_seen) begin
+            errors = errors + 1; arm_late_seen = 1'b1;
+            if (errors <= maxerr) $display("ERROR re-arm: a decision came after its sample");
+        end
         if (rst_n && cf_err) begin
             errors = errors + 1;
             if (errors <= maxerr) $display("ERROR control: start queue overflow");
@@ -283,13 +289,14 @@ module tb_pd_detect;
             $display("FAIL: cannot open the vector files (cfg.txt ...) in the current directory");
             $finish;
         end
-        r = $fscanf(f_cfg, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q,
-                    cfg_blank, cfg_hold, n_samples, n_trig, cfg_ncfo, n_cfo_ev, cfg_lin, n_out, cfg_tpk, n_tm);
-        if (r != 15) begin
-            $display("FAIL: cfg.txt has %0d fields, expected 15 - rerun make_tb_vectors.py", r);
+        r = $fscanf(f_cfg, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d %d", cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q,
+                    cfg_blank, cfg_hold, n_samples, n_trig, cfg_ncfo, n_cfo_ev, cfg_lin, n_out, cfg_tpk, n_tm, cfg_rearm);
+        if (r != 16) begin
+            $display("FAIL: cfg.txt has %0d fields, expected 16 - rerun make_tb_vectors.py", r);
             $finish;
         end
         t_pk = cfg_tpk[15:0];
+        rearm = cfg_rearm[0];
         for (k2 = 0; k2 < n_tm; k2 = k2 + 1) begin
             r = $fscanf(f_tm, "%h %h %h %h %h %h\n", xt_t[k2], xt_n[k2], xt_s[k2], xt_p[k2], xt_m[k2], xt_u[k2]);
             xt_used[k2] = 1'b0;

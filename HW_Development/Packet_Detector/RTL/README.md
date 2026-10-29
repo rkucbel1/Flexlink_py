@@ -19,6 +19,7 @@ Verilog-2001, bit-true to `../PC/pd_reference.py`. The checks are in `../SIM`.
 | `pd_tone_rom.v` | cosine table 1024 × 16 bit, two read ports (cos and sin = cos − 256); **generated** by `gen_tone_rom.py` from `pd_reference.TONE_COS` | `TONE_COS` |
 | `pd_detect_top.v` | `input_stage` 0: LPF output in; 1: 20 Msps input, front end here; 2: 40 Msps input, half-band + front end here | `detect(..., debug=True)` |
 | `pd_cf.v` | control field after each good timing record: 8192-sample buffer of the DC blocker output, start queue (4), reader with `stall` while a needed sample would be overwritten, `cf_rx` | `cf_reference.control_records` |
+| `pd_arm.v` | Rx state machine re-arm (`rearm` = 1): follows each packet's event, timing record and control record, tells the core the re-arm sample, holds the input at R_min − 64 while a decision is pending | `rearm_point` |
 | `pd_axi.v` | board wrapper: AXI-Lite registers (map in the file header), event FIFO (32 events), debug FIFO with TLAST per DMA transfer, loopback mode, input flow control | firmware + `pd_board_emulator.py` |
 
 **Interface.**

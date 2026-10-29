@@ -32,7 +32,9 @@ set proj_name  pd_zed
 set bd_name    system
 set part       xc7z020clg484-1
 set board      digilentinc.com:zedboard:part0:1.1
-set jobs       4
+# parallel synthesis jobs: each needs 2-3 GB of memory next to Vivado's own ~2 GB, so 2 is the
+# safe default on a 12-16 GB PC; JOBS=4 vivado ... is faster with enough memory
+set jobs       [expr {[info exists ::env(JOBS)] ? $::env(JOBS) : 2}]
 set mode       [expr {[llength $argv] > 0 ? [lindex $argv 0] : "all"}]
 
 # --------------------------------------------------------------------------
@@ -135,7 +137,7 @@ set rtl_dir [file normalize [file join $script_dir .. RTL]]
 set rtl_files {}
 foreach f {pd_halfband.v pd_dc_blocker.v pd_lpf.v pd_div16.v pd_detect_core.v pd_cordic.v pd_cfo_cascade.v
            pd_cfo_lane.v pd_tone_rom.v pd_sdp_ram.v pd_tone_check.v pd_timing.v cf_roms.v cf_tdp_ram.v
-           cf_fft.v cf_chest.v cf_viterbi.v cf_crc10.v cf_rx.v pd_cf.v pd_detect_top.v pd_axi.v} {
+           cf_fft.v cf_chest.v cf_viterbi.v cf_crc10.v cf_rx.v pd_cf.v pd_arm.v pd_detect_top.v pd_axi.v} {
     lappend rtl_files [file join $rtl_dir $f]
 }
 add_files -norecurse $rtl_files

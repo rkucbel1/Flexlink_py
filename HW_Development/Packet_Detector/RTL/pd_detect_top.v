@@ -35,6 +35,7 @@ module pd_detect_top (
     input  wire [15:0] n_cfo,          // CFO window, 128..4096 (2048 default)
     input  wire [23:0] tone_lin,       // tone-check threshold, linear Q.16 (13 dB: 1307615); 0 = off
     input  wire [15:0] t_pk,           // timing: minimum peak / mean, Q8.8 (18: 4608); 0 = no check
+    input  wire        rearm,          // 1: the Rx state machine re-arms (pd_arm), 0: fixed holdoff
     // sample stream
     input  wire        s_iq_tvalid,
     input  wire [31:0] s_iq_tdata,
@@ -90,6 +91,7 @@ module pd_detect_top (
     output wire [5:0]  cf_shift,
     output wire [15:0] cf_metric,
     output wire        cf_err,
+    output wire        arm_late,       // a re-arm came too late (sticky; cannot happen)
     // state: busy = something still in flight; open_n / open_t = windows still waiting for
     // samples (at most 1 once busy is 0) and the first one's t_trig
     output wire        busy,
@@ -97,7 +99,10 @@ module pd_detect_top (
     output wire [31:0] open_t
 );
     wire stall_tone, stall_tm, stall_cf, lane_busy, tone_busy, tm_busy, cf_busy;
-    wire stall = stall_tone || stall_tm || stall_cf;
+    wire stall_arm;
+    wire stall = stall_tone || stall_tm || stall_cf || stall_arm;
+    wire        arm_set;
+    wire [31:0] arm_val;
     wire [23:0] tm_inc;
     assign s_iq_tready = !stall;
     wire   s_fire = s_iq_tvalid & !stall;
@@ -139,6 +144,7 @@ module pd_detect_top (
         .clk(clk), .rst_n(rst_n),
         .eta_hi_sq(eta_hi_sq), .eta_lo_sq(eta_lo_sq), .qual_len(qual_len),
         .blank_len(blank_len), .arm_holdoff(arm_holdoff), .n_cfo(n_cfo),
+        .rearm(rearm), .arm_set(arm_set), .arm_val(arm_val), .arm_late(arm_late),
         .in_valid(lpf_valid), .in_i(lpf_i), .in_q(lpf_q),
         .trig(trig), .t_trig(t_trig),
         .dbg_valid(dbg_valid), .dbg_metric(dbg_metric), .dbg_bits(dbg_bits));
@@ -182,6 +188,14 @@ module pd_detect_top (
         .stall(stall_cf),
         .cf_valid(cf_valid), .cf_t(cf_t), .cf_n_end(cf_n_end), .cf_crc_ok(cf_crc_ok), .cf_msg(cf_msg),
         .cf_shift(cf_shift), .cf_metric(cf_metric), .busy(cf_busy), .err(cf_err));
+
+    pd_arm u_arm (
+        .clk(clk), .rst_n(rst_n), .rearm(rearm), .fe_on(fe_on), .n_cfo(n_cfo), .arm_holdoff(arm_holdoff),
+        .x_valid(lpf_valid), .trig(trig), .t_trig(t_trig),
+        .ev_valid(ev_valid), .ev_t(ev_t), .ev_fail(ev_tone_fail),
+        .tm_valid(tm_valid), .tm_t(tm_t), .tm_n_end(tm_n_end), .tm_status(tm_status),
+        .cf_valid(cf_valid), .cf_t(cf_t), .cf_crc_ok(cf_crc_ok), .cf_msg(cf_msg),
+        .arm_set(arm_set), .arm_val(arm_val), .stall(stall_arm), .pending());
 
     // samples inside the front end and core: debug records due minus records out. With the
     // half-band, a record is due with every second input (the first of a pair waits for its

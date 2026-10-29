@@ -21,9 +21,9 @@ Commands (request payload -> reply payload)
     PING          -                         -> BoardInfo
     RESET         -                         -> -       detector reset: sample_cnt = 0, blanking
                                                        restarts, sample buffer emptied
-    SET_PARAMS    Params (40 bytes; 36 =    -> -
-                  without t_pk, which then
-                  keeps its default)
+    SET_PARAMS    Params (44 bytes; 40 =    -> -
+                  without rearm (holdoff),
+                  36 = also without t_pk)
     LOAD_SAMPLES  u32 offset, then int16    -> u32 samples now stored
                   I,Q pairs (12-bit values
                   sign-extended to 16 bits)
@@ -94,6 +94,8 @@ BOARD_TIMING = 0x4                     # bitstream has the Preamble B timing (ID
 BOARD_CF = 0x8                         # bitstream has the control-field receiver (ID 4.0, firmware
 #                                        build 11): the RUN reply carries control records after the
 #                                        timing records
+BOARD_REARM = 0x10                     # bitstream has the Rx state machine's re-arm (ID 5.0, firmware
+#                                        build 12): Params.rearm is used (else always the holdoff)
 
 # EventRecord.status bits
 EV_CFO_VALID = 0x1                     # N_CFO samples were available, cfo_inc is valid
@@ -151,8 +153,14 @@ class Params:
     t_pk: int = q8(18.0)               # Preamble B timing: minimum peak / mean, Q8.8, 0 = no check
     #                                    (spec 4.5, T_pk). The timing search runs with input_stage
     #                                    1 and 2 (it needs the unfiltered stream)
+    rearm: int = 1                     # 1 = the Rx state machine re-arms the detector after the
+    #                                    packet's outcome (pd_reference.REARM_*: tone fail, timing
+    #                                    abort, control field rejected, end of the packet);
+    #                                    0 = fixed holdoff after every trigger (arm_holdoff).
+    #                                    Boards before firmware build 12 always use the holdoff
 
-    FMT = struct.Struct("<10I")
+    FMT = struct.Struct("<11I")
+    FMT_V2 = struct.Struct("<10I")     # firmware builds 10, 11: no rearm
     FMT_V1 = struct.Struct("<9I")      # firmware builds <= 9: no t_pk
 
     def pack(self) -> bytes:
@@ -163,8 +171,10 @@ class Params:
 
     @classmethod
     def unpack(cls, b: bytes) -> "Params":
-        if len(b) < cls.FMT.size:                       # 36-byte SET_PARAMS (builds <= 9)
-            return cls(*cls.FMT_V1.unpack(b[:cls.FMT_V1.size]))
+        if len(b) < cls.FMT_V2.size:                    # 36-byte SET_PARAMS (builds <= 9)
+            return cls(*cls.FMT_V1.unpack(b[:cls.FMT_V1.size]), rearm=0)
+        if len(b) < cls.FMT.size:                       # 40 bytes (builds 10, 11)
+            return cls(*cls.FMT_V2.unpack(b[:cls.FMT_V2.size]), rearm=0)
         return cls(*cls.FMT.unpack(b[:cls.FMT.size]))
 
     def as_dict(self) -> dict:
@@ -173,7 +183,9 @@ class Params:
     def describe(self) -> str:
         return (f"eta_hi {np.sqrt(self.eta_hi_sq / 65536):.3f}, eta_lo {np.sqrt(self.eta_lo_sq / 65536):.3f}, "
                 f"Q {self.qual_len}, N_CFO {self.n_cfo}, blank {self.blank_len}, "
-                f"tone {self.tone_thresh / 256:.1f} dB, holdoff {self.arm_holdoff}, T_pk {self.t_pk / 256:g}")
+                f"tone {self.tone_thresh / 256:.1f} dB, "
+                + ("re-arm by the state machine" if self.rearm else f"holdoff {self.arm_holdoff}")
+                + f", T_pk {self.t_pk / 256:g}")
 
 
 @dataclass

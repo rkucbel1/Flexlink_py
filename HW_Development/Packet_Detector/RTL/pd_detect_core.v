@@ -31,6 +31,10 @@ module pd_detect_core (
     input  wire [31:0]        blank_len,
     input  wire [31:0]        arm_holdoff,   // effective: max(arm_holdoff, n_cfo, 1)
     input  wire [15:0]        n_cfo,         // CFO window length (1..4096)
+    input  wire               rearm,         // 1: after a trigger stay disarmed until arm_set
+    input  wire               arm_set,       //    (pd_arm: re-arm at sample arm_val)
+    input  wire [31:0]        arm_val,
+    output reg                arm_late,      // arm_set for a sample already processed (sticky)
     // samples (LPF output)
     input  wire               in_valid,
     input  wire signed [11:0] in_i,
@@ -291,10 +295,14 @@ module pd_detect_core (
     always @(posedge clk) begin
         if (!rst_n) begin
             n12 <= 32'd0; arm_at <= 32'd0; count <= 16'd0;
-            trig <= 1'b0; t_trig <= 32'd0; v12 <= 1'b0;
+            trig <= 1'b0; t_trig <= 32'd0; v12 <= 1'b0; arm_late <= 1'b0;
         end else begin
             v12  <= v11;
             trig <= 1'b0;
+            if (arm_set) begin
+                arm_at <= arm_val;
+                if ($signed(arm_val - n12 - {31'd0, v11}) < 0) arm_late <= 1'b1;   // sample n12 is decided now
+            end
             if (n12 == 32'd0 && !v11)
                 arm_at <= blank_len;         // follow the register until the first sample
             if (v11) begin
@@ -308,7 +316,7 @@ module pd_detect_core (
                         trig   <= 1'b1;
                         t_trig <= n12;
                         count  <= 16'd0;
-                        arm_at <= n12 + holdoff;
+                        arm_at <= rearm ? 32'hFFFF_FFFF : n12 + holdoff;
                     end else
                         count <= count_n;
                 end

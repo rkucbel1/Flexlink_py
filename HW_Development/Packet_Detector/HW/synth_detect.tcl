@@ -23,7 +23,7 @@ read_verilog [list \
     [file join $rtl pd_cfo_lane.v] [file join $rtl pd_tone_rom.v] [file join $rtl pd_sdp_ram.v] [file join $rtl pd_tone_check.v] \
     [file join $rtl pd_timing.v] [file join $rtl cf_roms.v] [file join $rtl cf_tdp_ram.v] [file join $rtl cf_fft.v] \
     [file join $rtl cf_chest.v] [file join $rtl cf_viterbi.v] [file join $rtl cf_crc10.v] [file join $rtl cf_rx.v] \
-    [file join $rtl pd_cf.v] [file join $rtl pd_detect_top.v]]
+    [file join $rtl pd_cf.v] [file join $rtl pd_arm.v] [file join $rtl pd_detect_top.v]]
 
 synth_design -top pd_detect_top -part $part -mode out_of_context
 create_clock -name clk -period $period [get_ports clk]

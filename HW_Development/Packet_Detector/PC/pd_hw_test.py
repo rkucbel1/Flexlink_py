@@ -320,6 +320,10 @@ def main(argv=None) -> int:
             print(f"Vector larger than the board buffer - running in pieces of {chunk}")
         if div == 2 and chunk % 2:
             chunk -= 1                         # whole 40 Msps pairs
+        if not info.flags & pr.BOARD_REARM and params.rearm:
+            print("Note: this board re-arms with the fixed holdoff (bitstream before 5.0 or firmware "
+                  "before build 12): comparing with rearm 0")
+            params.rearm = 0
         b.call(pr.RESET)
         b.call(pr.SET_PARAMS, params.pack())
 

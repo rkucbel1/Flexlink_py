@@ -117,7 +117,7 @@ class Board:
 
     def handle(self, cmd: int, payload: bytes) -> bytes:
         if cmd == pr.PING:
-            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR | pr.BOARD_TIMING | pr.BOARD_CF).pack()
+            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR | pr.BOARD_TIMING | pr.BOARD_CF | pr.BOARD_REARM).pack()
         if cmd == pr.RESET:
             self.reset()
             return b""

@@ -15,6 +15,8 @@
 #   MAX=20000 ./run_sim.sh                         # first 20000 samples only
 #   HOLDOFF=300 ./run_sim.sh                       # short re-arm holdoff (effective >= N_CFO)
 #   NCFO=4096 ./run_sim.sh cfo 1                   # other CFO window length (128..4096)
+#   REARM=0 ./run_sim.sh stress 1                  # fixed holdoff instead of the Rx state machine's re-arm
+#   ./run_sim.sh cfmod 1                           # rep3 with modified control fields: every re-arm decision
 #   ./run_sim.sh stress 1 / ./run_sim.sh cfo 1     # synthetic vectors (full scale / CFO sweep)
 #   ./run_sim.sh units                             # CORDIC, cascade, tone-check unit tests
 #   ./run_sim.sh timing                            # Preamble B timing alone: directed boundary cases
@@ -72,11 +74,12 @@ else
        ../RTL/pd_cordic.v ../RTL/pd_cfo_cascade.v ../RTL/pd_cfo_lane.v ../RTL/pd_tone_rom.v
        ../RTL/pd_sdp_ram.v ../RTL/pd_tone_check.v ../RTL/pd_timing.v ../RTL/cf_roms.v ../RTL/cf_tdp_ram.v
        ../RTL/cf_fft.v ../RTL/cf_chest.v ../RTL/cf_viterbi.v ../RTL/cf_crc10.v ../RTL/cf_rx.v ../RTL/pd_cf.v
-       ../RTL/pd_detect_top.v)
+       ../RTL/pd_arm.v ../RTL/pd_detect_top.v)
 args=("$VEC" --input-stage "$STAGE")
 [[ -n "${MAX:-}" ]] && args+=(--max-samples "$MAX")
 [[ -n "${HOLDOFF:-}" ]] && args+=(--holdoff "$HOLDOFF")
 [[ -n "${NCFO:-}" ]] && args+=(--n-cfo "$NCFO")
+[[ -n "${REARM:-}" ]] && args+=(--rearm "$REARM")
 "$PYTHON" make_tb_vectors.py "${args[@]}"
 DIR="work/$(basename "${VEC%.json}")_s${STAGE}"
 fi

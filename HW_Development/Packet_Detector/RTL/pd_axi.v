@@ -10,8 +10,8 @@
 //   S_AXI   AXI4-Lite registers: control, status, parameters, event, timing and control FIFOs
 //
 // Register map (byte offsets; RW = read/write, RO = read only):
-//   0x00 ID          RO  0x50440400 ("PD", version 4.0: control-field receiver; 3.0 had no
-//                        control field, 2.0 no timing, 1.0 no input stage 2)
+//   0x00 ID          RO  0x50440500 ("PD", version 5.0: re-arm by the Rx state machine; 4.0
+//                        had no REARM, 3.0 no control field, 2.0 no timing, 1.0 no input stage 2)
 //   0x04 CTRL        RW  bit0 RESET (1 = detector held in reset; 1 after power-up)
 //                        bit1 DEBUG (send debug records on M_AXIS; change only when not BUSY)
 //                        bit2 LOOPBACK (S_AXIS -> M_AXIS unchanged, detector not fed)
@@ -21,7 +21,8 @@
 //                        bit9 in reset, bit10 loopback, bit11 TM_OVF (timing record lost),
 //                        bit12 TM_ERR (timing start queue overflow); both sticky, cannot happen,
 //                        bit13 CF_OVF (control record lost), bit14 CF_ERR (control-field start
-//                        queue overflow); both sticky, cannot happen
+//                        queue overflow); both sticky, cannot happen, bit15 ARM_LATE (a re-arm
+//                        decision came after its sample; sticky, cannot happen)
 //   0x0C SAMPLES     RO  input samples taken since RESET (stage 2: 40 Msps samples, twice the
 //                        detector's sample_cnt)
 //   0x10 OPEN_T      RO  t_trig of the first open window (valid when OPEN)
@@ -42,6 +43,7 @@
 //   0x4C TM_DATA     RO  next timing word (reading removes it)
 //   0x50 CF_LEVEL    RO  words in the control-record FIFO (8 per record)
 //   0x54 CF_DATA     RO  next control-record word (reading removes it)
+//   0x58 REARM       RW  1 = re-arm by the Rx state machine (default), 0 = fixed ARM_HOLDOFF
 //
 // Event (8 words, in this order): t_trig, cfo_inc, {ang32, ang16}, {ang256, ang128},
 //   num[31:0], {fail, 23'b0, num[39:32]}, den[31:0], {24'b0, den[39:32]}
@@ -135,7 +137,7 @@ module pd_axi (
     (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 M_AXIS TREADY" *)
     input  wire        m_axis_tready
 );
-    localparam [31:0] ID = 32'h5044_0400;     // "PD", version 4.0 (4.0: control field, 3.0: timing)
+    localparam [31:0] ID = 32'h5044_0500;     // "PD", version 5.0 (5.0: re-arm, 4.0: control field)
     localparam integer CF_DEPTH = 8;             // control records
     localparam integer CF_LIMIT = CF_DEPTH - 2;  // hold the input above this
     localparam integer TM_DEPTH = 32;            // timing records
@@ -153,6 +155,7 @@ module pd_axi (
     reg [3:0]  r_shift;
     reg [23:0] r_lin;
     reg [15:0] r_tpk;
+    reg        r_rearm;
 
     // detector reset: registered, from the bus reset and CTRL.RESET
     reg det_rst_n;
@@ -172,7 +175,7 @@ module pd_axi (
     wire [15:0] det_tm_n_pos;
     wire [33:0] det_tm_p_max;
     wire [47:0] det_tm_p_sum;
-    wire        det_cf_valid, det_cf_crc_ok, det_cf_err;
+    wire        det_cf_valid, det_cf_crc_ok, det_cf_err, det_arm_late;
     wire [31:0] det_cf_t, det_cf_n_end;
     wire [53:0] det_cf_msg;
     wire [5:0]  det_cf_shift;
@@ -186,6 +189,7 @@ module pd_axi (
         .input_stage(r_stage), .dc_shift(r_shift),
         .eta_hi_sq(r_eta_hi), .eta_lo_sq(r_eta_lo), .qual_len(r_qual),
         .blank_len(r_blank), .arm_holdoff(r_hold), .n_cfo(r_ncfo), .tone_lin(r_lin), .t_pk(r_tpk),
+        .rearm(r_rearm),
         .s_iq_tvalid(det_tvalid), .s_iq_tdata(s_axis_tdata), .s_iq_tready(det_tready),
         .lpf_valid(), .lpf_i(), .lpf_q(), .trig(), .t_trig(),
         .dbg_valid(det_dbg_valid), .dbg_metric(det_dbg_metric), .dbg_bits(det_dbg_bits),
@@ -198,6 +202,7 @@ module pd_axi (
         .tm_n_pos(det_tm_n_pos), .tm_p_max(det_tm_p_max), .tm_p_sum(det_tm_p_sum), .tm_err(det_tm_err),
         .cf_valid(det_cf_valid), .cf_t(det_cf_t), .cf_n_end(det_cf_n_end), .cf_crc_ok(det_cf_crc_ok),
         .cf_msg(det_cf_msg), .cf_shift(det_cf_shift), .cf_metric(det_cf_metric), .cf_err(det_cf_err),
+        .arm_late(det_arm_late),
         .busy(det_busy), .open_n(det_open_n), .open_t(det_open_t));
 
     wire       stage2 = (r_stage == 2'd2);
@@ -363,7 +368,7 @@ module pd_axi (
 
     // ------------------------------------------------------------------ AXI4-Lite
     wire busy = det_busy || (ser_n != 4'd0) || (dbg_cnt != 0);
-    wire [31:0] status = {17'd0, cf_err_r, cf_ovf, tm_err_r, tm_ovf, ctrl_loop, !det_rst_n, ev_ovf, det_open_n, 2'd0,
+    wire [31:0] status = {16'd0, det_arm_late, cf_err_r, cf_ovf, tm_err_r, tm_ovf, ctrl_loop, !det_rst_n, ev_ovf, det_open_n, 2'd0,
                           det_open_n != 4'd0, busy};
     reg  awready_r, wready_r, arready_r;
     reg  [11:0] wa;
@@ -379,7 +384,7 @@ module pd_axi (
             ctrl_reset <= 1'b1; ctrl_debug <= 1'b0; ctrl_loop <= 1'b0;
             r_eta_hi <= 16'd8028; r_eta_lo <= 16'd2621; r_qual <= 16'd128; r_ncfo <= 16'd2048;
             r_blank <= 32'd288; r_hold <= 32'd131072; r_stage <= 2'd0; r_shift <= 4'd10;
-            r_lin <= 24'd1307615; r_tpk <= 16'd4608;
+            r_lin <= 24'd1307615; r_tpk <= 16'd4608; r_rearm <= 1'b1;
         end else begin
             awready_r <= 1'b0;
             wready_r  <= 1'b0;
@@ -400,6 +405,7 @@ module pd_axi (
                     6'h0F: r_shift  <= s_axi_wdata[3:0];
                     6'h10: r_lin    <= s_axi_wdata[23:0];
                     6'h11: r_tpk    <= s_axi_wdata[15:0];
+                    6'h16: r_rearm  <= s_axi_wdata[0];
                     default: ;
                 endcase
             end
@@ -446,6 +452,7 @@ module pd_axi (
                         tm_pop      <= (tm_cnt != 0) && det_rst_n;
                     end
                     6'h14: s_axi_rdata <= {25'd0, cf_level};
+                    6'h16: s_axi_rdata <= {31'd0, r_rearm};
                     6'h15: begin
                         s_axi_rdata <= (cf_cnt != 0) ? cf_word : 32'd0;
                         cf_pop      <= (cf_cnt != 0) && det_rst_n;

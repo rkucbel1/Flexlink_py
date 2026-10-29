@@ -168,6 +168,15 @@ table are new.
    the CRC. `detect()` returns them in `Result.control` (`control=False` skips the decoding);
    a control field the samples end inside is not reported.
 
+11. **Re-arm by the Rx state machine** (`Params.rearm` = 1; `pd_reference.rearm_point`,
+   `triggers_from`). After a trigger the detector stays disarmed until the packet's outcome is
+   known and re-arms at a sample R that only depends on the outcome (table in
+   `Docs/Specification_PayloadInput.md` §4): t + 2N + 256 after a failed tone check,
+   t + 2N + 6656 after a timing record that is not good, n_end + 2N + 12753 after a rejected
+   control field, the end of the packet after a good one. `detect()` now runs the event,
+   timing and control field of each trigger before it looks for the next one. `rearm` = 0 is
+   the old fixed holdoff and gives the old results unchanged.
+
 ## Verification
 
 ### Word-length sweeps (each block against its floating-point version)

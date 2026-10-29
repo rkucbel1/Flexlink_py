@@ -51,10 +51,20 @@ Detector conventions
     Blanking: samples n < blank_len never count towards the qualifier.
     Qualifier: count += 1 on above_hi, count = 0 on below_lo, held otherwise; the trigger
       fires on the sample where count reaches qual_len: t_trig = that sample's index.
-    Holdoff: the trigger is disabled from t_trig + 1 and re-arms at t_trig + H, count
-      restarting from 0 (stands in for the Rx FSM's arm pulse), H = holdoff(p) =
-      max(arm_holdoff, n_cfo, 1): the detector cannot re-arm before the CFO window is over
-      (one CFO lane; spec 4.2: "ignores further triggers until it is re-armed").
+    Re-arm: the trigger is disabled from t_trig + 1 and re-arms at sample R, count restarting
+      from 0 (spec 4.2: "ignores further triggers until it is re-armed").
+      p.rearm = 0: R = t_trig + H, H = holdoff(p) = max(arm_holdoff, n_cfo, 1) (fixed holdoff).
+      p.rearm = 1 (the Rx state machine, Docs/Specification_PayloadInput.md section 4): R from the
+      packet's outcome, N = n_cfo (rearm_point):
+        tone check failed                          R = t + 2N + 256
+        input stage 0 (no timing), tone check ok   R = max(t + H, t + 2N + 256)
+        timing record not good                     R = t + 2N + 6656
+        control field: CRC failed or a field code with no meaning
+                                                   R = n_end + 2N + 12753
+        control field good                         R = max(n_end + 4561 + 1140 L, n_end + 2N + 12753),
+                                                   L = PacketLength (the end of the packet)
+      Every R lies after the last sample its decision needs, and at 20 Msps the decision is out
+      before sample R arrives; with faster input the hardware holds the input at R until it is.
     CFO window: samples t_trig .. t_trig + N_CFO - 1 only. The lag-l accumulator adds
       x(n) x*(n - l) for n = t_trig + l .. t_trig + N_CFO - 1 (N_CFO - l terms), so both
       samples of every product lie in the window, as in the simulator. (Reaching back before
@@ -358,9 +368,61 @@ def comparator_inputs(xi: np.ndarray, xq: np.ndarray):
     return (pr >> s, pi >> s, r0 >> s, rd >> s), (pr, pi, r0, rd)
 
 
+REARM_TONE = 256                           # R - t - 2N after a failed tone check
+REARM_TIMING = 6656                        # R - t - 2N after a timing record that is not good
+REARM_CF = 12753                           # R - n_end - 2N after a rejected control field (4561 + 8192)
+PAYLOAD_SYM = 1140                         # samples per payload OFDM symbol (1024 + CP 116)
+
+
 def holdoff(p: Params) -> int:
     """Effective re-arm holdoff: max(arm_holdoff, n_cfo, 1)."""
     return max(int(p.arm_holdoff), int(p.n_cfo), 1)
+
+
+def triggers_from(above: np.ndarray, below: np.ndarray, p: Params, arms: list[int]):
+    """Triggers one at a time: the next one at or after arms[-1] (the caller appends the re-arm
+    point of each trigger before asking for the next)."""
+    n = above.size
+    cum_a = np.concatenate([[0], np.cumsum(above, dtype=np.int64)])
+    below_idx = np.where(below, np.arange(n), -1)
+    q = max(int(p.qual_len), 1)
+    while arms[-1] < n:
+        arm = arms[-1]
+        seg = slice(arm, n)
+        last_reset = np.maximum.accumulate(np.maximum(below_idx[seg], arm - 1))
+        count = cum_a[arm + 1:n + 1] - cum_a[last_reset + 1]
+        hit = np.flatnonzero(count >= q)
+        if hit.size == 0:
+            return
+        k = len(arms)
+        yield arm + int(hit[0])
+        if len(arms) == k:                                  # caller stopped
+            return
+
+
+def rearm_point(e: EventRecord, p: Params, y, y_n: int) -> int | None:
+    """Re-arm sample of the Rx state machine for this event (p.rearm = 1); None if the input
+    ends before the decision (see the module text)."""
+    t, N = e.t_trig, int(p.n_cfo)
+    if e.status & EV_TRUNCATED:
+        return None
+    if e.status & EV_TONE_FAIL:
+        return t + 2 * N + REARM_TONE
+    if y is None:                                           # stage 0: no timing, no control field
+        return max(t + holdoff(p), t + 2 * N + REARM_TONE)
+    tm = timing_search(y, t, N, e.cfo_inc & 0xFFFFFF, int(p.t_pk))
+    if tm is None:
+        return None
+    if tm.status != TM_PEAK_OK:
+        return t + 2 * N + REARM_TIMING
+    import cf_reference                                     # imports this module
+    r_cf = tm.n_end + 2 * N + REARM_CF
+    c = cf_reference.receive(y, t, tm.n_end, e.cfo_inc)
+    if c is None:
+        return None
+    if not (c.crc_ok and cf_reference.fields_valid(c.message)):
+        return r_cf
+    return max(tm.n_end + 4561 + PAYLOAD_SYM * cf_reference.packet_length(c.message), r_cf)
 
 
 def find_triggers(above: np.ndarray, below: np.ndarray, p: Params) -> list[int]:
@@ -524,21 +586,17 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False, control: bool = True)
     den = r0 * rd
     above = (num > p.eta_hi_sq * den) & ~low
     below = (num < p.eta_lo_sq * den) | low
-    trig = find_triggers(above, below, p)
-
     if not 128 <= p.n_cfo <= 4096:
         raise ValueError(f"n_cfo {p.n_cfo} outside 128..4096 (accumulator widths; the hardware's "
                          "CORDIC sequence needs about 80 clocks between windows)")
     if not 0 <= p.tone_thresh <= TONE_THRESH_MAX_Q8:
         raise ValueError(f"tone_thresh {p.tone_thresh / 256:g} dB outside 0..24 dB")
     lin = tone_thresh_lin(p.tone_thresh) if p.tone_thresh > 0 else 0
-    events, extra = [], []
-    for t in trig:
-        N = int(p.n_cfo)
+    N = int(p.n_cfo)
+
+    def event_of(t):
         if t + N > n:
-            events.append(EventRecord(t, 0, t + N, 0, EV_TRUNCATED))
-            extra.append({"t_trig": t})
-            continue
+            return EventRecord(t, 0, t + N, 0, EV_TRUNCATED), {"t_trig": t}
         acc = cfo_accumulators(xi, xq, t, N)
         angles = {lag: cordic_angle(*acc[lag]) for lag in acc}
         f = cfo_cascade(angles)
@@ -548,11 +606,29 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False, control: bool = True)
         if lin and (tn << TONE_LIN_FRAC) < lin * td:
             status |= EV_TONE_FAIL
         tone_q8 = int(np.clip(math.floor(tdb * 256 + 0.5), -32768, 32767))
-        events.append(EventRecord(t, -f, t + N, tone_q8, status,
-                                  angles[16], angles[32], angles[128], angles[256]))
-        extra.append({"t_trig": t, "f_hat_hz": f * FS / _NCO, "tone_db": tdb,
-                      "tone_num": tn, "tone_den": td,
-                      "lag_estimates_hz": {lag: angles[lag] * FS / (65536 * lag) for lag in angles}})
+        return (EventRecord(t, -f, t + N, tone_q8, status, angles[16], angles[32], angles[128], angles[256]),
+                {"t_trig": t, "f_hat_hz": f * FS / _NCO, "tone_db": tdb, "tone_num": tn, "tone_den": td,
+                 "lag_estimates_hz": {lag: angles[lag] * FS / (65536 * lag) for lag in angles}})
+
+    events, extra, trig, arms = [], [], [], [int(p.blank_len)]
+    if p.rearm:
+        y_n = y.shape[0] if y is not None else 0
+        for t in triggers_from(above, below, p, arms):
+            trig.append(t)
+            e, x = event_of(t)
+            events.append(e)
+            extra.append(x)
+            r = rearm_point(e, p, y, y_n)
+            if r is None:                                   # decision not reached in this input
+                break
+            arms.append(r)
+    else:
+        trig = find_triggers(above, below, p)
+        for t in trig:
+            e, x = event_of(t)
+            events.append(e)
+            extra.append(x)
+        arms += [t + holdoff(p) for t in trig]
 
     res = Result(events, extra=extra)
     if y is not None:
@@ -570,11 +646,10 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False, control: bool = True)
         bits[low] |= DBG_LOW_POWER
         bits[:min(p.blank_len, n)] |= DBG_BLANK
         armed = np.zeros(n, bool)
-        start = p.blank_len
-        for t in trig:
-            armed[start:t + 1] = True
-            start = t + holdoff(p)
-        armed[start:] = True
+        for k, t in enumerate(trig):
+            armed[arms[k]:t + 1] = True
+        if len(arms) > len(trig):
+            armed[arms[len(trig)]:] = True
         bits[armed] |= DBG_ARMED
         bits[trig] |= DBG_TRIG
         res.bits = bits

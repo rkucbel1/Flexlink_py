@@ -45,6 +45,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
+TV = HERE.parent / "TestVectors"
 sys.path.insert(0, str(HERE.parent / "PC"))
 import pd_protocol as pr  # noqa: E402
 import pd_reference as ref  # noqa: E402
@@ -99,6 +100,85 @@ def high_snr_vector(seed: int = 13, per_snr: int = 6, rate40: bool = False) -> n
             x20, _, _, x40 = chk.make_trials(tx, snr, 1, rng, cfo_max=600e3, return40=True)
             recs.append(chk.quantise(x40 if rate40 else x20)[:, :, 0])
     return np.concatenate(recs).astype(np.int64)
+
+
+def cf_waveform(message: int) -> np.ndarray:
+    """The 4560-sample control field (20 Msps, complex, unit-ish power) carrying `message`
+    (54 bits, bit i = message bit i), built as the Tx does: CRC10, K = 7 code with 6 tail bits,
+    BCC interleaver, 15 copies + 100 zero bits, Gold scrambler (130), BPSK, Ref_P0 pilots in
+    symbols 0 and 3, 1024-point IFFT, CP 116."""
+    import cf_reference as cf
+    bits = [(message >> i) & 1 for i in range(54)]
+    crc = cf.crc10(bits)
+    data = bits + [(crc >> (9 - i)) & 1 for i in range(10)] + [0] * 6
+    st, code = 0, []
+    for b in data:
+        oa, ob = cf._OUT[st][b]
+        code += [oa, ob]
+        st = (b << 5) | (st >> 1)
+    code = np.array(code, np.int64)
+    a = code[cf.CF_IDX]                                    # Rx: code[IDX[j]] = A[j]
+    tx = np.concatenate([np.tile(a, 15), np.zeros(100, np.int64)]) ^ cf.CF_GOLD
+    grid = np.zeros((4, 841), complex)
+    grid[cf.CF_DATA_MASK] = 2.0 * tx - 1.0
+    grid[0, cf.CF_P0_K] = cf.CF_REF
+    grid[3, cf.CF_P0_K] = cf.CF_REF
+    out = []
+    for s_ in range(4):
+        spec = np.zeros(1024, complex)
+        spec[(np.arange(841) - 420) % 1024] = grid[s_]
+        t = np.fft.ifft(spec) * 32
+        out.append(np.r_[t[-cf.CF_CP:], t])
+    return np.concatenate(out)
+
+
+def cfmod_vector(seed: int = 21) -> tuple[np.ndarray, list[str]]:
+    """rep3 (decimated input) with each packet's control field replaced, to exercise every
+    re-arm decision after a good timing record:
+      packet 1  valid CRC, CBS_A_Flag code 11 (no meaning): rejected
+      packet 2  noise only: CRC fails, rejected
+      packet 3  valid, PacketLength 37 instead of 73: re-arm inside the real payload
+    The new control field gets the packet's CFO (from its event) and noise, at the level of
+    the samples it replaces."""
+    import cf_reference as cf
+    meta = json.loads((TV / "rep3.json").read_text())
+    known = {f.name for f in fields(pr.Params)}
+    p = pr.Params(**{k: v for k, v in meta["params"].items() if k in known})
+    p.input_stage, p.rearm = 1, 0
+    iq = np.fromfile(TV / meta["files"]["decimated"], "<i2").reshape(-1, 2).astype(np.int64)
+    res = ref.detect(iq, p, control=False)
+    rng = np.random.default_rng(seed)
+    base = cf.control_records(ref.dc_blocker(iq, p.dc_shift), res.events, res.timing)
+    if len(base) != 3 or not all(c.crc_ok for c in base):
+        raise SystemExit("cfmod: rep3 should give 3 good control fields")
+    msg0 = base[0].message
+
+    def with_code(m, pos, w, code):
+        for i in range(w):
+            bit = (code >> (w - 1 - i)) & 1
+            m = (m & ~(1 << (pos + i))) | (bit << (pos + i))
+        return m
+    plan = [("CBS_A_Flag 11 (no meaning)", with_code(msg0, 10, 2, 0b11)),
+            ("noise only (CRC fails)", None),
+            ("PacketLength 37", with_code(msg0, 4, 3, 0b011))]
+    inc = {e.t_trig: e.cfo_inc for e in res.events}
+    out = iq.copy()
+    notes = []
+    for (what, m), tm in zip(plan, [r for r in res.timing if r.status == pr.TM_GOOD]):
+        a, b = tm.n_end + 1, tm.n_end + 1 + cf.CF_LEN
+        seg = iq[a:b, 0] + 1j * iq[a:b, 1]
+        lvl = np.sqrt(np.mean(np.abs(seg) ** 2))
+        noise = (rng.standard_normal(cf.CF_LEN) + 1j * rng.standard_normal(cf.CF_LEN)) / np.sqrt(2)
+        if m is None:
+            z = lvl * noise
+        else:
+            w = cf_waveform(m)
+            ph = 2 * np.pi * (-(inc[tm.t_trig])) / 2 ** 24 * np.arange(a, b)
+            w = w / np.sqrt(np.mean(np.abs(w) ** 2)) * np.exp(1j * ph)
+            z = lvl * (0.94 * w + 0.33 * noise)             # about +9 dB
+        out[a:b] = np.clip(np.round(np.stack([z.real, z.imag], 1)), -2048, 2047).astype(np.int64)
+        notes.append(f"t_trig {tm.t_trig}: {what}")
+    return out, notes
 
 
 def units_vectors(out_root: Path, seed: int = 3) -> Path:
@@ -202,7 +282,7 @@ def tone_vectors(out: Path, rng) -> int:
 
 
 def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, holdoff: int | None,
-           n_cfo: int | None = None) -> Path:
+           n_cfo: int | None = None, rearm: int | None = None) -> Path:
     if str(vector) == "units":
         return units_vectors(out_root)
     if str(vector) == "cfo":
@@ -223,6 +303,16 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
             iq_dec = high_snr_vector()
             iq = iq_dec if stage == 1 else ref.front_end(iq_dec, p.dc_shift)
         vector = Path("highsnr.json")
+    elif str(vector) == "cfmod":
+        if stage != 1:
+            raise SystemExit("cfmod: input stage 1 only")
+        p = json.loads((TV / "rep3.json").read_text())["params"]
+        known = {f.name for f in fields(pr.Params)}
+        p = pr.Params(**{k: v for k, v in p.items() if k in known})
+        p.input_stage = 1
+        iq, notes = cfmod_vector()
+        print("cfmod: " + "; ".join(notes))
+        vector = Path("cfmod.json")
     elif str(vector) == "stress":
         p = pr.Params(arm_holdoff=500)
         p.input_stage = stage
@@ -242,6 +332,8 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
         iq = np.fromfile(vector.with_name(name), dtype="<i2").reshape(-1, 2).astype(np.int64)
     if holdoff is not None:
         p.arm_holdoff = holdoff
+    if rearm is not None:
+        p.rearm = rearm
     if n_cfo is not None:
         p.n_cfo = n_cfo
     if max_samples:
@@ -278,7 +370,7 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     (out / "cfg.txt").write_text(
         f"{p.input_stage} {p.dc_shift} {p.eta_hi_sq} {p.eta_lo_sq} {p.qual_len} {p.blank_len} "
         f"{p.arm_holdoff} {iq.shape[0]} {len(trig)} {p.n_cfo} {len(cfo_lines)} {lin} {lpf.shape[0]} "
-        f"{p.t_pk} {len(res.timing)}\n")
+        f"{p.t_pk} {len(res.timing)} {p.rearm}\n")
     (out / "exp_tm.txt").write_text("".join(
         f"{r.t_trig:08x} {r.n_end:08x} {r.status:x} {r.n_pos:04x} {r.p_max:09x} {r.p_sum:012x}\n"
         for r in res.timing))
@@ -313,9 +405,11 @@ def main(argv=None) -> int:
     ap.add_argument("--max-samples", type=int)
     ap.add_argument("--holdoff", type=int, help="override arm_holdoff (e.g. small, to get many triggers)")
     ap.add_argument("--n-cfo", type=int, help="override n_cfo (128..4096)")
+    ap.add_argument("--rearm", type=int, choices=(0, 1),
+                    help="1 = re-arm by the Rx state machine (Params default), 0 = fixed holdoff")
     ap.add_argument("--out", type=Path, default=HERE / "work")
     a = ap.parse_args(argv)
-    export(a.vector, a.input_stage, a.max_samples, a.out, a.holdoff, a.n_cfo)
+    export(a.vector, a.input_stage, a.max_samples, a.out, a.holdoff, a.n_cfo, a.rearm)
     return 0
 
 

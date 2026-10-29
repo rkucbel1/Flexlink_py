@@ -315,6 +315,40 @@ def receive_debug(y_cf: np.ndarray, cfo_inc: int) -> dict:
                 bits=bits, metric=metric, crc_ok=int(crc10(bits[:64]) == 0))
 
 
+# Control-field layout (Tx/ControlSignals/Parameters_Control_Field.json "ControlField", MSB first)
+# and the codes that mean something (Initialize_Control_Field.CONTROL_FIELD_CODING); fields without
+# a table (NDB_A, Tx_Ref_Clk_Cnt, C_init, Reserved) take any value.
+CF_FIELDS = (("RefSymbolSpacing", 2), ("RefSignalSpacing", 2), ("PacketLength", 3), ("PayloadFieldMod", 2),
+             ("NoOfTxAntenna", 1), ("CBS_A_Flag", 2), ("FEC_A_Flag", 2), ("RM_A_Flag", 4), ("NDB_A", 10),
+             ("ClientFlag", 1), ("Tx_Ref_Clk_Cnt", 14), ("C_init", 8), ("Reserved", 3))
+CF_VALID = {"PacketLength": {0b001: 4, 0b011: 37, 0b111: 49, 0b100: 73, 0b110: 97, 0b101: 121},
+            "CBS_A_Flag": {0b00: 648, 0b01: 1296, 0b10: 1944},
+            "RM_A_Flag": {0b0000: 1, 0b0001: 3, 0b0010: 5, 0b0011: 7, 0b0100: 11, 0b0101: 15, 0b0110: 19,
+                          0b0111: 23, 0b1000: 31}}
+
+
+def field_codes(message: int) -> dict[str, int]:
+    """54-bit message (bit i = message bit i) -> {field: code}."""
+    out, pos = {}, 0
+    for name, w in CF_FIELDS:
+        code = 0
+        for i in range(w):
+            code = (code << 1) | ((message >> (pos + i)) & 1)
+        out[name] = code
+        pos += w
+    return out
+
+
+def fields_valid(message: int) -> bool:
+    c = field_codes(message)
+    return all(c[k] in v for k, v in CF_VALID.items())
+
+
+def packet_length(message: int) -> int:
+    """Payload OFDM symbols (only for a message with valid fields)."""
+    return CF_VALID["PacketLength"][field_codes(message)["PacketLength"]]
+
+
 def control_records(y: np.ndarray, events, timing) -> list:
     """The control records of the detector (RTL/pd_cf.v): one per timing record with status ==
     TM_GOOD, in record order, with the event's cfo_inc; none if y ends before the control field

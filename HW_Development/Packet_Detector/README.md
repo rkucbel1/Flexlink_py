@@ -221,6 +221,27 @@ python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1
 python pd_board_regression.py          # 33 cases, timing and control records included
 ```
 
+Step 10: **re-arm by the Rx state machine** (`RTL/pd_arm.v`, `Params.rearm` = 1, the default;
+`Docs/Specification_PayloadInput.md` §4, `BITTRUE.md` change 11). The detector stays disarmed
+after a trigger until the packet's outcome is known and re-arms at a sample fixed by it: soon
+after a failed tone check (2N + 256 samples), after a failed timing search, after a rejected
+control field (CRC or a field code with no meaning), or at the end of a good packet
+(PacketLength from the control field). The point is a sample index, so board and model agree
+exactly; at 20 Msps the decision is always out in time (0 stalls), with faster DMA input the
+input waits for it. A false trigger on noise now costs 0.22 ms instead of the 4.75 ms holdoff.
+New vector `cfmod` (rep3 with an invalid field code, a failed CRC and a short PacketLength);
+9 of 9 injected faults caught once the vectors had an invalid code they could see. Bitstream ID
+5.0 (`REARM` at 0x58, STATUS bit 15 ARM_LATE), firmware build 12 (SET_PARAMS takes 44 bytes
+with `rearm`; PING sets `BOARD_REARM`). The PC tools fall back to `rearm` 0 on older boards; the
+regression keeps the fixed holdoff for the cases built for it and adds six state-machine cases.
+
+```bash
+cd SIM && ./run_sim.sh cfmod 1 && FIXGAP=1 GAP=4 ./run_sim.sh stress 1 && cd ..
+cd HW && vivado -mode batch -source synth_detect.tcl && vivado -mode batch -source build_hw.tcl && cd ..
+cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
+cd PC && python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 && python pd_board_regression.py
+```
+
 **Board regression** (`PC/pd_board_regression.py`): the RTL simulation's coverage on the board.
 Each case runs on the board and, with the same commands, through `pd_board_emulator`'s logic
 in-process; every RUN reply and every debug record must match. Cases: rep3 and the defects
