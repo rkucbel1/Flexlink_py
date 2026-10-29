@@ -22,6 +22,8 @@ testbench, with the bit-true model's expected outputs for every sample:
   work/<name>_s<stage>/exp_tm.txt    Preamble B timing records (hex, any order): t, n_end, status,
                                      n_pos, p_max, p_sum. cfg.txt then also has t_pk and the
                                      number of records
+  work/<name>_s<stage>/exp_cf.txt    control records (count, then hex in order): t, n_end,
+                                     status (bit0 CRC ok), shift, metric, message (54 bits)
 
     python make_tb_vectors.py ../TestVectors/rep3.json --input-stage 1
     python make_tb_vectors.py ../TestVectors/rep3.json --input-stage 0 --max-samples 50000
@@ -280,6 +282,9 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     (out / "exp_tm.txt").write_text("".join(
         f"{r.t_trig:08x} {r.n_end:08x} {r.status:x} {r.n_pos:04x} {r.p_max:09x} {r.p_sum:012x}\n"
         for r in res.timing))
+    (out / "exp_cf.txt").write_text(f"{len(res.control)}\n" + "".join(
+        f"{c.t_trig:08x} {c.n_end:08x} {c.status:x} {c.shift:02x} {c.metric & 0xFFFF:04x} {c.message:014x}\n"
+        for c in res.control))
     u16 = (iq & 0xFFFF)
     np.savetxt(out / "in.txt", u16, fmt="%04x")
     np.savetxt(out / "exp_lpf.txt", lpf & 0xFFF, fmt="%03x")
@@ -295,7 +300,8 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     busy = sum(bool(r.status & pr.TM_BUSY) for r in res.timing)
     print(f"{out}: {iq.shape[0]} samples, input_stage {stage}, {len(trig)} trigger(s) at {shown}, "
           f"{len(cfo_lines)} CFO result(s), {n_fail} failing the tone check, {len(res.timing)} timing "
-          f"record(s) ({good} good, {busy} busy)")
+          f"record(s) ({good} good, {busy} busy), {len(res.control)} control record(s) "
+          f"({sum(c.crc_ok for c in res.control)} CRC ok)")
     return out
 
 

@@ -18,6 +18,7 @@ Verilog-2001, bit-true to `../PC/pd_reference.py`. The checks are in `../SIM`.
 | `pd_sdp_ram.v` | simple dual-port block RAM (the tone check's 8192 × 24 sample buffer), kept as its own hierarchy so it stays block RAM | – |
 | `pd_tone_rom.v` | cosine table 1024 × 16 bit, two read ports (cos and sin = cos − 256); **generated** by `gen_tone_rom.py` from `pd_reference.TONE_COS` | `TONE_COS` |
 | `pd_detect_top.v` | `input_stage` 0: LPF output in; 1: 20 Msps input, front end here; 2: 40 Msps input, half-band + front end here | `detect(..., debug=True)` |
+| `pd_cf.v` | control field after each good timing record: 8192-sample buffer of the DC blocker output, start queue (4), reader with `stall` while a needed sample would be overwritten, `cf_rx` | `cf_reference.control_records` |
 | `pd_axi.v` | board wrapper: AXI-Lite registers (map in the file header), event FIFO (32 events), debug FIFO with TLAST per DMA transfer, loopback mode, input flow control | firmware + `pd_board_emulator.py` |
 
 **Interface.**
@@ -42,3 +43,29 @@ Verilog-2001, bit-true to `../PC/pd_reference.py`. The checks are in `../SIM`.
 **`pd_tone_check` parameter `NU`** (DFT units, default 4) trades DSPs for time: 4 multipliers per unit, ⌈13 / NU⌉ passes of N clocks per check. NU = 1, 3, 4 and 13 all pass bit-true. Real time (no stalls at 20 Msps) needs ⌈13 / NU⌉ < 5, so NU ≥ 3; NU = 3 has no margin, which is why the default is 4.
 
 **Board wrapper (`pd_axi.v`).** Registers at 0x43C00000 (fixed in `../HW/build_hw.tcl`): `ID`, `CTRL` (reset, debug, loopback), `STATUS` (busy, open window, event overflow), `SAMPLES`, `OPEN_T`, `EV_LEVEL`, `EV_DATA`, `DBG_SENT`, then the nine parameters. One event is 8 words. The sample input is held back while the tone check catches up, while the event FIFO is above 160 words, and with debug on while the debug FIFO (64 records) and the records in flight would overflow it; nothing is dropped and results don't change.
+
+## Control-field receiver RTL (`cf_*.v`)
+
+Bit-true to `../PC/cf_reference.py` (spec: `Docs/Specification_ControlField.md`). Checked alone
+by `../SIM/run_cf.sh` and in the detector by `../SIM/run_sim.sh`. `pd_detect_top` gives one
+control record (`cf_valid`, `cf_t`, `cf_n_end`, `cf_crc_ok`, `cf_msg`, `cf_shift`, `cf_metric`)
+per good timing record; `pd_axi` 4.0 puts them in the control FIFO (CF_LEVEL 0x50, CF_DATA 0x54).
+
+| File | Block | Model function |
+| --- | --- | --- |
+| `cf_rx.v` | top: de-rotator (12-bit, phase 0 at `n_end + 1`), FFT windows, unload into the grid RAM (4 × 841 × 36 bit) and the two pilot RAMs (280 × 38 bit, sign of the Ref_P0 pilot applied), then channel estimate → Viterbi → CRC; one record per control field | `receive` |
+| `cf_fft.v` | 1024-point radix-2 DIT FFT, one butterfly per clock, two ping-pong banks (true dual-port block RAM), 18-bit data, 18-bit twiddles (Q17), rounding ÷2 per stage; 5200 clocks per symbol | `fft_fixed` |
+| `cf_tdp_ram.v` | true dual-port block RAM (FFT banks) | – |
+| `cf_chest.v` | drift Σ P3·P0* (46-bit) → CORDIC (`pd_cordic`, `IW` 46) → φ, φ/3; 8-tap FIR per tone for symbols 0 and 3 (8 multipliers, 8 clocks per tone); H3′ = rot(Hf3, −φ); per data tone the time interpolation, rotation by s·φ/3, soft value Re(Y·H*), descrambling, copy combining (140 accumulators, distributed RAM), Viterbi input scaling and de-interleaving | `channel`, `viterbi_input` |
+| `cf_viterbi.v` | K = 7 soft Viterbi, 64 states one per clock, 70 steps, start and end in state 0, ties to the 0 branch; decisions in distributed RAM, traceback | `viterbi` |
+| `cf_crc10.v` | CRC10 (Gen10) over the 64 decoded bits, one bit per clock | `crc10` |
+| `cf_roms.v` | **generated** by `gen_cf_roms.py`: twiddles, FIR map (first pilot + coefficient set per tone) and the 25 coefficient sets, Gold sequence (2200 bits), de-interleaver, pilot signs | `cf_tables.py` |
+
+**Interface** (`cf_rx`; `pd_cf` drives it inside the detector). `start` with `cfo_inc`, `t_trig`, `n_end` (the last two are passed through to the
+record), then exactly 4560 samples on `s_valid` / `s_ready` / `s_i` / `s_q` (12-bit, the DC blocker
+output from `n_end + 1`). `s_ready` drops while an FFT runs and is unloaded (after each symbol's
+window). `rec_valid` pulses with `rec_crc_ok`, `rec_msg` (bit i = message bit i), `rec_shift`
+(Viterbi input scaling) and `rec_metric` (final path metric). About 44 000 clocks (0.44 ms at
+100 MHz) per control field. The `dbg_*` outputs feed the testbench only.
+
+`pd_cordic.v` now has a parameter `IW` (input width, default 37 as before).

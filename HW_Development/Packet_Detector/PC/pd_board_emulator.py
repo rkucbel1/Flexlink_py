@@ -43,6 +43,7 @@ class Board:
         self.history = np.zeros((0, 2), np.int16)      # every sample run since RESET
         self.final = set()                              # t_trig of events already reported complete
         self.tm_done = set()                            # t_trig of timing records already reported
+        self.cf_done = set()                            # t_trig of control records already reported
         self.debug = None                               # DEBUG_DTYPE records of the last RUN
 
     # ---- commands -------------------------------------------------------- #
@@ -96,12 +97,15 @@ class Board:
                 e.cfo_inc += 100
         tm = [r for r in res.timing if r.t_trig not in self.tm_done]
         self.tm_done.update(r.t_trig for r in tm)
+        cf = [r for r in res.control if r.t_trig not in self.cf_done]
+        self.cf_done.update(r.t_trig for r in cf)
         self.debug = None
         if want_dbg:
             self.debug = np.empty(count // div, pr.DEBUG_DTYPE)
             self.debug["metric"], self.debug["bits"] = res.metric[start:], res.bits[start:]
         return (struct.pack("<II", len(out), count) + b"".join(e.pack() for e in out)
-                + struct.pack("<I", len(tm)) + b"".join(r.pack() for r in tm))
+                + struct.pack("<I", len(tm)) + b"".join(r.pack() for r in tm)
+                + struct.pack("<I", len(cf)) + b"".join(r.pack() for r in cf))
 
     def get_debug(self, payload: bytes) -> bytes:
         offset, count = struct.unpack_from("<II", payload)
@@ -113,7 +117,7 @@ class Board:
 
     def handle(self, cmd: int, payload: bytes) -> bytes:
         if cmd == pr.PING:
-            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR | pr.BOARD_TIMING).pack()
+            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR | pr.BOARD_TIMING | pr.BOARD_CF).pack()
         if cmd == pr.RESET:
             self.reset()
             return b""

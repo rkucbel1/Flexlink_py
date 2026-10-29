@@ -16,6 +16,8 @@ Estimators (all are fixed matrices, applied as H = T @ (H_ls @ W.T)):
                                Wiener (or linear) interpolation across time. <- recommended
     ChannelEstimator         : same building blocks with a fixed choice:
                                freq "linear" | "dft" | "lmmse", time "linear" | "wiener".
+    FixedFIRChannelEstimator : the FPGA control-field estimator: fixed 8-tap LMMSE across
+                               frequency, drift-corrected linear interpolation across time.
 
 Equalizers:
     equalize_for_demapper(Y, H, nv) -> (Y/H, nv/|H|^2)   unbiased symbols + per-tone noise
@@ -328,6 +330,73 @@ class AdaptiveChannelEstimator:
         snr = self.snr_grid[np.argmin(np.abs(self.snr_grid + 10 * np.log10(noise_var)))]
         self.last_window = (start, end)
         return self._get(start, end, snr, self.fd_hz).estimate(Y, Xref)
+
+
+# --------------------------------------------------------------------------------------
+# Fixed short FIR (the FPGA control-field estimator)
+# --------------------------------------------------------------------------------------
+def w_lmmse_banded(tones, p_tones, n_fft, delays, noise_var, taps):
+    """LMMSE weights restricted to the `taps` pilots nearest each tone (a banded W): every
+    row is the LMMSE solution for its own short pilot window, uniform power over `delays`.
+    Tones outside the pilot range use the window at the band edge."""
+    W = np.zeros((tones.size, p_tones.size), complex)
+    for i, t in enumerate(tones):
+        near = np.sort(np.argsort(np.abs(p_tones - t), kind="stable")[:taps])
+        p = p_tones[near]
+        Rpp = _uniform_pdp_corr(np.subtract.outer(p, p), n_fft, delays)
+        Rhp = _uniform_pdp_corr(np.subtract.outer(np.array([t]), p), n_fft, delays)
+        W[i, near] = (Rhp @ np.linalg.inv(Rpp + noise_var * np.eye(taps)))[0]
+    return W
+
+
+class FixedFIRChannelEstimator:
+    """The control-field estimator of the FPGA receiver (Docs/Specification_ControlField.md,
+    HW_Development/Packet_Detector/PC/cf_reference.py), in floating point:
+
+      frequency  every tone from its `taps` nearest pilots, fixed LMMSE weights for a flat
+                 delay profile over `delay_window` and a design pilot noise `design_noise`
+                 (the same weights for every packet: no window choice, no noise estimate)
+      time       between two consecutive reference symbols r0 < r1: the common phase drift
+                 phi = angle(sum_pilots Hls(r1) Hls(r0)*) is removed from H(r1), the two are
+                 interpolated linearly and the drift put back:
+                     H(s) = ((r1 - s) H(r0) + (s - r0) H(r1) e^-j phi) / (r1 - r0)
+                            * e^(j phi (s - r0) / (r1 - r0))
+                 symbols before the first / after the last reference symbol use the nearest
+                 pair (extrapolation).
+
+    delay_window is in the frame of the demodulated grid, i.e. after Demodulate_Waveform_Rx
+    removed the FFT_StartTime phase ramp. The FPGA keeps the ramp and uses -8 .. 24 samples
+    with FFT_StartTime -12; that is -20 .. 12 here, the default."""
+
+    def __init__(self, layout: GridLayout, port: int, taps=8, delay_window=(-20, 12),
+                 design_noise=0.5, pilot_power=1.0):
+        self.layout, self.port = layout, port
+        self.ref_syms = layout.ref_symbols
+        cols = layout.pilot_idx(self.ref_syms[0], port)
+        if not all(np.array_equal(cols, layout.pilot_idx(s, port)) for s in self.ref_syms):
+            raise NotImplementedError("staggered pilots: build one W per pilot pattern")
+        self.cols = cols
+        self.delay_window = tuple(delay_window)
+        self.W = w_lmmse_banded(layout.tones.astype(float), layout.tones[cols].astype(float),
+                                layout.n_fft, np.arange(*delay_window), design_noise / pilot_power, taps)
+        self.last_window = self.delay_window
+        self.last_drift = None
+
+    def estimate(self, Y, Xref, noise_var=None):
+        Hls = Y[np.ix_(self.ref_syms, self.cols)] / Xref[np.ix_(self.ref_syms, self.cols)]
+        Hf = Hls @ self.W.T                                   # (n_ref, n_tone)
+        rs = self.ref_syms
+        H = np.zeros((self.layout.n_sym, Hf.shape[1]), complex)
+        drift = []
+        for j in range(rs.size - 1):
+            drift.append(np.angle(np.sum(Hls[j + 1] * np.conj(Hls[j]))))
+        for s in range(self.layout.n_sym):
+            j = int(np.clip(np.searchsorted(rs, s, side="right") - 1, 0, rs.size - 2))
+            r0, r1, phi = rs[j], rs[j + 1], drift[j]
+            a = (s - r0) / (r1 - r0)
+            H[s] = ((1 - a) * Hf[j] + a * Hf[j + 1] * np.exp(-1j * phi)) * np.exp(1j * phi * a)
+        self.last_drift = drift
+        return H
 
 
 def equalize_for_demapper(Y, H, noise_var, mask=None):

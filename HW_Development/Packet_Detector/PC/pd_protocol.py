@@ -34,7 +34,10 @@ Commands (request payload -> reply payload)
                    bit1 = PL loopback)            n_timing x TimingRecord (Preamble B timing,
                                                   input stages 1 and 2; BoardInfo flag
                                                   BOARD_TIMING). Older replies end after the
-                                                  events
+                                                  events. Then (firmware build 11 and later,
+                                                  BoardInfo flag BOARD_CF) u32 n_control and
+                                                  n_control x ControlRecord (control field after
+                                                  each good timing record)
     GET_DEBUG     u32 offset, u32 count     -> count x DebugRecord (from the last RUN with
                                                        capture enabled); after a PL-loopback RUN
                                                        the 4-byte records are the samples as they
@@ -88,6 +91,9 @@ BOARD_EMULATOR = 0x1
 BOARD_NO_DETECTOR = 0x2                # bitstream has no detector yet (phase 1, PL loopback only)
 BOARD_TIMING = 0x4                     # bitstream has the Preamble B timing (ID 3.0, firmware build 10):
 #                                        the RUN reply carries timing records after the events
+BOARD_CF = 0x8                         # bitstream has the control-field receiver (ID 4.0, firmware
+#                                        build 11): the RUN reply carries control records after the
+#                                        timing records
 
 # EventRecord.status bits
 EV_CFO_VALID = 0x1                     # N_CFO samples were available, cfo_inc is valid
@@ -99,6 +105,10 @@ TM_PEAK_OK = 0x1                       # peak / mean >= T_pk (or T_pk = 0)
 TM_LATE = 0x2                          # late trigger: the CFO window ran into Preamble B (abort)
 TM_BUSY = 0x4                          # no search: the previous one was still using the samples
 TM_GOOD = TM_PEAK_OK                   # status == TM_GOOD: timing found, packet continues
+
+# ControlRecord.status bits (Docs/Specification_ControlField.md)
+CF_CRC_OK = 0x1                        # CRC10 over the 64 decoded bits is 0: the message is valid
+CF_MSG_BITS = 54
 
 # DebugRecord.bits
 DBG_ABOVE_HI = 0x01
@@ -242,6 +252,51 @@ class TimingRecord:
     @property
     def payload_start(self) -> int:
         return self.n_end + 1
+
+
+@dataclass
+class ControlRecord:
+    """Control field, one per good timing record (status == TM_GOOD), in the same order."""
+    t_trig: int                        # the event's t_trig
+    n_end: int                         # the timing record's n_end (control field from n_end + 1)
+    status: int                        # CF_* bits
+    shift: int                         # Viterbi input scaling (soft values >> shift)
+    metric: int                        # final Viterbi path metric (signed)
+    message: int                       # the 54 decoded message bits, bit i = message bit i
+
+    FMT = struct.Struct("<IIIhhQ")     # 24 bytes
+
+    def pack(self) -> bytes:
+        return self.FMT.pack(*astuple(self))
+
+    @classmethod
+    def unpack_many(cls, b: bytes, n: int) -> list["ControlRecord"]:
+        s = cls.FMT.size
+        return [cls(*cls.FMT.unpack(b[i * s:(i + 1) * s])) for i in range(n)]
+
+    @property
+    def crc_ok(self) -> bool:
+        return bool(self.status & CF_CRC_OK)
+
+    def bits(self) -> list[int]:
+        return [(self.message >> i) & 1 for i in range(CF_MSG_BITS)]
+
+
+def parse_run_reply(reply: bytes) -> tuple[list[EventRecord], int, list[TimingRecord], list[ControlRecord]]:
+    """RUN reply -> (events, samples processed, timing records, control records). Replies of
+    older firmware end after the events (build <= 9) or after the timing records (build 10)."""
+    n_ev, done = struct.unpack_from("<II", reply)
+    evs = EventRecord.unpack_many(reply[8:], n_ev)
+    off = 8 + EventRecord.FMT.size * n_ev
+    tms, cfs = [], []
+    if len(reply) >= off + 4:
+        (n_tm,) = struct.unpack_from("<I", reply, off)
+        tms = TimingRecord.unpack_many(reply[off + 4:], n_tm)
+        off += 4 + TimingRecord.FMT.size * n_tm
+        if len(reply) >= off + 4:
+            (n_cf,) = struct.unpack_from("<I", reply, off)
+            cfs = ControlRecord.unpack_many(reply[off + 4:], n_cf)
+    return evs, done, tms, cfs
 
 
 DEBUG_DTYPE = np.dtype([("metric", "<u2"), ("bits", "<u2")])   # 4 bytes per sample

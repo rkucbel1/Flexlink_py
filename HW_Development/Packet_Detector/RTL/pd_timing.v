@@ -64,6 +64,7 @@ module pd_timing #(
     output reg  [15:0]        tm_n_pos,
     output reg  [33:0]        tm_p_max,
     output reg  [47:0]        tm_p_sum,
+    output reg  [23:0]        tm_inc,      // the event's cfo_inc (0 with BUSY), for the control field
     output wire               busy,        // work in progress that does not wait for samples
     output reg                err          // start queue overflow (sticky; cannot happen)
 );
@@ -94,6 +95,7 @@ module pd_timing #(
     end
 
     // ------------------------------------------------------------------ triggers waiting for their event
+    // (stored as their first sample n0 = t + N - 40, so the stall check is one subtraction)
     reg  [31:0] pt [0:3];
     reg  [1:0]  pt_wr, pt_rd;
     reg  [2:0]  pt_n;
@@ -103,7 +105,7 @@ module pd_timing #(
         if (!rst_n) begin
             pt_wr <= 2'd0; pt_rd <= 2'd0; pt_n <= 3'd0;
         end else begin
-            if (pt_push) begin pt[pt_wr] <= t_trig; pt_wr <= pt_wr + 2'd1; end
+            if (pt_push) begin pt[pt_wr] <= t_trig + {16'd0, n_cfo} - 32'd40; pt_wr <= pt_wr + 2'd1; end
             if (pt_pop) pt_rd <= pt_rd + 2'd1;
             pt_n <= pt_n + {2'd0, pt_push} - {2'd0, pt_pop};
         end
@@ -119,6 +121,7 @@ module pd_timing #(
     // start queue: t, cfo_inc
     reg  [31:0] sq_t [0:3];
     reg  [23:0] sq_inc [0:3];
+    reg  [31:0] sq_n0 [0:3];                // ev_t + N - 40 (for the stall check)
     reg  [1:0]  sq_wr, sq_rd;
     reg  [2:0]  sq_n;
     wire        sq_push = e_ok && !e_busy;
@@ -133,7 +136,8 @@ module pd_timing #(
         end else begin
             if (sq_push) begin
                 last_v <= 1'b1; last_hi <= e_hi;
-                sq_t[sq_wr] <= ev_t; sq_inc[sq_wr] <= ev_cfo_inc[23:0]; sq_wr <= sq_wr + 2'd1;
+                sq_t[sq_wr] <= ev_t; sq_inc[sq_wr] <= ev_cfo_inc[23:0]; sq_n0[sq_wr] <= e_n0;
+                sq_wr <= sq_wr + 2'd1;
                 if (sq_n == 3'd4 && !sq_pop) err <= 1'b1;
             end
             if (sq_pop) sq_rd <= sq_rd + 2'd1;
@@ -153,8 +157,8 @@ module pd_timing #(
     wire        active = (st == S_FILL) || (st == S_CORR);
 
     // stall: a sample still needed would be overwritten
-    wire [31:0] age_pt = wp - (pt[pt_rd] + {16'd0, n_cfo} - 32'd40);
-    wire [31:0] age_sq = wp - (sq_t[sq_rd] + {16'd0, n_cfo} - 32'd40);
+    wire [31:0] age_pt = wp - pt[pt_rd];
+    wire [31:0] age_sq = wp - sq_n0[sq_rd];
     wire [31:0] age_rp = wp - rp;
     always @(posedge clk) begin
         if (!rst_n || !en) stall <= 1'b0;
@@ -368,6 +372,7 @@ module pd_timing #(
                         tm_n_pos  <= s_npos;
                         tm_p_max  <= p_max;
                         tm_p_sum  <= p_sum;
+                        tm_inc    <= s_inc;
                         st <= S_IDLE;
                     end
                 end
@@ -381,6 +386,7 @@ module pd_timing #(
                 tm_n_pos  <= 16'd0;
                 tm_p_max  <= 34'd0;
                 tm_p_sum  <= 48'd0;
+                tm_inc    <= 24'd0;
                 bz_v      <= 1'b0;
             end
         end

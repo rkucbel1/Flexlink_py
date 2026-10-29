@@ -8,7 +8,9 @@ and the same command sequence run through pd_board_emulator's Board in this proc
 bit-true model with the board's RUN semantics). Every RUN reply must match: the events
 (t_trig, status, cfo_inc, cfo_valid_cnt, angles exact; ToneCheck within --tone-tol, the abort
 decision exact), the Preamble B timing records (every field exact; firmware build 10 and
-bitstream 3.0, input stages 1 and 2) and, for cases with debug, every debug record.
+bitstream 3.0, input stages 1 and 2), the control records (every field exact; firmware build
+11 and bitstream 4.0; column "control" = records / CRC ok) and, for cases with debug, every
+debug record.
 
 Cases (the RTL simulation's coverage, on the board):
   rep3 / defects     real packets from TestVectors/, all three input stages (s2 = 40 Msps,
@@ -171,27 +173,26 @@ def session(target, iq: np.ndarray, p: pr.Params, sizes: list[int], debug: bool,
         else:
             target.call(pr.LOAD_SAMPLES, struct.pack("<I", 0) + pr.iq_to_bytes(blk))
         reply = target.call(pr.RUN, struct.pack("<II", n, pr.RUN_FLAG_DEBUG if debug else 0))
-        n_ev, done = struct.unpack_from("<II", reply)
-        evs = pr.EventRecord.unpack_many(reply[8:], n_ev)
-        off = 8 + pr.EventRecord.FMT.size * n_ev
-        tms = []
-        if len(reply) >= off + 4:
-            (n_tm,) = struct.unpack_from("<I", reply, off)
-            tms = sorted(pr.TimingRecord.unpack_many(reply[off + 4:], n_tm), key=lambda r: r.t_trig)
+        evs, done, tms, cfs = pr.parse_run_reply(reply)
+        tms = sorted(tms, key=lambda r: r.t_trig)
         dbg = None
         if debug:
             if board:
                 dbg = target.get_debug(done // (2 if p.input_stage == 2 else 1))
             else:
                 dbg = target.b.debug.copy()       # the whole capture (GET_DEBUG is limited to 1 MB)
-        out.append((evs, done, dbg, tms))
+        out.append((evs, done, dbg, tms, cfs))
         i += n
     return out
 
 
-def compare(got, exp, tone_tol_q8: int, timing: bool) -> list[str]:
+def compare(got, exp, tone_tol_q8: int, timing: bool, control: bool = False) -> list[str]:
     errs = []
-    for k, ((ge, gd, gdbg, gt), (ee, ed, edbg, et)) in enumerate(zip(got, exp)):
+    for k, ((ge, gd, gdbg, gt, gc), (ee, ed, edbg, et, ec)) in enumerate(zip(got, exp)):
+        if control and gc != ec:
+            bad = [(g, e) for g, e in zip(gc, ec) if g != e]
+            errs.append(f"RUN {k}: control records differ ({len(gc)} board, {len(ec)} model)"
+                        + (f", first: board {astuple(bad[0][0])} model {astuple(bad[0][1])}" if bad else ""))
         if timing and gt != et:
             bad = [(g, e) for g, e in zip(gt, et) if g != e]
             errs.append(f"RUN {k}: timing records differ ({len(gt)} board, {len(et)} model)"
@@ -247,12 +248,16 @@ def main(argv=None) -> int:
         return 2
     tol = int(round(a.tone_tol * 256))
     timing = bool(info.flags & pr.BOARD_TIMING)
+    control = bool(info.flags & pr.BOARD_CF)
+    if timing and not control:
+        print("Note: no control-field receiver on this board (bitstream before 4.0 or firmware before "
+              "build 11): control records not compared\n")
     if not timing:
         print("Note: no Preamble B timing on this board (bitstream before 3.0 or firmware before build 10): "
               "timing records not compared\n")
     report, n_fail = [], 0
     print(f"{'case':22s} {'samples':>9s} {'RUNs':>4s} {'events':>6s} {'fail':>4s} {'trunc':>5s} {'timing':>11s} "
-          f"{'debug':>9s} {'board s':>7s}  result")
+          f"{'control':>8s} {'debug':>9s} {'board s':>7s}  result")
     for name, desc, build, plan, debug in todo:
         try:
             iq, p = build()
@@ -270,7 +275,7 @@ def main(argv=None) -> int:
             print(f"{name:22s} communication error: {exc}")
             return 2
         exp = session(EmuTarget(), iq, p, sizes, debug, False)
-        errs = compare(got, exp, tol, timing)
+        errs = compare(got, exp, tol, timing, control)
         evs = [e for r in got for e in r[0]]
         n_tf = sum(1 for e in evs if e.status & pr.EV_TONE_FAIL)
         n_tr = sum(1 for e in evs if e.status & pr.EV_TRUNCATED)
@@ -278,14 +283,18 @@ def main(argv=None) -> int:
         tms = [t for r in (got if timing else exp) for t in r[3]]
         n_good = sum(t.status == pr.TM_GOOD for t in tms)
         tm_col = f"{len(tms)}/{n_good}" if p.input_stage in (1, 2) else "-"
+        cfs = [c for r in (got if control else exp) for c in r[4]]
+        n_crc = sum(c.crc_ok for c in cfs)
+        cf_col = f"{len(cfs)}/{n_crc}" if p.input_stage in (1, 2) else "-"
         ok = not errs
         n_fail += not ok
-        print(f"{name:22s} {n:9d} {len(sizes):4d} {len(evs):6d} {n_tf:4d} {n_tr:5d} {tm_col:>11s} "
+        print(f"{name:22s} {n:9d} {len(sizes):4d} {len(evs):6d} {n_tf:4d} {n_tr:5d} {tm_col:>11s} {cf_col:>8s} "
               f"{(str(n_dbg) if debug else '-'):>9s} {t_board:7.1f}  {'PASS' if ok else 'FAIL'}")
         for e in errs[:5]:
             print(f"    {e}")
         rec = {"case": name, "description": desc, "samples": n, "runs": len(sizes), "events": len(evs),
                "tone_fail": n_tf, "truncated": n_tr, "timing_records": len(tms), "timing_good": n_good,
+               "control_records": len(cfs), "control_crc_ok": n_crc,
                "debug_records": n_dbg, "board_s": round(t_board, 2),
                "result": "PASS" if ok else "FAIL", "errors": errs[:20], "params": p.as_dict()}
         report.append(rec)

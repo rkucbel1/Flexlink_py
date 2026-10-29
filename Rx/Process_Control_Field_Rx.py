@@ -19,8 +19,14 @@ For every antenna (the packet files Packet_Detector.py wrote, --inputs):
   1. Take the first PacketLength (4) OFDM symbols and demodulate them with
      demodulate_waveform() from Demodulate_Waveform_Rx.py (FFT_StartTime from Defined_Rx).
   2. Equalize them with their own two reference symbols, using equalize_payload_grid()
-     from Equalize_Payload_Grid.py (Defined_Rx EqualizerMode and EqualizerMaxDoppler,
-     ReferenceSignals/Ref_P0_3_1.h5).
+     from Equalize_Payload_Grid.py (ReferenceSignals/Ref_P0_3_1.h5) with
+     Defined_Rx/ControlFieldEqualizerMode (or --cf-mode):
+       FIR8 (default)  the FPGA receiver's estimator: fixed 8-tap LMMSE across frequency,
+                       drift-corrected linear interpolation across time, so the simulator
+                       and the board decode the control field the same way
+       EqualizerMode   use the payload's Defined_Rx/EqualizerMode (or --mode) and
+                       EqualizerMaxDoppler, as before
+       any EqualizerMode value (LMMSE, LMMSE_LinearTime, PCA, Linear, None)
   3. Soft BPSK values of the 2200 Data signals: LLR = 4 Re(x) / noise_var
      (positive = bit 1, the mapping Construct_ControlSigs_QAM.py uses).
 Then, once:
@@ -49,6 +55,7 @@ Usage
                                                    Rx/Decimated_Payload_Packet_Rx_Ray2.h5
     python Rx/Process_Control_Field_Rx.py --no-update   # decode and compare only; nothing written
                                                         # to the JSON or the packet files
+    python Rx/Process_Control_Field_Rx.py --cf-mode LMMSE   # the simulator's adaptive LMMSE instead
 
 Exit status: 0 control field decoded (Defined_Rx unchanged or updated), 1 an error,
 4 bad packet (control field CRC failed or a field has no valid value).
@@ -56,7 +63,7 @@ Exit status: 0 control field decoded (Defined_Rx unchanged or updated), 1 an err
 The output .h5 file contains:
     ControlMessage  (54,)    uint8    decoded message bits
     LLR             (2200,)  float64  combined soft values before descrambling
-    attrs           CRC (PASS/FAIL), Rays, SNR_dB_Ray<N>, every field's code
+    attrs           CRC (PASS/FAIL), Rays, EqualizerMode, SNR_dB_Ray<N>, every field's code
                     (<field>) and Rx value (Value_<field>), DefinedRxChanged (names),
                     InitializeRx (0/1)
 """
@@ -100,6 +107,8 @@ OUTPUT_KEY = ("ControlField_Rx", "ControlField_Rx.h5")
 FS = 20e6
 SYMBOL_LENGTH = 1024 + 116                  # 20 MHz OFDM symbol (IFFT + CP)
 EXIT_BAD_PACKET = 4
+DEFAULT_CF_MODE = "FIR8"                    # Defined_Rx/ControlFieldEqualizerMode default
+CF_MODE_FROM_PAYLOAD = "EqualizerMode"      # value meaning: use the payload's EqualizerMode
 
 # ControlField -> Defined_Rx key it sets. Fields not listed (Tx_Ref_Clk_Cnt, Reserved,
 # NDB_A) are not compared; NDB_A is checked against Calculated_Rx/AvailableDataBlocks.
@@ -293,7 +302,11 @@ def run(a: argparse.Namespace) -> int:
     icf = load_module("Initialize_Control_Field", CONSTRUCT_CONTROL_FIELD / "Initialize_Control_Field.py")
 
     start_time = int(defined.get("FFT_StartTime", 0))
-    mode = eq_mod.check_mode(a.mode or defined.get("EqualizerMode") or eq_mod.DEFAULT_MODE)
+    cf_mode = str(a.cf_mode or defined.get("ControlFieldEqualizerMode") or DEFAULT_CF_MODE).strip()
+    if cf_mode.lower() == CF_MODE_FROM_PAYLOAD.lower():
+        mode = eq_mod.check_mode(a.mode or defined.get("EqualizerMode") or eq_mod.DEFAULT_MODE)
+    else:
+        mode = eq_mod.check_mode(cf_mode)
     max_doppler = float(a.max_doppler or defined.get("EqualizerMaxDoppler") or eq_mod.DEFAULT_MAX_DOPPLER)
 
     inputs = a.inputs or [RX_DIR / ray_file_name(file_name(params, PACKET_KEY), 1)]
@@ -320,6 +333,7 @@ def run(a: argparse.Namespace) -> int:
     rays = [p[3] for p in packets]
     out_path = a.out or RX_DIR / file_name(params, OUTPUT_KEY)
     out_attrs: dict[str, Any] = {"CRC": "PASS" if crc_ok else "FAIL", "Rays": np.array(rays),
+                                 "EqualizerMode": mode,
                                  **{f"SNR_dB_Ray{r}": v for r, v in snr.items()}}
 
     def save() -> None:
@@ -407,7 +421,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--inputs", type=Path, nargs="+",
                     help="packet files from Packet_Detector.py, one per antenna (default: ray 1)")
     ap.add_argument("--out", type=Path, help="output .h5 (default: Rx/<File_Rx.ControlField_Rx>)")
-    ap.add_argument("--mode", help="override Defined_Rx/EqualizerMode")
+    ap.add_argument("--cf-mode", help="override Defined_Rx/ControlFieldEqualizerMode (default FIR8; "
+                                      "'EqualizerMode' = the payload's mode)")
+    ap.add_argument("--mode", help="override Defined_Rx/EqualizerMode (used only with "
+                                   "ControlFieldEqualizerMode EqualizerMode)")
     ap.add_argument("--max-doppler", type=float, help="override Defined_Rx/EqualizerMaxDoppler (Hz)")
     ap.add_argument("--no-update", action="store_true",
                     help="decode and compare only: write neither the JSON nor the packet files")

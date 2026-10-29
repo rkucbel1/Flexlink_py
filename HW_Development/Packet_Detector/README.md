@@ -191,6 +191,36 @@ python pd_board_regression.py          # 33 cases, timing records included
 python pd_bittrue_check.py --only timing   # the float vs bit-true timing study (about 15 minutes)
 ```
 
+Step 9: **control field in the PL** (`RTL/pd_cf.v` + `RTL/cf_*.v`,
+`Docs/Specification_ControlField.md`, `BITTRUE.md` change 10). After every good timing record
+the receiver decodes the 4 control-field symbols from `n_end + 1`: de-rotation with the event's
+`cfo_inc`, its own 1024-point FFT, a fixed 8-tap channel filter with drift correction, soft
+values, descrambling, 15-copy combining, Viterbi and CRC10, about 0.45 ms per packet. It reads
+its samples from its own 8192-sample buffer of the DC blocker output, so it can start after the
+timing search; at 20 Msps the input is never held back. Each good timing record gives a
+control record: CRC result, the 54 message bits, Viterbi metric and input scaling. Bit-true:
+the same packets decode as with the float chain (AWGN −14 / −13 dB, ETU, EVA); the simulator
+has the same estimator (`ControlFieldEqualizerMode` FIR8, its default). The receiver alone
+(`SIM/run_cf.sh`): 13 cases, every FFT output, filter output and soft value exact, 24 of 25
+injected faults caught (the 25th is equivalent); out of context 100 MHz met, WNS +0.977 ns, 3125
+LUT, 37 DSP, 15 BRAM tiles. In the detector (`./run_sim.sh`): rep3 matches record for record at
+one sample per clock and at exactly 20 Msps (0 stalls); faults in the start sample, the stall
+limit, the record filter, `busy` and the `cfo_inc` hand-over are caught. Co-simulation
+(firmware build 11 + Verilated `pd_axi`): `pd_hw_test.py` and 11 regression cases pass.
+Bitstream ID 4.0 (control FIFO at 0x50 / 0x54, STATUS bits 13 / 14), firmware build 11 (RUN
+replies carry the control records after the timing records, PING sets `BOARD_CF`).
+`pd_hw_test.py` prints the decoded fields (`PC/cf_fields.py`, with the simulator's parser) and
+compares the message with the Tx one; older boards still work, without control records.
+
+```bash
+cd HW && vivado -mode batch -source synth_detect.tcl && cd ..   # timing / resources first
+cd HW && vivado -mode batch -source build_hw.tcl && cd ..
+cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
+cd PC
+python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1
+python pd_board_regression.py          # 33 cases, timing and control records included
+```
+
 **Board regression** (`PC/pd_board_regression.py`): the RTL simulation's coverage on the board.
 Each case runs on the board and, with the same commands, through `pd_board_emulator`'s logic
 in-process; every RUN reply and every debug record must match. Cases: rep3 and the defects

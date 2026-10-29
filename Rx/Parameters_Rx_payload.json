@@ -32,6 +32,8 @@
     "EqualizerMode_comment": "LMMSE, LMMSE_LinearTime, PCA, Linear, None",
     "EqualizerMaxDoppler": 700,
     "EqualizerMaxDoppler_comment": "Hz, worst-case Doppler for the LMMSE and PCA time filter",
+    "ControlFieldEqualizerMode": "FIR8",
+    "ControlFieldEqualizerMode_comment": "FIR8, EqualizerMode, LMMSE, LMMSE_LinearTime, PCA, Linear. Channel estimator for the control field (Process_Control_Field_Rx.py). FIR8 (default) = the FPGA receiver's fixed 8-tap LMMSE with drift-corrected linear time interpolation, so the simulator decodes the control field as the board does; EqualizerMode = use the payload's EqualizerMode",
     "Demapping": "soft",
     "Demapping_comment": "soft, hard",
     "Use_Preamble": 1,

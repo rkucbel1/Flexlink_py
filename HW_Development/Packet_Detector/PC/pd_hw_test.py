@@ -18,6 +18,9 @@ compare (loopback), RUN (all at once or in --chunk pieces, state carries over), 
 GET_DEBUG, then compare with the bit-true model's expected events:
     t_trig, status, cfo_inc, lag angles     exact (--cfo-tol / --angle-tol to relax)
     Preamble B timing (input stage 1, 2)    every field exact (bitstream 3.0, firmware build 10)
+    control field (input stage 1, 2)        every field exact (bitstream 4.0, firmware build 11);
+                                            the decoded fields are printed (cf_fields.py) and
+                                            checked against the Tx message when it is available
     ToneCheck dB                            within --tone-tol (0.01 dB): the decision is exact
                                             integer; the dB value is the firmware's log10
     debug records (--debug)                 every dbg_metric and flag word, exact
@@ -82,16 +85,12 @@ class Board:
         return np.concatenate(out) if out else np.zeros((0, 2), np.int16)
 
     def run(self, count: int, debug: bool, flags: int = 0) -> tuple[list[pr.EventRecord], int]:
-        """Events of this RUN; its timing records (firmware build 10) are left in self.timing."""
+        """Events of this RUN; its timing records (firmware build 10) are left in self.timing and
+        its control records (build 11) in self.control."""
         flags |= pr.RUN_FLAG_DEBUG if debug else 0
         reply = self.call(pr.RUN, struct.pack("<II", count, flags))
-        n_ev, done = struct.unpack_from("<II", reply)
-        off = 8 + pr.EventRecord.FMT.size * n_ev
-        self.timing = []
-        if len(reply) >= off + 4:
-            (n_tm,) = struct.unpack_from("<I", reply, off)
-            self.timing = pr.TimingRecord.unpack_many(reply[off + 4:], n_tm)
-        return pr.EventRecord.unpack_many(reply[8:], n_ev), done
+        evs, done, self.timing, self.control = pr.parse_run_reply(reply)
+        return evs, done
 
     def get_debug(self, count: int) -> np.ndarray:
         out, step = [], pr.MAX_PAYLOAD // pr.DEBUG_DTYPE.itemsize
@@ -168,6 +167,34 @@ def compare_timing(got: list[pr.TimingRecord], exp: list[pr.TimingRecord]) -> tu
     for t, e in by_t.items():
         ok = False
         lines.append(f"  MISSING  timing t_trig {t}: {describe_timing(e)}")
+    return ok, lines
+
+
+def describe_control(r: pr.ControlRecord) -> str:
+    return (f"n_end {r.n_end:8d}, CRC {'ok  ' if r.crc_ok else 'FAIL'}, message 0x{r.message:014x}, "
+            f"metric {r.metric}, shift {r.shift}")
+
+
+def compare_control(got: list[pr.ControlRecord], exp: list[pr.ControlRecord]) -> tuple[bool, list[str]]:
+    """Every field exact; records matched by t_trig."""
+    lines, ok = [], True
+    if len(got) != len(exp):
+        ok = False
+        lines.append(f"  control record count: board {len(got)}, expected {len(exp)}")
+    by_t = {r.t_trig: r for r in exp}
+    for g in got:
+        e = by_t.pop(g.t_trig, None)
+        if e is None:
+            ok = False
+            lines.append(f"  EXTRA    control t_trig {g.t_trig}: {describe_control(g)}")
+            continue
+        same = g == e
+        ok &= same
+        lines.append(f"  {'ok      ' if same else 'MISMATCH'} control t_trig {g.t_trig:8d}: {describe_control(g)}"
+                     + ("" if same else f"   [expected {describe_control(e)}]"))
+    for t, e in by_t.items():
+        ok = False
+        lines.append(f"  MISSING  control t_trig {t}: {describe_control(e)}")
     return ok, lines
 
 
@@ -299,7 +326,9 @@ def main(argv=None) -> int:
         result = {"vector": a.vector.stem, "target": kind, "host": a.host, "chunk": chunk}
         events: dict[int, pr.EventRecord] = {}
         timing: dict[int, pr.TimingRecord] = {}
+        control: dict[int, pr.ControlRecord] = {}
         has_timing = bool(info.flags & pr.BOARD_TIMING) and a.input_stage in (1, 2)
+        has_cf = bool(info.flags & pr.BOARD_CF) and a.input_stage in (1, 2)
         dbg_parts = []
         t_load = t_run = 0.0
         loop_ok = pl_ok = True
@@ -336,6 +365,8 @@ def main(argv=None) -> int:
                 events[e.t_trig] = e
             for r in b.timing:
                 timing[r.t_trig] = r
+            for r in b.control:
+                control[r.t_trig] = r
             if a.debug:
                 dbg_parts.append(b.get_debug(done // div))
         mb = iq.nbytes / 1e6
@@ -360,13 +391,21 @@ def main(argv=None) -> int:
     ok, lines = compare(got, expected, a)
     ok &= loop_ok
     tm_got = sorted(timing.values(), key=lambda r: r.t_trig)
+    cf_got = sorted(control.values(), key=lambda r: r.t_trig)
     tm_exp: list[pr.TimingRecord] = []
     if has_timing:
         import pd_reference as ref
-        tm_exp = ref.detect(iq, params).timing
+        res = ref.detect(iq, params, control=has_cf)
+        tm_exp = res.timing
         tok, tlines = compare_timing(tm_got, tm_exp)
         ok &= tok
         lines += tlines
+        if has_cf:
+            cok, clines = compare_control(cf_got, res.control)
+            ok &= cok
+            lines += clines
+        else:
+            lines.append("  (no control-field receiver: the board's bitstream or firmware predates it)")
     elif a.input_stage in (1, 2):
         lines.append("  (no Preamble B timing: the board's bitstream or firmware predates it)")
     if a.debug and dbg_parts:
@@ -387,9 +426,19 @@ def main(argv=None) -> int:
         if r.status == pr.TM_GOOD:
             print(f"  timing for t_trig {r.t_trig}: Preamble B ends at sample {r.n_end}, payload from "
                   f"{r.payload_start} (peak/mean {r.peak_to_mean:.1f})")
+    if cf_got:
+        import cf_fields
+        tx = cf_fields.tx_message()
+        for r in cf_got:
+            print(f"  control field for t_trig {r.t_trig}: CRC {'ok' if r.crc_ok else 'FAIL'}"
+                  + (f", {cf_fields.describe(r.message)}" if r.crc_ok else ""))
+            if r.crc_ok and tx is not None:
+                print(f"    {'same as' if r.message == tx else 'DIFFERENT from'} the Tx message "
+                      "(Tx/ControlSignals/Bitstream_ControlBlks_Tx.h5)")
     print("PASS" if ok else "FAIL")
 
     result.update({"pass": ok, "events": [vars(e) for e in got], "timing": [vars(r) for r in tm_got],
+                   "control": [vars(r) for r in cf_got],
                    "report": lines})
     a.vector.with_name(a.vector.stem + "_result.json").write_text(json.dumps(result, indent=2))
     if a.plot and dbg_parts:

@@ -12,12 +12,14 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
-module pd_cordic (
+module pd_cordic #(
+    parameter integer IW = 37               // input width (46 for the control-field drift)
+) (
     input  wire               clk,
     input  wire               rst_n,
     input  wire               start,
-    input  wire signed [36:0] re,
-    input  wire signed [36:0] im,
+    input  wire signed [IW-1:0] re,
+    input  wire signed [IW-1:0] im,
     output wire               busy,
     output reg                done,
     output reg  signed [15:0] angle
@@ -50,26 +52,26 @@ module pd_cordic (
     endfunction
 
     function [5:0] bitlen37;
-        input [36:0] m;
+        input [IW-1:0] m;
         integer b;
         begin
             bitlen37 = 6'd0;
-            for (b = 0; b < 37; b = b + 1) if (m[b]) bitlen37 = b[5:0] + 6'd1;
+            for (b = 0; b < IW; b = b + 1) if (m[b]) bitlen37 = b[5:0] + 6'd1;
         end
     endfunction
 
     // ---- normalisation, over three clocks
-    reg  signed [36:0] r_re, r_im;              // inputs captured at start
-    reg  [36:0]        a_re, a_im;              // S_ABS:  magnitudes
+    reg  signed [IW-1:0] r_re, r_im;            // inputs captured at start
+    reg  [IW-1:0]        a_re, a_im;            // S_ABS:  magnitudes
     reg  [5:0]         bl;                      // S_LEN:  bit length of the larger one
-    wire [36:0] m    = (a_re > a_im) ? a_re : a_im;
+    wire [IW-1:0] m  = (a_re > a_im) ? a_re : a_im;
     wire        rsh  = (bl > 6'd22);
     wire [5:0]  sr   = bl - 6'd22;              // right shift when rsh
     wire [5:0]  sl   = 6'd22 - bl;              // left shift otherwise
-    wire signed [36:0] re_r = r_re >>> sr;
-    wire signed [36:0] im_r = r_im >>> sr;
-    wire signed [36:0] re_l = r_re <<< sl;
-    wire signed [36:0] im_l = r_im <<< sl;
+    wire signed [IW-1:0] re_r = r_re >>> sr;
+    wire signed [IW-1:0] im_r = r_im >>> sr;
+    wire signed [IW-1:0] re_l = r_re <<< sl;
+    wire signed [IW-1:0] im_l = r_im <<< sl;
     wire signed [24:0] xn   = rsh ? re_r[24:0] : re_l[24:0];
     wire signed [24:0] yn   = rsh ? im_r[24:0] : im_l[24:0];
 
@@ -95,8 +97,8 @@ module pd_cordic (
                         state <= S_ABS;
                     end
                 S_ABS: begin
-                    a_re  <= r_re[36] ? -r_re : r_re;
-                    a_im  <= r_im[36] ? -r_im : r_im;
+                    a_re  <= r_re[IW-1] ? -r_re : r_re;
+                    a_im  <= r_im[IW-1] ? -r_im : r_im;
                     state <= S_LEN;
                 end
                 S_LEN: begin

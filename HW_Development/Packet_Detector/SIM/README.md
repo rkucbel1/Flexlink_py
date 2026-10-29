@@ -7,6 +7,7 @@
 - **every** CFO result: window start, the four lag accumulators, the four CORDIC angles and `cfo_inc`;
 - **every** event after the tone check: its CFO fields, tone `num` and `den`, and the abort flag;
 - **every** Preamble B timing record (input stages 1 and 2): `n_end`, status (peak check, late trigger, busy), `n_pos`, `p_max`, `p_sum`. Records are matched by `t_trig`, because a BUSY record can come out before the result of an earlier search.
+- **every** control record (input stages 1 and 2): CRC result, message, metric, Viterbi scaling, in order. `MAX=213860 ./run_sim.sh` ends the input just after the last control field, so the decoding finishes after the input (checks `busy`).
 
 It obeys `tready`: with fast input the tone check holds the input back, and so does a running timing search (one sample per 5 clocks); the log says for how many clocks. At exactly 5 clocks per sample (`FIXGAP=1 GAP=4`) nothing stalls. Inputs change on the falling clock edge, so the testbench never races the DUT.
 
@@ -52,6 +53,25 @@ The **cfo** vector is 40 real packets from `Tx/Waveform_Payload_Tx.h5`, each wit
 At the end the testbench waits until `busy` is low, then checks the window still open (the model's truncated event, if any). Every window that ends inside the vector gives a CFO result and an event.
 
 Typical xsim run time is about 1 minute for rep3 (300k samples). Use `MAX=20000` for a quick check.
+
+## Control-field receiver (`run_cf.sh`)
+
+`tb_cf_rx.v` runs `RTL/cf_rx.v` on the cases from `make_cf_vectors.py` and compares **every**
+FFT output (4 × 841 grid values), **every** channel-filter output (Hf0, H3′ for 841 tones),
+**every** soft value after descrambling (2200), the drift angle φ, the Viterbi scaling, the 70
+decoded bits, the path metric and the CRC result with `PC/cf_reference.py`. The samples come with
+random gaps. Cases: the three rep3 packets, the same with added noise (CRC passes and fails),
+×8 clipped (saturation), all zero (only Viterbi ties), random full scale, a full-scale tone on one
+bin, and cfo_inc = half the sample rate. `tb_cf_viterbi.v` runs `cf_viterbi` + `cf_crc10` alone
+on 400 cases (random, tiny values = ties, noisy valid code words, zeros).
+
+```bash
+./run_cf.sh                    # vectors + all cases (xsim if Vivado is sourced, else Verilator)
+GAP=0 ./run_cf.sh              # one sample per clock
+SIM=verilator NOVEC=1 ./run_cf.sh
+```
+
+Ends with one `PASS` line per case; the exit status is 0 only if all pass. Log: `cf_sim.log`.
 
 ## Firmware + RTL co-simulation (`cosim/`)
 

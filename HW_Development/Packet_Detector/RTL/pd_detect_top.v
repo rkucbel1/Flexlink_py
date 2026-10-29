@@ -3,7 +3,8 @@
 // Packet detector (spec 4.1-4.3, 4.6): optional front end (DC blocker + LPF), detection core
 // (t_trig, debug stream), CFO lane (lag accumulators, CORDIC, cascade -> cfo_inc),
 // tone-structure check (13 DFT bins -> num, den, fail) and Preamble B timing (spec 4.5, 1-bit
-// tap correlator on the DC blocker output -> n_end; input_stage 1 and 2 only). Bit-true to
+// tap correlator on the DC blocker output -> n_end; input_stage 1 and 2 only) and the control
+// field after each good timing record (pd_cf -> cf_rx: CRC, 54 message bits). Bit-true to
 // pd_reference.detect (debug=True).
 //
 //   input_stage 0: s_iq is the LPF output, the front end is bypassed
@@ -80,14 +81,24 @@ module pd_detect_top (
     output wire [33:0] tm_p_max,
     output wire [47:0] tm_p_sum,
     output wire        tm_err,
+    // control field, one record per good timing record (cf_rx, about 0.45 ms after it)
+    output wire        cf_valid,
+    output wire [31:0] cf_t,
+    output wire [31:0] cf_n_end,
+    output wire        cf_crc_ok,
+    output wire [53:0] cf_msg,
+    output wire [5:0]  cf_shift,
+    output wire [15:0] cf_metric,
+    output wire        cf_err,
     // state: busy = something still in flight; open_n / open_t = windows still waiting for
     // samples (at most 1 once busy is 0) and the first one's t_trig
     output wire        busy,
     output wire [3:0]  open_n,
     output wire [31:0] open_t
 );
-    wire stall_tone, stall_tm, lane_busy, tone_busy, tm_busy;
-    wire stall = stall_tone || stall_tm;
+    wire stall_tone, stall_tm, stall_cf, lane_busy, tone_busy, tm_busy, cf_busy;
+    wire stall = stall_tone || stall_tm || stall_cf;
+    wire [23:0] tm_inc;
     assign s_iq_tready = !stall;
     wire   s_fire = s_iq_tvalid & !stall;
     wire signed [11:0] in_i = s_iq_tdata[11:0];
@@ -161,8 +172,16 @@ module pd_detect_top (
         .ev_valid(ev_valid), .ev_t(ev_t), .ev_cfo_inc(ev_cfo_inc), .ev_fail(ev_tone_fail),
         .stall(stall_tm),
         .tm_valid(tm_valid), .tm_t(tm_t), .tm_n_end(tm_n_end), .tm_status(tm_status),
-        .tm_n_pos(tm_n_pos), .tm_p_max(tm_p_max), .tm_p_sum(tm_p_sum),
+        .tm_n_pos(tm_n_pos), .tm_p_max(tm_p_max), .tm_p_sum(tm_p_sum), .tm_inc(tm_inc),
         .busy(tm_busy), .err(tm_err));
+
+    pd_cf u_cf (
+        .clk(clk), .rst_n(rst_n), .en(fe_on),
+        .y_valid(dc_valid), .y_i(dc_i), .y_q(dc_q),
+        .tm_valid(tm_valid), .tm_t(tm_t), .tm_n_end(tm_n_end), .tm_status(tm_status), .tm_inc(tm_inc),
+        .stall(stall_cf),
+        .cf_valid(cf_valid), .cf_t(cf_t), .cf_n_end(cf_n_end), .cf_crc_ok(cf_crc_ok), .cf_msg(cf_msg),
+        .cf_shift(cf_shift), .cf_metric(cf_metric), .busy(cf_busy), .err(cf_err));
 
     // samples inside the front end and core: debug records due minus records out. With the
     // half-band, a record is due with every second input (the first of a pair waits for its
@@ -178,7 +197,7 @@ module pd_detect_top (
             inflight <= inflight + {7'd0, rec_due} - {7'd0, dbg_valid};
         end
     end
-    assign busy = (inflight != 8'd0) || rec_due || lane_busy || tone_busy || tm_busy;
+    assign busy = (inflight != 8'd0) || rec_due || lane_busy || tone_busy || tm_busy || cf_busy;
 endmodule
 
 `default_nettype wire

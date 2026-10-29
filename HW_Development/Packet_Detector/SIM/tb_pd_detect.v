@@ -7,7 +7,8 @@
 // samples, 0 = one sample per clock, +seed=S; +fixgap=1: exactly N, e.g. 4 = 20 Msps), obeys tready, and checks every LPF output sample,
 // every debug record, every trigger, every CFO result (window start, the four lag accumulators,
 // the four CORDIC angles and cfo_inc), every event after the tone check (CFO fields, tone
-// num / den, fail) and every Preamble B timing record (exp_tm.txt, matched by t_trig, since
+// num / den, fail), every control record (exp_cf.txt, in order) and every Preamble B timing
+// record (exp_tm.txt, matched by t_trig, since
 // BUSY records may come first). Prints PASS / FAIL and the first +maxerr=N (default 10) mismatches.
 // Plain Verilog-2001 (xsim, Verilator).
 `timescale 1ns / 1ps
@@ -50,6 +51,11 @@ module tb_pd_detect;
     wire [15:0] tm_n_pos;
     wire [33:0] tm_p_max;
     wire [47:0] tm_p_sum;
+    wire        cf_valid, cf_crc_ok, cf_err;
+    wire [31:0] cf_t, cf_n_end;
+    wire [53:0] cf_msg;
+    wire [5:0]  cf_shift;
+    wire [15:0] cf_metric;
 
     pd_detect_top dut (
         .clk(clk), .rst_n(rst_n),
@@ -69,6 +75,8 @@ module tb_pd_detect;
         .ev_tone_num(ev_num), .ev_tone_den(ev_den), .ev_tone_fail(ev_fail),
         .tm_valid(tm_valid), .tm_t(tm_t), .tm_n_end(tm_n_end), .tm_status(tm_status), .tm_n_pos(tm_n_pos),
         .tm_p_max(tm_p_max), .tm_p_sum(tm_p_sum), .tm_err(tm_err),
+        .cf_valid(cf_valid), .cf_t(cf_t), .cf_n_end(cf_n_end), .cf_crc_ok(cf_crc_ok), .cf_msg(cf_msg),
+        .cf_shift(cf_shift), .cf_metric(cf_metric), .cf_err(cf_err),
         .busy(busy), .open_n(open_n), .open_t(open_t));
 
     // ------------------------------------------------------------------ files and settings
@@ -83,12 +91,19 @@ module tb_pd_detect;
     reg [33:0] xt_m [0:4095];
     reg [47:0] xt_u [0:4095];
     reg        xt_used [0:4095];
+    integer f_cf, n_cf, cf_seen, cf_ok;
+    reg [31:0] xc_t [0:255];
+    reg [31:0] xc_n [0:255];
+    reg [3:0]  xc_s [0:255];
+    reg [7:0]  xc_h [0:255];
+    reg [15:0] xc_m [0:255];
+    reg [55:0] xc_g [0:255];
 
     // ------------------------------------------------------------------ checkers
     integer errors, lpf_seen, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, stalls;
     initial begin
         errors = 0; lpf_seen = 0; dbg_seen = 0; trig_seen = 0; cfo_seen = 0; ev_seen = 0;
-        tm_seen = 0; tm_good = 0; tm_busy_n = 0; n_tm = 0;
+        tm_seen = 0; tm_good = 0; tm_busy_n = 0; n_tm = 0; n_cf = 0; cf_seen = 0; cf_ok = 0;
         ev_fails = 0; stalls = 0;
         rst_n = 1'b0; s_valid = 1'b0; s_data = 32'd0;
     end
@@ -214,6 +229,28 @@ module tb_pd_detect;
             end
             tm_seen = tm_seen + 1;
         end
+        if (rst_n && cf_valid) begin
+            if (cf_seen >= n_cf) begin
+                errors = errors + 1;
+                if (errors <= maxerr) $display("ERROR control: unexpected record for t %0d", cf_t);
+            end else if (cf_t !== xc_t[cf_seen] || cf_n_end !== xc_n[cf_seen] || cf_crc_ok !== xc_s[cf_seen][0] ||
+                         cf_shift !== xc_h[cf_seen][5:0] || cf_metric !== xc_m[cf_seen] ||
+                         cf_msg !== xc_g[cf_seen][53:0]) begin
+                errors = errors + 1;
+                if (errors <= maxerr)
+                    $display("ERROR control %0d: t %0d n_end %0d crc %0d shift %0d metric %0d msg %h, expected %0d %0d %0d %0d %0d %h",
+                             cf_seen, cf_t, cf_n_end, cf_crc_ok, cf_shift, $signed(cf_metric), cf_msg, xc_t[cf_seen],
+                             xc_n[cf_seen], xc_s[cf_seen][0], xc_h[cf_seen], $signed(xc_m[cf_seen]), xc_g[cf_seen][53:0]);
+            end else
+                $display("  control field for t_trig %0d: CRC %0s, message %h, metric %0d (ok)", cf_t,
+                         cf_crc_ok ? "ok" : "FAIL", cf_msg, $signed(cf_metric));
+            if (cf_crc_ok) cf_ok = cf_ok + 1;
+            cf_seen = cf_seen + 1;
+        end
+        if (rst_n && cf_err) begin
+            errors = errors + 1;
+            if (errors <= maxerr) $display("ERROR control: start queue overflow");
+        end
         if (rst_n && tm_err) begin
             errors = errors + 1;
             if (errors <= maxerr) $display("ERROR timing: start queue overflow");
@@ -240,8 +277,9 @@ module tb_pd_detect;
         f_tone = $fopen("exp_tone.txt", "r");
         f_open = $fopen("exp_open.txt", "r");
         f_tm   = $fopen("exp_tm.txt", "r");
+        f_cf   = $fopen("exp_cf.txt", "r");
         if (f_cfg == 0 || f_in == 0 || f_lpf == 0 || f_dbg == 0 || f_trig == 0 || f_cfo == 0 || f_tone == 0 ||
-            f_open == 0 || f_tm == 0) begin
+            f_open == 0 || f_tm == 0 || f_cf == 0) begin
             $display("FAIL: cannot open the vector files (cfg.txt ...) in the current directory");
             $finish;
         end
@@ -256,6 +294,9 @@ module tb_pd_detect;
             r = $fscanf(f_tm, "%h %h %h %h %h %h\n", xt_t[k2], xt_n[k2], xt_s[k2], xt_p[k2], xt_m[k2], xt_u[k2]);
             xt_used[k2] = 1'b0;
         end
+        r = $fscanf(f_cf, "%d\n", n_cf);
+        for (k2 = 0; k2 < n_cf; k2 = k2 + 1)
+            r = $fscanf(f_cf, "%h %h %h %h %h %h\n", xc_t[k2], xc_n[k2], xc_s[k2], xc_h[k2], xc_m[k2], xc_g[k2]);
         input_stage = cfg_stage[1:0];  dc_shift  = cfg_shift[3:0];
         eta_hi_sq   = cfg_hi[15:0];  eta_lo_sq = cfg_lo[15:0];  qual_len = cfg_q[15:0];
         blank_len   = cfg_blank;     arm_holdoff = cfg_hold;  n_cfo = cfg_ncfo[15:0];
@@ -288,7 +329,7 @@ module tb_pd_detect;
         // wait until nothing is in flight (the last checks take up to 2 x ceil(13 / NU) x N clocks)
         guard = 0;
         @(negedge clk);
-        while (busy && guard < 30 * cfg_ncfo + 60000) begin @(negedge clk); guard = guard + 1; end
+        while (busy && guard < 30 * cfg_ncfo + 160000) begin @(negedge clk); guard = guard + 1; end
         if (busy) begin errors = errors + 1; $display("ERROR: still busy %0d clocks after the input ended", guard); end
         repeat (20) @(negedge clk);
         if (busy) begin errors = errors + 1; $display("ERROR: busy again after it went low"); end
@@ -317,10 +358,13 @@ module tb_pd_detect;
         if (tm_seen != n_tm) begin
             errors = errors + 1; $display("ERROR: %0d timing records, expected %0d", tm_seen, n_tm);
         end
+        if (cf_seen != n_cf) begin
+            errors = errors + 1; $display("ERROR: %0d control records, expected %0d", cf_seen, n_cf);
+        end
         $display("  input stalled for %0d clocks (tone check catching up, timing searches)", stalls);
         if (errors == 0)
-            $display("PASS: %0d samples, %0d debug records, %0d trigger(s), %0d CFO result(s), %0d event(s) (%0d failing the tone check), %0d timing record(s) (%0d good, %0d busy) match the bit-true model",
-                     n_samples, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, tm_seen, tm_good, tm_busy_n);
+            $display("PASS: %0d samples, %0d debug records, %0d trigger(s), %0d CFO result(s), %0d event(s) (%0d failing the tone check), %0d timing record(s) (%0d good, %0d busy), %0d control record(s) (%0d CRC ok) match the bit-true model",
+                     n_samples, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, tm_seen, tm_good, tm_busy_n, cf_seen, cf_ok);
         else
             $display("FAIL: %0d error(s)", errors);
         $finish;

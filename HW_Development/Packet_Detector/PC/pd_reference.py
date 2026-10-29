@@ -129,6 +129,7 @@ class Result:
     bits: np.ndarray | None = None        # uint16 per sample (debug)
     extra: list[dict] = field(default_factory=list)   # values per event, for reports
     timing: list[TimingRecord] = field(default_factory=list)   # Preamble B timing (input_stage 1, 2)
+    control: list = field(default_factory=list)   # ControlRecord per good timing record (cf_reference)
 
 
 # --------------------------------------------------------------------------------------- #
@@ -500,12 +501,13 @@ def tone_db(num: int, den: int) -> float:
 # --------------------------------------------------------------------------------------- #
 # Top level                                                                                #
 # --------------------------------------------------------------------------------------- #
-def detect(iq: np.ndarray, p: Params, debug: bool = False) -> Result:
+def detect(iq: np.ndarray, p: Params, debug: bool = False, control: bool = True) -> Result:
     """Run the detector over 12-bit I/Q samples (N, 2), starting from reset.
 
     With p.input_stage == 1 the samples are the decimated stream and go through front_end()
     first; with 2 they are the 40 Msps stream and go through halfband() and front_end();
     with 0 they are already the LPF output. Sample indices (t_trig, ...) are always at 20 Msps.
+    control=False skips the control-field decoding (cf_reference, about 0.3 s per packet).
     """
     iq = as_iq(iq)
     if p.input_stage == 2:
@@ -555,6 +557,9 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False) -> Result:
     res = Result(events, extra=extra)
     if y is not None:
         res.timing = timing_records(y, events, int(p.n_cfo), int(p.t_pk))
+        if control:
+            import cf_reference                         # imports this module
+            res.control = cf_reference.control_records(y, events, res.timing)
     if debug:
         with np.errstate(divide="ignore", invalid="ignore"):
             met = np.where(den > 0, num // np.maximum(den, 1), 0)

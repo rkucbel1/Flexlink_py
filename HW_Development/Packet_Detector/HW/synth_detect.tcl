@@ -1,7 +1,7 @@
 # synth_detect.tcl  (Flexlink_py/HW_Development/Packet_Detector/HW)
 #
 # Out-of-context synthesis and implementation of the detector (RTL/pd_detect_top.v: front end,
-# detection core, CFO lane, tone check, Preamble B timing) on the
+# detection core, CFO lane, tone check, Preamble B timing, control field) on the
 # Zynq-7020 at 100 MHz, to check timing and resources before the block goes into the board
 # design. No project, no block design; about 3-5 minutes.
 #
@@ -21,7 +21,9 @@ read_verilog [list \
     [file join $rtl pd_halfband.v] [file join $rtl pd_dc_blocker.v] [file join $rtl pd_lpf.v] [file join $rtl pd_div16.v] \
     [file join $rtl pd_detect_core.v] [file join $rtl pd_cordic.v] [file join $rtl pd_cfo_cascade.v] \
     [file join $rtl pd_cfo_lane.v] [file join $rtl pd_tone_rom.v] [file join $rtl pd_sdp_ram.v] [file join $rtl pd_tone_check.v] \
-    [file join $rtl pd_timing.v] [file join $rtl pd_detect_top.v]]
+    [file join $rtl pd_timing.v] [file join $rtl cf_roms.v] [file join $rtl cf_tdp_ram.v] [file join $rtl cf_fft.v] \
+    [file join $rtl cf_chest.v] [file join $rtl cf_viterbi.v] [file join $rtl cf_crc10.v] [file join $rtl cf_rx.v] \
+    [file join $rtl pd_cf.v] [file join $rtl pd_detect_top.v]]
 
 synth_design -top pd_detect_top -part $part -mode out_of_context
 create_clock -name clk -period $period [get_ports clk]

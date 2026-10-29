@@ -161,7 +161,7 @@ class Chain:
 
     def run_all(self, defects_file: Path, wave_input: Path | None = None, eq_args=(), demap_args=(),
                 compare: Path | None = COMPARE_FILE, per_ray: bool = False,
-                model: str = "never") -> dict[str, Any]:
+                model: str = "never", cf_args=()) -> dict[str, Any]:
         self.out.mkdir(parents=True, exist_ok=True)
         prm = ["--params", self.params_path]
         res: dict[str, Any] = {"rays": {}, "status": 0}
@@ -210,7 +210,8 @@ class Chain:
         if str(self.params.get("Defined_Rx", {}).get("Use_ControlField", 1)).strip() == "1":
             rc, out = self.run("Control field", [self.py, RX / "Process_Control_Field_Rx.py", *prm,
                                                  "--inputs", *[self.path("pkt", r) for r in found],
-                                                 "--out", self.path("control", None), *eq_args])
+                                                 "--out", self.path("control", None), *eq_args,
+                                                 *cf_args])
             res["control"] = {"crc": find(r"control field CRC (\w+)", out),
                               "changed": "Initialize_Rx.py done" in out,
                               "changes": re.findall(r"Defined_Rx/(\w+): \S+ -> \S+", out)}
@@ -301,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--input", type=Path, help="waveform for step 3 (default: from the Rx json)")
     ap.add_argument("--out-dir", type=Path, default=RX, help="folder for every file (default: Rx/)")
     ap.add_argument("--eq-mode", help="override Defined_Rx/EqualizerMode")
+    ap.add_argument("--cf-eq-mode", help="override Defined_Rx/ControlFieldEqualizerMode (step 4a)")
     ap.add_argument("--max-doppler", type=float, help="override Defined_Rx/EqualizerMaxDoppler (Hz)")
     ap.add_argument("--demap-noise-var", type=float, help="fixed demapper noise variance (testing)")
     ap.add_argument("--compare", type=Path, nargs="?", const=COMPARE_FILE, default=COMPARE_FILE,
@@ -328,7 +330,8 @@ def main(argv: list[str] | None = None) -> int:
     st = d_cfg.get("Settings", {})
     n_json = chain.params.get("Defined_Rx", {}).get("NumberOfAntennas", 1)
     print(f"{a.params.name}: NumberOfAntennas {n_json}, EqualizerMode "
-          f"{a.eq_mode or chain.params.get('Defined_Rx', {}).get('EqualizerMode')}")
+          f"{a.eq_mode or chain.params.get('Defined_Rx', {}).get('EqualizerMode')}, control field "
+          f"{a.cf_eq_mode or chain.params.get('Defined_Rx', {}).get('ControlFieldEqualizerMode') or 'FIR8'}")
     if on:
         print(f"{a.defects_file.name}: {', '.join(on)}; SNR "
               f"{[st.get(f'SNR{k}_dB') for k in range(1, 5)]} dB, NumberOfRays {st.get('NumberOfRays')}, "
@@ -336,7 +339,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"{a.defects_file.name}: no defects (single waveform, NumberOfAntennas not used)")
     model = "always" if a.new_channel else "never" if (a.no_model or a.input) else "auto"
-    res = chain.run_all(a.defects_file, a.input, eq_args, demap_args, compare, a.per_ray, model)
+    cf_args = ["--cf-mode", a.cf_eq_mode] if a.cf_eq_mode else []
+    res = chain.run_all(a.defects_file, a.input, eq_args, demap_args, compare, a.per_ray, model, cf_args)
     if res.get("model_msg") and not a.dry_run:
         print(res["model_msg"])
     if a.log:

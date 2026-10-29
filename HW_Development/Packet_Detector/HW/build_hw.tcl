@@ -134,7 +134,8 @@ set_property -dict [list \
 set rtl_dir [file normalize [file join $script_dir .. RTL]]
 set rtl_files {}
 foreach f {pd_halfband.v pd_dc_blocker.v pd_lpf.v pd_div16.v pd_detect_core.v pd_cordic.v pd_cfo_cascade.v
-           pd_cfo_lane.v pd_tone_rom.v pd_sdp_ram.v pd_tone_check.v pd_timing.v pd_detect_top.v pd_axi.v} {
+           pd_cfo_lane.v pd_tone_rom.v pd_sdp_ram.v pd_tone_check.v pd_timing.v cf_roms.v cf_tdp_ram.v
+           cf_fft.v cf_chest.v cf_viterbi.v cf_crc10.v cf_rx.v pd_cf.v pd_detect_top.v pd_axi.v} {
     lappend rtl_files [file join $rtl_dir $f]
 }
 add_files -norecurse $rtl_files

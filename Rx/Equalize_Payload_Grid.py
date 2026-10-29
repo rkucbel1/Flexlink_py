@@ -32,6 +32,10 @@ EqualizerMode (Defined_Rx, or --mode)
                    precomputed from channel models (Equalizer/PCA/Train_PCA_Basis.py);
                    class Short/Medium/Long picked per packet; Wiener filter across time.
                    Fewer operations than LMMSE; needs PCA_Basis_S<RefSignalSpacing>.h5.
+  FIR8             The FPGA control-field estimator: fixed 8-tap LMMSE across frequency
+                   (delays -20..12 samples, no per-packet window choice), drift-corrected
+                   linear interpolation across time (FixedFIRChannelEstimator). Default for
+                   the control field (Process_Control_Field_Rx.py, ControlFieldEqualizerMode).
   Linear           Linear interpolation across frequency and time (baseline).
   None             No equalization: copies the grid (for loopback checks).
 EqualizerMaxDoppler (Hz, default 300) is the worst-case Doppler the Wiener time
@@ -112,7 +116,7 @@ PCA_SCRIPT = "PCA/PCA_Estimator.py"
 DATASET = "data"
 TYPES_DATASET = "signal_types"
 
-MODES = ("LMMSE", "LMMSE_LinearTime", "PCA", "Linear", "None")
+MODES = ("LMMSE", "LMMSE_LinearTime", "PCA", "FIR8", "Linear", "None")
 DEFAULT_MODE = "LMMSE"
 DEFAULT_MAX_DOPPLER = 300.0
 DEFAULT_CODES = {"Ref_P0": 10, "Ref_P1": 20, "DC": 30, "Data": 40}
@@ -265,6 +269,10 @@ def equalize_payload_grid(Y: np.ndarray, types: np.ndarray, codes: dict[str, int
         H = np.ones_like(Y)
     elif mode == "Linear":
         H = ce.ChannelEstimator(layout, port, freq="linear", time="linear").estimate(Y, Xref)
+    elif mode == "FIR8":
+        est = ce.FixedFIRChannelEstimator(layout, port, pilot_power=pilot_power)
+        H = est.estimate(Y, Xref)
+        window = est.last_window
     elif mode == "PCA":
         pe = load_module("PCA_Estimator", PCA_SCRIPT)
         if spacing is None:

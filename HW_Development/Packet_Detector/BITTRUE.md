@@ -154,6 +154,20 @@ table are new.
    19 of 19 fault-injection mutants of `pd_timing.v` are caught. A silent window (all P = 0)
    never passes the peak check; that rule came out of the directed test.
 
+10. **Control field** (`PC/cf_reference.py`, tables `PC/cf_tables.py`; spec
+   `Docs/Specification_ControlField.md` §4.9). For every timing record with status TM_GOOD, in
+   order, the 4560 samples y(n_end + 1 …) of the DC blocker output are de-rotated (12 bit, phase
+   0 at n_end + 1), the four symbols go through a fixed-point 1024-point FFT (18-bit data and
+   twiddles, rounding ÷2 per stage), the channel comes from a fixed 8-tap LMMSE filter over the
+   Ref_P0 pilots of symbols 0 and 3 (Q14 coefficients) with the common drift removed and put
+   back by s·φ/3, and the soft values Re(Y·H*) are descrambled, combined over the 15 copies,
+   de-interleaved, scaled to 5 bits (a shift per packet) and Viterbi-decoded (ties to 0); CRC10
+   over the 64 bits. Float vs bit-true, 150 packets per case after the bit-true detector and
+   timing: AWGN −14 dB 81 / 81, −13 dB 128 / 128, ETU-300 −10 dB 129 / 129, EVA-70 −12 dB
+   104 / 104 decoded; 4-bit Viterbi inputs lose 5 at −14 dB, 3-bit 42. No wrong message passed
+   the CRC. `detect()` returns them in `Result.control` (`control=False` skips the decoding);
+   a control field the samples end inside is not reported.
+
 ## Verification
 
 ### Word-length sweeps (each block against its floating-point version)
