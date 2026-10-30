@@ -214,6 +214,8 @@ if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {
 }
 open_run impl_1
 report_timing_summary -file [file join $build_dir timing_summary.rpt]
+# the 40 worst setup paths, one line each (start, end, slack, logic levels), for timing work
+report_timing -setup -max_paths 40 -nworst 1 -path_type summary -file [file join $build_dir timing_paths.rpt]
 set wns [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -setup]]
 if {$wns < 0} {
     puts "WARNING: timing not met (WNS $wns ns) - see build/timing_summary.rpt"

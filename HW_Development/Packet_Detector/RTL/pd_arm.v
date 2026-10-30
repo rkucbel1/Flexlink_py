@@ -44,8 +44,10 @@ module pd_arm (
     output reg                stall,
     output wire               pending
 );
-    localparam [1:0] S_IDLE = 2'd0, S_TONE = 2'd1, S_TIMING = 2'd2, S_CF = 2'd3;
-    reg  [1:0]  st;
+    localparam [2:0] S_IDLE = 3'd0, S_TONE = 3'd1, S_TIMING = 3'd2, S_CF = 3'd3, S_DEC = 3'd4;
+    reg  [2:0]  st;
+    reg         c_ok;                       // S_DEC: control field good
+    reg  [31:0] r_cf, r_end;                // the two candidates, registered
     reg  [31:0] t, ne, r_min;
     reg  [31:0] nd;                            // detector input samples so far
     assign pending = (st != S_IDLE);
@@ -83,8 +85,6 @@ module pd_arm (
         endcase
     end
     wire        f_ok  = pl_ok && (c_cbs != 2'b11) && (c_rm <= 4'b1000);
-    wire [31:0] r_cf  = ne + o_cf;
-    wire [31:0] r_end = ne + 32'd4561 + {14'd0, pl_len};
 
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -111,17 +111,22 @@ module pd_arm (
                 S_TIMING:
                     if (tm_valid && tm_t == t) begin
                         if (tm_status == 3'b001) begin
-                            st <= S_CF; ne <= tm_n_end; r_min <= tm_n_end + o_cf;
+                            st <= S_CF; ne <= tm_n_end; r_min <= tm_n_end + o_cf; r_cf <= tm_n_end + o_cf;
                         end else begin
                             arm_set <= 1'b1; arm_val <= t + o_tm; st <= S_IDLE;
                         end
                     end
-                S_CF:
+                S_CF:                               // two steps: candidates, then the choice
                     if (cf_valid && cf_t == t) begin
-                        arm_set <= 1'b1;
-                        arm_val <= (cf_crc_ok && f_ok && ($signed(r_end - r_cf) > 0)) ? r_end : r_cf;
-                        st <= S_IDLE;
+                        c_ok  <= cf_crc_ok && f_ok;
+                        r_end <= ne + 32'd4561 + {14'd0, pl_len};
+                        st    <= S_DEC;
                     end
+                S_DEC: begin
+                    arm_set <= 1'b1;
+                    arm_val <= (c_ok && ($signed(r_end - r_cf) > 0)) ? r_end : r_cf;
+                    st <= S_IDLE;
+                end
                 default: st <= S_IDLE;
             endcase
         end

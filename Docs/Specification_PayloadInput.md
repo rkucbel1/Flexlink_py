@@ -159,11 +159,65 @@ payload chain (about 31 k LUT left today). P = 27 only works with ≤ 8 iteratio
 control field, about 8–12 DSP; equaliser and demapper without division (LLRs as piecewise-linear
 functions of Y·H* with breakpoints at multiples of |H|², up to 64QAM), about 8 DSP; copy
 combining, de-interleaver, de-scrambler: memory and adders. About 30 of the 73 free DSP.
+(Superseded by §5b: the demapper's LLRs are scaled by 1/σ², so the equaliser needs the noise
+variance; the LLR combining of the copies is a sum.)
 
-**Next study (bit-true, like the control field):** layered vs flooding iterations for the same
-BLER as the simulator, LLR and message widths (probably 6–8 bits), offset or normalised
-min-sum, early stop, LLR combining of the copies instead of averaged probabilities, per
-modulation, N and rate at the SNRs where the simulator decodes.
+## 5b. LDPC float-vs-bit-true study (done, Oct 2026)
+
+Scripts and raw results: `PC/ldpc_study/` (README there). AWGN, max-log demapper as the
+simulator, 32 configurations: BPSK / QPSK / 16QAM / 64QAM × N 648 / 1944 × rate 1/2 / 5/6 ×
+2 / 20 copies (Repetition 1 / 19), 300–600 code words per point. Figure of merit: Es/N0 per
+copy for 10 % block errors, interpolated in 0.25 dB steps.
+
+**Decoder variants, loss against layered float 15 iterations** (mean / worst over the 32):
+
+| Variant | Mean | Worst |
+| --- | --- | --- |
+| simulator today: flooding 15, averaged P(bit = 1) | 0.56 dB | 1.02 dB |
+| flooding 15, summed LLRs | 0.34 | 0.74 |
+| layered α = 0.75, 5 iterations | 0.59 | 1.36 |
+| layered, 8 iterations | 0.25 | 0.76 |
+| **layered, 10 iterations** | **0.14** | **0.32** |
+| layered, 15 iterations | 0 | 0 |
+
+Findings:
+1. **Summing the copies' LLRs** is better than averaging probabilities (0.2 dB mean, up to
+   0.5 dB at 2 copies, rate 5/6).
+2. **Layered at 10 iterations** beats today's simulator decoder in every configuration
+   (0.4 dB mean). 15 iterations buy another 0.14 dB for 50 % more decode time; with latency
+   first, 10 is the maximum, with early stop on a zero syndrome.
+3. **The LLR step must be an absolute one** (LLR units, i.e. scaled with the noise variance).
+   Scaling by the mean |LLR| of the code word (what is available without a noise estimate)
+   is unusable: the best target moves by 4× from case to case and 64QAM loses up to 1.6 dB.
+   So the demapper needs σ² — **new item for the channel estimate**: a noise-variance estimate
+   from the pilot residuals (the payload equivalent of the control field's |H|² path).
+4. **Widths.** LLR 7 bit, APP (posterior) 10 bit, check-node messages 7 bit, α as
+   m − (m >> 2): within the Monte-Carlo noise of float layered-10 in all 32 configurations
+   at the right step (results/llr_step.jsonl). 6/8/6 is 0.1–0.3 dB worse at 20 copies; 8/10/8
+   gives nothing more. APP 10 vs 8 bit matters only with 20 summed copies.
+5. **LLR step per mode** (step = LLR units per integer LSB; 7-bit saturation at ±63 steps):
+
+   | Mode | Step | Note |
+   | --- | --- | --- |
+   | everything except below | **1/4** | 1/8 equal within noise; 1/2 loses 0.1–0.3 dB |
+   | 64QAM, rate 1/2 | **1** | 0.5–1 dB *better* than float (BLER 10 % → < 1 %) |
+
+   The coarse step works like an offset min-sum on the over-confident max-log 64QAM LLRs
+   (the integer m − m>>2 rounds small messages to zero). 64QAM at rates 2/3 and 3/4 prefer 1/4
+   (checked at N 1296, 20 copies). The step is a 2-bit shift chosen per packet from the
+   control field (modulation, rate) by a fixed table in the payload state machine.
+6. Offset min-sum in general (all modes) would likely help a bit more; not needed now, a later
+   option for the same hardware (one subtractor per message).
+
+**Frozen for RTL:** layered normalised min-sum, α = 0.75 (m − m>>2), max 10 iterations, early
+stop on zero syndrome, LLRs of the copies summed before the decoder (saturating at 7 bit),
+LLR 7 / APP 10 / message 7 bit, LLR step 1/4 (64QAM rate 1/2: 1), σ² from the payload channel
+estimate. Bit-true model: `decode_layered_fixed(code, quantise(llr_sum, 1/step, 7), 10, 10, 7)`.
+
+**Effect on the sizing above:** 10 iterations instead of 15 raise the P = 54 throughput to
+80–120 Mbit/s (need 43), so the decoder idles about half the time and a packet's last code
+word is out sooner. Wider words (10-bit APP, 7-bit messages instead of 8 / 6) add about 15 %
+to the decoder: **~13 k LUT**, BRAM unchanged (~7).
 
 ## 6. Grids for the channel estimate
 
@@ -192,7 +246,8 @@ by |H|² and the equaliser are the main users.
 Decided: LDPC with 54 lanes; every modulation and setting; no packet record for now; the
 state machine re-arms (built); low latency first; PacketLength ≤ 73 normal.
 
-1. LDPC float-vs-bit-true study (iterations, widths, LLR combining of the copies).
+1. ~~LDPC float-vs-bit-true study~~ — done, §5b. New: noise-variance estimate for the
+   demapper's LLR scale.
 2. Shared fast FFT (option B engine) for the control field and the speculative payload FFTs.
 
 ## 9. Verification (as before)
