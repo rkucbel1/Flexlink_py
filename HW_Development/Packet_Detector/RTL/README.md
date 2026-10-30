@@ -54,8 +54,9 @@ per good timing record; `pd_axi` 4.0 puts them in the control FIFO (CF_LEVEL 0x5
 
 | File | Block | Model function |
 | --- | --- | --- |
-| `cf_rx.v` | top: de-rotator (12-bit, phase 0 at `n_end + 1`), FFT windows, unload into the grid RAM (4 × 841 × 36 bit) and the two pilot RAMs (280 × 38 bit, sign of the Ref_P0 pilot applied), then channel estimate → Viterbi → CRC; one record per control field | `receive` |
-| `cf_fft.v` | 1024-point radix-2 DIT FFT, one butterfly per clock, two ping-pong banks (true dual-port block RAM), 18-bit data, 18-bit twiddles (Q17), rounding ÷2 per stage; 5200 clocks per symbol | `fft_fixed` |
+| `cf_rx.v` | top: **front end** = de-rotator (12-bit, phase 0 at `n_end + 1`), FFT windows, unload into the grid RAM (4 × 841 × 36 bit) and the two pilot RAMs (280 × 38 bit, sign of the Ref_P0 pilot applied); **back end** = channel estimate → Viterbi → CRC; one record per control field. With `pl_en` the front end carries on with the payload symbols (speculative payload FFT, below) | `receive`, `payload_records` |
+| `pd_fft2.v` | the receiver's FFT (bitstream 6.0): the same 1024-point radix-2 DIT FFT with **two butterflies per clock**, each bank split into two 512-word true dual-port RAMs (address bit 9) so the 4 reads and 4 writes of a clock use the 4 ports; 2640 clocks per symbol, identical results | `fft_fixed` |
+| `cf_fft.v` | the first FFT (bitstreams 4.0, 5.0): one butterfly per clock, 5200 clocks per symbol; kept as the reference in `tb_fft2` | `fft_fixed` |
 | `cf_tdp_ram.v` | true dual-port block RAM (FFT banks) | – |
 | `cf_chest.v` | drift Σ P3·P0* (46-bit) → CORDIC (`pd_cordic`, `IW` 46) → φ, φ/3; 8-tap FIR per tone for symbols 0 and 3 (8 multipliers, 8 clocks per tone); H3′ = rot(Hf3, −φ); per data tone the time interpolation, rotation by s·φ/3, soft value Re(Y·H*), descrambling, copy combining (140 accumulators, distributed RAM), Viterbi input scaling and de-interleaving | `channel`, `viterbi_input` |
 | `cf_viterbi.v` | K = 7 soft Viterbi, 64 states one per clock, 70 steps, start and end in state 0, ties to the 0 branch; decisions in distributed RAM, traceback | `viterbi` |
@@ -63,10 +64,24 @@ per good timing record; `pd_axi` 4.0 puts them in the control FIFO (CF_LEVEL 0x5
 | `cf_roms.v` | **generated** by `gen_cf_roms.py`: twiddles, FIR map (first pilot + coefficient set per tone) and the 25 coefficient sets, Gold sequence (2200 bits), de-interleaver, pilot signs | `cf_tables.py` |
 
 **Interface** (`cf_rx`; `pd_cf` drives it inside the detector). `start` with `cfo_inc`, `t_trig`, `n_end` (the last two are passed through to the
-record), then exactly 4560 samples on `s_valid` / `s_ready` / `s_i` / `s_q` (12-bit, the DC blocker
-output from `n_end + 1`). `s_ready` drops while an FFT runs and is unloaded (after each symbol's
-window). `rec_valid` pulses with `rec_crc_ok`, `rec_msg` (bit i = message bit i), `rec_shift`
-(Viterbi input scaling) and `rec_metric` (final path metric). About 44 000 clocks (0.44 ms at
-100 MHz) per control field. The `dbg_*` outputs feed the testbench only.
+record), then 4560 samples on `s_valid` / `s_ready` / `s_i` / `s_q` (12-bit, the DC blocker output from
+`n_end + 1`; with `pl_en` more, see below). `s_ready` drops while an FFT runs and is unloaded
+(after each symbol's window). `rec_valid` pulses with `rec_crc_ok`, `rec_msg` (bit i = message
+bit i), `rec_shift` (Viterbi input scaling) and `rec_metric` (final path metric). About 34 000
+clocks (0.34 ms at 100 MHz) per control field (44 000 with `cf_fft`). The `dbg_*` outputs feed the
+testbench only.
+
+**Speculative payload FFT** (`pl_en` = `Params.rearm`; `Docs/Specification_PayloadInput.md` §5).
+The front end and the back end run separately: while the back end decodes the control field,
+the front end goes on with payload symbol p = 0, 1, … (stream symbol 4 + p, same window and
+phase ramp), at most `PL_SPEC` = 8 of them before the decision; `pg_*` carries their 841 bins.
+One clock after `rec_valid`, `pl_dec` gives `pl_ok` (CRC ok and every field code valid, as
+`pd_arm`) and `pl_len` (PacketLength); the front end stops at symbol `pl_len`, or at once if not
+`pl_ok`. `s_more` tells `pd_cf` to keep fetching. `pd_cf` reduces each symbol to a 64-bit
+signature (`cf_reference.grid_signature`) and keeps a 16-record FIFO: records of symbols started
+before the decision are pending until it, then kept (the first `pl_len`) or dropped; a symbol
+starts only while the FIFO has room. `pd_axi` 6.0 reads it at PL_LEVEL 0x5C / PL_DATA 0x60.
+At 20 Msps the control record comes about 3770 samples after the payload start (5400 before)
+and each payload symbol's record about 700 samples after its window, also for the last one.
 
 `pd_cordic.v` now has a parameter `IW` (input width, default 37 as before).

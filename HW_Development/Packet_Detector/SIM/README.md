@@ -8,6 +8,7 @@
 - **every** event after the tone check: its CFO fields, tone `num` and `den`, and the abort flag;
 - **every** Preamble B timing record (input stages 1 and 2): `n_end`, status (peak check, late trigger, busy), `n_pos`, `p_max`, `p_sum`. Records are matched by `t_trig`, because a BUSY record can come out before the result of an earlier search.
 - **every** control record (input stages 1 and 2): CRC result, message, metric, Viterbi scaling, in order. `MAX=213860 ./run_sim.sh` ends the input just after the last control field, so the decoding finishes after the input (checks `busy`).
+- **every** payload record (speculative payload FFT, `rearm` 1, `exp_pl.txt`): t_trig, symbol, the 64-bit signature of the symbol's 841 FFT bins, in order. `PLGAP=20000 ./run_sim.sh` reads them only every 20 000 clocks, so the FFT has to wait for room in the 16-record FIFO (no record lost or changed); `./run_sim.sh cfmod 1` checks the pending records of a rejected control field are dropped and PacketLength 37 stops the payload after 37 symbols.
 
 `REARM=0` uses the fixed holdoff instead of the Rx state machine's re-arm (the default); `./run_sim.sh cfmod 1` is rep3 with modified control fields (an invalid code, a failed CRC, PacketLength 37), so every re-arm decision is checked through the debug records' `armed` bit.
 
@@ -57,6 +58,11 @@ At the end the testbench waits until `busy` is low, then checks the window still
 Typical xsim run time is about 1 minute for rep3 (300k samples). Use `MAX=20000` for a quick check.
 
 ## Control-field receiver (`run_cf.sh`)
+
+`tb_fft2.v` (first, on `make_fft_vectors.py`'s 21 cases: impulses, a tone, full-scale random
+with saturation, small values, alternating extremes) runs `pd_fft2` (two butterflies per clock,
+the receiver's FFT since bitstream 6.0) and the older `cf_fft` side by side against
+`cf_reference.fft_fixed`, every bin exact.
 
 `tb_cf_rx.v` runs `RTL/cf_rx.v` on the cases from `make_cf_vectors.py` and compares **every**
 FFT output (4 × 841 grid values), **every** channel-filter output (Hf0, H3′ for 841 tones),

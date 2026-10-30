@@ -10,8 +10,9 @@
 //   S_AXI   AXI4-Lite registers: control, status, parameters, event, timing and control FIFOs
 //
 // Register map (byte offsets; RW = read/write, RO = read only):
-//   0x00 ID          RO  0x50440500 ("PD", version 5.0: re-arm by the Rx state machine; 4.0
-//                        had no REARM, 3.0 no control field, 2.0 no timing, 1.0 no input stage 2)
+//   0x00 ID          RO  0x50440600 ("PD", version 6.0: shared fast FFT with the speculative
+//                        payload FFT; 5.0 had no payload records, 4.0 no REARM, 3.0 no control
+//                        field, 2.0 no timing, 1.0 no input stage 2)
 //   0x04 CTRL        RW  bit0 RESET (1 = detector held in reset; 1 after power-up)
 //                        bit1 DEBUG (send debug records on M_AXIS; change only when not BUSY)
 //                        bit2 LOOPBACK (S_AXIS -> M_AXIS unchanged, detector not fed)
@@ -43,7 +44,10 @@
 //   0x4C TM_DATA     RO  next timing word (reading removes it)
 //   0x50 CF_LEVEL    RO  words in the control-record FIFO (8 per record)
 //   0x54 CF_DATA     RO  next control-record word (reading removes it)
-//   0x58 REARM       RW  1 = re-arm by the Rx state machine (default), 0 = fixed ARM_HOLDOFF
+//   0x58 REARM       RW  1 = re-arm by the Rx state machine (default), 0 = fixed ARM_HOLDOFF;
+//                        1 also enables the speculative payload FFT and its records
+//   0x5C PL_LEVEL    RO  words in the payload-record FIFO (4 per record, 16 records)
+//   0x60 PL_DATA     RO  next payload-record word (reading removes it)
 //
 // Event (8 words, in this order): t_trig, cfo_inc, {ang32, ang16}, {ang256, ang128},
 //   num[31:0], {fail, 23'b0, num[39:32]}, den[31:0], {24'b0, den[39:32]}
@@ -53,6 +57,10 @@
 //
 // Control record (8 words): t_trig, n_end, {metric[15:0], 2'b0, shift[5:0], 7'b0, crc_ok},
 //   message[31:0], {10'b0, message[53:32]}, 0, 0, 0
+//
+// Payload record (4 words): t_trig, {25'b0, sym}, sig_a, sig_b (cf_reference.grid_signature
+//   of the payload symbol's 841 FFT bins). A full FIFO holds the speculative FFT (not the input
+//   directly), so the firmware may read them at any pace.
 //
 // Flow control: the sample input is held back (S_AXIS tready = 0) while the tone check is
 // catching up, while a timing search runs (one sample per 5 clocks), while the event or the
@@ -137,7 +145,7 @@ module pd_axi (
     (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 M_AXIS TREADY" *)
     input  wire        m_axis_tready
 );
-    localparam [31:0] ID = 32'h5044_0500;     // "PD", version 5.0 (5.0: re-arm, 4.0: control field)
+    localparam [31:0] ID = 32'h5044_0600;     // "PD", version 6.0 (6.0: payload FFT, 5.0: re-arm, 4.0: control field)
     localparam integer CF_DEPTH = 8;             // control records
     localparam integer CF_LIMIT = CF_DEPTH - 2;  // hold the input above this
     localparam integer TM_DEPTH = 32;            // timing records
@@ -180,6 +188,9 @@ module pd_axi (
     wire [53:0] det_cf_msg;
     wire [5:0]  det_cf_shift;
     wire [15:0] det_cf_metric;
+    wire [4:0]   det_pl_cnt;
+    wire [127:0] det_pl_head;
+    wire         pl_last;
     reg         gate;                             // input allowed (registered)
     wire        det_tvalid = s_axis_tvalid && gate;
     wire        accept     = det_tvalid && det_tready;
@@ -203,6 +214,7 @@ module pd_axi (
         .cf_valid(det_cf_valid), .cf_t(det_cf_t), .cf_n_end(det_cf_n_end), .cf_crc_ok(det_cf_crc_ok),
         .cf_msg(det_cf_msg), .cf_shift(det_cf_shift), .cf_metric(det_cf_metric), .cf_err(det_cf_err),
         .arm_late(det_arm_late),
+        .pl_cnt(det_pl_cnt), .pl_head(det_pl_head), .pl_pop(pl_last),
         .busy(det_busy), .open_n(det_open_n), .open_t(det_open_t));
 
     wire       stage2 = (r_stage == 2'd2);
@@ -313,6 +325,18 @@ module pd_axi (
     wire [31:0]  cf_word  = cf_head[{cf_w, 5'd0} +: 32];
     wire [6:0]   cf_level = {cf_cnt, 3'd0} - {4'd0, cf_w};
 
+    // ------------------------------------------------------------------ payload records
+    // the FIFO is in pd_cf; PL_DATA reads its head word by word and the 4th word removes it
+    reg  [1:0]   pl_w;
+    reg          pl_rd_pulse;
+    assign       pl_last = pl_rd_pulse && (pl_w == 2'd3);
+    always @(posedge aclk) begin
+        if (!det_rst_n) pl_w <= 2'd0;
+        else if (pl_rd_pulse) pl_w <= pl_w + 2'd1;
+    end
+    wire [31:0]  pl_word  = det_pl_head[{pl_w, 5'd0} +: 32];
+    wire [6:0]   pl_level = {det_pl_cnt, 2'd0} - {5'd0, pl_w};
+
     // ------------------------------------------------------------------ debug FIFO
     // res = records reserved: accepted samples whose record has not left the FIFO (or been
     // dropped with DEBUG = 0). The input is held while res is near the FIFO size.
@@ -416,12 +440,13 @@ module pd_axi (
 
     always @(posedge aclk) begin
         if (!aresetn) begin
-            arready_r <= 1'b0; s_axi_rvalid <= 1'b0; ev_pop <= 1'b0; tm_pop <= 1'b0; cf_pop <= 1'b0;
+            arready_r <= 1'b0; s_axi_rvalid <= 1'b0; ev_pop <= 1'b0; tm_pop <= 1'b0; cf_pop <= 1'b0; pl_rd_pulse <= 1'b0;
         end else begin
             arready_r <= 1'b0;
             ev_pop    <= 1'b0;
             tm_pop    <= 1'b0;
             cf_pop    <= 1'b0;
+            pl_rd_pulse <= 1'b0;
             if (!arready_r && !s_axi_rvalid && s_axi_arvalid) begin
                 arready_r <= 1'b1;
                 case (s_axi_araddr[7:2])
@@ -453,6 +478,11 @@ module pd_axi (
                     end
                     6'h14: s_axi_rdata <= {25'd0, cf_level};
                     6'h16: s_axi_rdata <= {31'd0, r_rearm};
+                    6'h17: s_axi_rdata <= {25'd0, pl_level};
+                    6'h18: begin
+                        s_axi_rdata <= (det_pl_cnt != 0) ? pl_word : 32'd0;
+                        pl_rd_pulse <= (det_pl_cnt != 0) && det_rst_n;
+                    end
                     6'h15: begin
                         s_axi_rdata <= (cf_cnt != 0) ? cf_word : 32'd0;
                         cf_pop      <= (cf_cnt != 0) && det_rst_n;

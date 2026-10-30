@@ -12,6 +12,6 @@ verilator --cc --exe --build -O2 -j 4 -Wno-fatal -Wno-WIDTH -DPD_SIM_CHECKS --to
   -CFLAGS "-I$HERE/inc -O2" -LDFLAGS "$HERE/pd_server.o $HERE/harness_tcp.o" -o fw_cosim \
   "$R"/pd_halfband.v "$R"/pd_dc_blocker.v "$R"/pd_lpf.v "$R"/pd_div16.v "$R"/pd_detect_core.v "$R"/pd_cordic.v \
   "$R"/pd_cfo_cascade.v "$R"/pd_cfo_lane.v "$R"/pd_tone_rom.v "$R"/pd_sdp_ram.v "$R"/pd_tone_check.v "$R"/pd_timing.v \
-  "$R"/cf_roms.v "$R"/cf_tdp_ram.v "$R"/cf_fft.v "$R"/cf_chest.v "$R"/cf_viterbi.v "$R"/cf_crc10.v "$R"/cf_rx.v \
+  "$R"/cf_roms.v "$R"/cf_tdp_ram.v "$R"/pd_fft2.v "$R"/cf_chest.v "$R"/cf_viterbi.v "$R"/cf_crc10.v "$R"/cf_rx.v \
   "$R"/pd_cf.v "$R"/pd_arm.v "$R"/pd_detect_top.v "$R"/pd_axi.v "$HERE"/pl_model.cpp > build.log 2>&1 || { tail -30 build.log; exit 1; }
 echo "built obj/fw_cosim"

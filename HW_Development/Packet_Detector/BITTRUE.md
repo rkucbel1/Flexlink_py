@@ -177,6 +177,19 @@ table are new.
    timing and control field of each trigger before it looks for the next one. `rearm` = 0 is
    the old fixed holdoff and gives the old results unchanged.
 
+12. **Shared fast FFT, speculative payload FFT** (`cf_reference.payload_records`,
+    `grid_symbol`, `grid_signature`; RTL `pd_fft2.v`, `cf_rx.v`, `pd_cf.v`; bitstream 6.0,
+    firmware build 13). The FFT is unchanged in its arithmetic (`fft_fixed`; `pd_fft2` does two
+    butterflies per clock in a different order, same results, `SIM/tb_fft2.v`). After the control
+    field the de-rotator and FFT carry on with the payload: payload symbol s is stream symbol 4 + s,
+    window `1140 (4 + s) + 104 … + 1127` after `n_end`, the same phase ramp continued (the
+    simulator's `FFT_StartTime` −12 for the payload too). Kept only for a control record with CRC ok
+    and every field code valid, with `Params.rearm` (packets cannot overlap), s = 0 … PacketLength − 1,
+    and only symbols whose window lies inside the data. Each symbol's 841 bins (natural order,
+    column c = bin (c + 604) mod 1024) give a Fletcher-style signature: x = re0, im0, re1, im1, …
+    (each mod 2^18), A = Σ x, B = Σ of the running sums, both mod 2^32. That checks the payload
+    FFT bit for bit on the board before the rest of the payload chain exists.
+
 ## Verification
 
 ### Word-length sweeps (each block against its floating-point version)

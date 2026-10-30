@@ -55,7 +55,7 @@
 /* ---------------------------------------------------------------------------------- */
 #define PD_PORT                 5001
 #define PD_PROTOCOL_VERSION     1u
-#define PD_BUILD                12u              /* bump when the firmware changes */
+#define PD_BUILD                13u              /* bump when the firmware changes */
 
 #define SAMPLE_BUF_ADDR         0x10000000u
 #define DEBUG_BUF_ADDR          0x18000000u
@@ -83,6 +83,7 @@
 #define PD_ID_V3                0x0300u         /* 3.0: Preamble B timing (T_PK, timing FIFO) */
 #define PD_ID_V4                0x0400u         /* 4.0: control-field receiver (control FIFO) */
 #define PD_ID_V5                0x0500u         /* 5.0: re-arm by the Rx state machine (REARM) */
+#define PD_ID_V6                0x0600u         /* 6.0: shared fast FFT, payload records (PL FIFO) */
 #define R_ID                    0x00u
 #define R_CTRL                  0x04u
 #define R_STATUS                0x08u
@@ -98,6 +99,8 @@
 #define R_CF_LEVEL              0x50u
 #define R_CF_DATA               0x54u
 #define R_REARM                 0x58u
+#define R_PL_LEVEL              0x5Cu
+#define R_PL_DATA               0x60u
 #define CTRL_RESET              0x1u
 #define CTRL_DEBUG              0x2u
 #define CTRL_LOOPBACK           0x4u
@@ -136,6 +139,7 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define BOARD_FLAG_TIMING       0x4u            /* bitstream has the Preamble B timing (ID 3.0) */
 #define BOARD_FLAG_CF           0x8u            /* bitstream has the control-field receiver (ID 4.0) */
 #define BOARD_FLAG_REARM        0x10u           /* bitstream has the state machine's re-arm (ID 5.0) */
+#define BOARD_FLAG_PAYLOAD      0x20u           /* bitstream has the speculative payload FFT (ID 6.0) */
 #define EV_CFO_VALID            0x1u
 #define EV_TONE_FAIL            0x2u
 #define EV_TRUNCATED            0x4u
@@ -144,7 +148,10 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define MAX_TM                  4096u           /* timing records per RUN */
 #define CF_SIZE                 24u             /* control record (pd_protocol.ControlRecord) */
 #define MAX_CF                  1024u           /* control records per RUN */
-#define MAX_EVENTS              ((MAX_PAYLOAD - 16u - MAX_TM * TM_SIZE - MAX_CF * CF_SIZE - EV_SIZE) / EV_SIZE)
+#define PL_SIZE                 16u             /* payload record (pd_protocol.PayloadRecord) */
+#define MAX_PL                  8192u           /* payload records per RUN */
+#define MAX_EVENTS              ((MAX_PAYLOAD - 20u - MAX_TM * TM_SIZE - MAX_CF * CF_SIZE - MAX_PL * PL_SIZE \
+                                  - EV_SIZE) / EV_SIZE)
 #define TONE_THRESH_MAX_Q8      (24u * 256u)
 
 /* ---------------------------------------------------------------------------------- */
@@ -192,6 +199,9 @@ static int tm_lost;
 static u8  cf_out[MAX_CF * CF_SIZE]; /* control records of the RUN */
 static u32 cf_n;
 static int cf_lost;
+static u8  pl_out[MAX_PL * PL_SIZE]; /* payload records of the RUN */
+static u32 pl_n;
+static int pl_lost;
 
 /* ---------------------------------------------------------------------------------- */
 /* Helpers                                                                             */
@@ -420,11 +430,37 @@ static void drain_control(void)
     }
 }
 
+/* Read every complete payload record (4 words) into pl_out (pd_protocol.PayloadRecord). */
+static void drain_payload(void)
+{
+    if (det_version < PD_ID_V6) {
+        return;
+    }
+    while (pd_rd(R_PL_LEVEL) >= 4u) {
+        u32 w[4], i;
+        u8 *r;
+        for (i = 0; i < 4u; i++) {
+            w[i] = pd_rd(R_PL_DATA);
+        }
+        if (pl_n >= MAX_PL) {
+            pl_lost = 1;
+            continue;
+        }
+        r = pl_out + PL_SIZE * pl_n;
+        wr32(r + 0, w[0]);                                      /* t_trig */
+        wr32(r + 4, w[1] & 0x7Fu);                              /* sym (u16) + 2 pad bytes */
+        wr32(r + 8, w[2]);                                      /* sig_a */
+        wr32(r + 12, w[3]);                                     /* sig_b */
+        pl_n++;
+    }
+}
+
 static void drain_all(void)
 {
     drain_events();
     drain_timing();
     drain_control();
+    drain_payload();
 }
 
 /* Hold the detector in reset, write the parameters, release it. */
@@ -537,6 +573,8 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     tm_lost = 0;
     cf_n = 0;
     cf_lost = 0;
+    pl_n = 0;
+    pl_lost = 0;
     start = pd_rd(R_SAMPLES);
     start20 = start / div;
     pd_wr(R_CTRL, debug ? CTRL_DEBUG : 0u);
@@ -576,6 +614,11 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
                  (unsigned long)MAX_CF);
         return -5;
     }
+    if (pl_lost) {
+        snprintf(err, err_len, "more than %lu payload records in one RUN - run in smaller pieces",
+                 (unsigned long)MAX_PL);
+        return -5;
+    }
     if (tm_lost) {
         snprintf(err, err_len, "more than %lu timing records in one RUN - run in smaller pieces",
                  (unsigned long)MAX_TM);
@@ -604,11 +647,13 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     wr32(ev_out + 0, ev_n);
     wr32(ev_out + 4, count);
     /* reply: n_events, count, events, then n_timing and the timing records, then (build 11)
-     * n_control and the control records */
+     * n_control and the control records, then (build 13) n_payload and the payload records */
     wr32(ev_out + 8u + EV_SIZE * ev_n, tm_n);
     memcpy(ev_out + 12u + EV_SIZE * ev_n, tm_out, TM_SIZE * tm_n);
     wr32(ev_out + 12u + EV_SIZE * ev_n + TM_SIZE * tm_n, cf_n);
     memcpy(ev_out + 16u + EV_SIZE * ev_n + TM_SIZE * tm_n, cf_out, CF_SIZE * cf_n);
+    wr32(ev_out + 16u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n, pl_n);
+    memcpy(ev_out + 20u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n, pl_out, PL_SIZE * pl_n);
     return 0;
 }
 
@@ -700,7 +745,8 @@ static void handle_message(struct tcp_pcb *pcb)
         wr32(tx_small + 12, !det_ok ? BOARD_FLAG_NO_DETECTOR :
                             (det_version >= PD_ID_V3 ? BOARD_FLAG_TIMING : 0u) |
                             (det_version >= PD_ID_V4 ? BOARD_FLAG_CF : 0u) |
-                            (det_version >= PD_ID_V5 ? BOARD_FLAG_REARM : 0u));
+                            (det_version >= PD_ID_V5 ? BOARD_FLAG_REARM : 0u) |
+                            (det_version >= PD_ID_V6 ? BOARD_FLAG_PAYLOAD : 0u));
         reply(pcb, cmd, ST_OK, seq, tx_small, 16);
         return;
 
@@ -846,7 +892,8 @@ static void handle_message(struct tcp_pcb *pcb)
             if (flags & RUN_FLAG_DEBUG) {
                 debug_count = rd32(params + 28) == 2u ? count / 2u : count;
             }
-            reply(pcb, cmd, ST_OK, seq, ev_out, 16u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n);
+            reply(pcb, cmd, ST_OK, seq, ev_out,
+                  20u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * pl_n);
             return;
         }
         debug_count = 0;

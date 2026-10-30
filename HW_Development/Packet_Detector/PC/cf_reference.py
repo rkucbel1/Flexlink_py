@@ -365,3 +365,56 @@ def control_records(y: np.ndarray, events, timing) -> list:
         out.append(ControlRecord(tm.t_trig, tm.n_end, CF_CRC_OK if r.crc_ok else 0, r.shift, r.metric,
                                  r.message))
     return out
+
+
+# ---------------------------------------------------------------------------------------------
+# Speculative payload FFT (RTL/cf_rx.v, Docs/Specification_PayloadInput.md section 5): after the
+# control field the same de-rotator and FFT carry on with the payload symbols, phase continuous
+# from n_end + 1. Payload symbol s (0..PacketLength - 1) is symbol 4 + s of the stream, window
+# 1140 (4 + s) + 104 .. + 1127; its 841 bins are reduced to a 64-bit signature so the board can
+# be checked without the rest of the payload chain. Kept only for a control record with CRC ok
+# and every field code valid, and only with Params.rearm (packets cannot overlap then).
+
+PL_SPEC = 8                                     # payload symbols the front end runs ahead of the
+#                                                 control-field decision (no effect on results)
+
+
+def grid_symbol(xr, xi, s: int):
+    """841 bins (Yr, Yi) of symbol s of the de-rotated stream x (x[0] = sample n_end + 1)."""
+    a = s * CF_SYM + CF_CP + FFT_START
+    fr, fi = fft_fixed(xr[a:a + FFT_N], xi[a:a + FFT_N])
+    cols = (np.arange(841) - 420) % FFT_N
+    return fr[cols], fi[cols]
+
+
+def grid_signature(Yr, Yi) -> tuple[int, int]:
+    """Fletcher-style signature of the bins: x = re0, im0, re1, im1, ... (each mod 2^18),
+    A = sum x, B = sum of the running sums A_k, both mod 2^32."""
+    x = np.empty(2 * len(Yr), np.int64)
+    x[0::2] = np.asarray(Yr, np.int64) & 0x3FFFF
+    x[1::2] = np.asarray(Yi, np.int64) & 0x3FFFF
+    n = x.size
+    a = int(x.sum()) & 0xFFFFFFFF
+    b = int((x * (n - np.arange(n))).sum()) & 0xFFFFFFFF
+    return a, b
+
+
+def payload_records(y: np.ndarray, events, timing, control) -> list:
+    """PayloadRecord per payload symbol of every accepted packet (control record CRC ok, every
+    field valid), in order; a symbol is there only if its FFT window lies inside y."""
+    from pd_protocol import PayloadRecord
+    inc = {e.t_trig: e.cfo_inc for e in events}
+    out = []
+    for c in control:
+        if not (c.crc_ok and fields_valid(c.message)):
+            continue
+        n0 = c.n_end + 1
+        L = packet_length(c.message)
+        m = min(y.shape[0], n0 + (CF_SYMS + L) * CF_SYM) - n0
+        xr, xi = R.derotate(y[n0:n0 + m, 0], y[n0:n0 + m, 1], inc[c.t_trig] & 0xFFFFFF, X_BITS_CF)
+        for s in range(L):
+            if (CF_SYMS + s) * CF_SYM + CF_CP + FFT_START + FFT_N > m:
+                break
+            a, b = grid_signature(*grid_symbol(xr, xi, CF_SYMS + s))
+            out.append(PayloadRecord(c.t_trig, s, a, b))
+    return out

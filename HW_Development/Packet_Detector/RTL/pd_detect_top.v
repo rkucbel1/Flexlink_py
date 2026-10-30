@@ -91,6 +91,10 @@ module pd_detect_top (
     output wire [5:0]  cf_shift,
     output wire [15:0] cf_metric,
     output wire        cf_err,
+    // speculative payload FFT (rearm only): records kept after the control field's decision
+    output wire [4:0]   pl_cnt,
+    output wire [127:0] pl_head,       // {sig_b, sig_a, 25'b0, sym, t_trig}
+    input  wire         pl_pop,
     output wire        arm_late,       // a re-arm came too late (sticky; cannot happen)
     // state: busy = something still in flight; open_n / open_t = windows still waiting for
     // samples (at most 1 once busy is 0) and the first one's t_trig
@@ -182,12 +186,13 @@ module pd_detect_top (
         .busy(tm_busy), .err(tm_err));
 
     pd_cf u_cf (
-        .clk(clk), .rst_n(rst_n), .en(fe_on),
+        .clk(clk), .rst_n(rst_n), .en(fe_on), .pl_en(rearm),
         .y_valid(dc_valid), .y_i(dc_i), .y_q(dc_q),
         .tm_valid(tm_valid), .tm_t(tm_t), .tm_n_end(tm_n_end), .tm_status(tm_status), .tm_inc(tm_inc),
         .stall(stall_cf),
         .cf_valid(cf_valid), .cf_t(cf_t), .cf_n_end(cf_n_end), .cf_crc_ok(cf_crc_ok), .cf_msg(cf_msg),
-        .cf_shift(cf_shift), .cf_metric(cf_metric), .busy(cf_busy), .err(cf_err));
+        .cf_shift(cf_shift), .cf_metric(cf_metric), .busy(cf_busy), .err(cf_err),
+        .pl_cnt(pl_cnt), .pl_head(pl_head), .pl_pop(pl_pop));
 
     pd_arm u_arm (
         .clk(clk), .rst_n(rst_n), .rearm(rearm), .fe_on(fe_on), .n_cfo(n_cfo), .arm_holdoff(arm_holdoff),

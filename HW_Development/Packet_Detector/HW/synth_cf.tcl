@@ -17,7 +17,7 @@ set period 10.0
 file mkdir $out
 
 read_verilog [list \
-    [file join $rtl cf_roms.v] [file join $rtl cf_tdp_ram.v] [file join $rtl cf_fft.v] [file join $rtl cf_chest.v] \
+    [file join $rtl cf_roms.v] [file join $rtl cf_tdp_ram.v] [file join $rtl pd_fft2.v] [file join $rtl cf_chest.v] \
     [file join $rtl cf_viterbi.v] [file join $rtl cf_crc10.v] [file join $rtl pd_cordic.v] \
     [file join $rtl pd_tone_rom.v] [file join $rtl pd_sdp_ram.v] [file join $rtl cf_rx.v] \
     [file join $here cf_rx_ooc.v]]

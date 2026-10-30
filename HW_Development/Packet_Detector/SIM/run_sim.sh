@@ -16,6 +16,7 @@
 #   HOLDOFF=300 ./run_sim.sh                       # short re-arm holdoff (effective >= N_CFO)
 #   NCFO=4096 ./run_sim.sh cfo 1                   # other CFO window length (128..4096)
 #   REARM=0 ./run_sim.sh stress 1                  # fixed holdoff instead of the Rx state machine's re-arm
+#   PLGAP=20000 ./run_sim.sh                       # read payload records slowly (speculative FFT holds)
 #   ./run_sim.sh cfmod 1                           # rep3 with modified control fields: every re-arm decision
 #   ./run_sim.sh stress 1 / ./run_sim.sh cfo 1     # synthetic vectors (full scale / CFO sweep)
 #   ./run_sim.sh units                             # CORDIC, cascade, tone-check unit tests
@@ -73,7 +74,7 @@ else
   RTL=(../RTL/pd_halfband.v ../RTL/pd_dc_blocker.v ../RTL/pd_lpf.v ../RTL/pd_div16.v ../RTL/pd_detect_core.v
        ../RTL/pd_cordic.v ../RTL/pd_cfo_cascade.v ../RTL/pd_cfo_lane.v ../RTL/pd_tone_rom.v
        ../RTL/pd_sdp_ram.v ../RTL/pd_tone_check.v ../RTL/pd_timing.v ../RTL/cf_roms.v ../RTL/cf_tdp_ram.v
-       ../RTL/cf_fft.v ../RTL/cf_chest.v ../RTL/cf_viterbi.v ../RTL/cf_crc10.v ../RTL/cf_rx.v ../RTL/pd_cf.v
+       ../RTL/pd_fft2.v ../RTL/cf_chest.v ../RTL/cf_viterbi.v ../RTL/cf_crc10.v ../RTL/cf_rx.v ../RTL/pd_cf.v
        ../RTL/pd_arm.v ../RTL/pd_detect_top.v)
 args=("$VEC" --input-stage "$STAGE")
 [[ -n "${MAX:-}" ]] && args+=(--max-samples "$MAX")
@@ -96,12 +97,12 @@ case "$SIM" in
     # shellcheck disable=SC2086
     xelab --nolog --debug off ${XELAB_OPTS:-} "$TOP" -s "${TOP}_sim"
     xsim "${TOP}_sim" --nolog -R \
-        -testplusarg "gap=$GAP" -testplusarg "seed=$SEED" -testplusarg "fixgap=$FIXGAP" | tee ../../sim.log
+        -testplusarg "gap=$GAP" -testplusarg "seed=$SEED" -testplusarg "fixgap=$FIXGAP" -testplusarg "plgap=${PLGAP:-0}" | tee ../../sim.log
     ;;
   verilator)
     verilator --binary --timing -Wno-fatal -DPD_SIM_CHECKS --top-module "$TOP" \
         --Mdir "work/obj_$TOP" -o "$TOP" -j 2 "${RTL[@]}" "$TB" > work/verilator_build.log
-    (cd "$DIR" && "../obj_$TOP/$TOP" "+gap=$GAP" "+seed=$SEED" "+fixgap=$FIXGAP") | tee sim.log
+    (cd "$DIR" && "../obj_$TOP/$TOP" "+gap=$GAP" "+seed=$SEED" "+fixgap=$FIXGAP" "+plgap=${PLGAP:-0}") | tee sim.log
     ;;
   *)
     echo "SIM must be xsim or verilator" >&2; exit 2 ;;

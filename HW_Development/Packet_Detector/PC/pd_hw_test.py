@@ -21,6 +21,8 @@ GET_DEBUG, then compare with the bit-true model's expected events:
     control field (input stage 1, 2)        every field exact (bitstream 4.0, firmware build 11);
                                             the decoded fields are printed (cf_fields.py) and
                                             checked against the Tx message when it is available
+    payload FFT (input stage 1, 2, rearm)   every symbol's grid signature exact, in order
+                                            (bitstream 6.0, firmware build 13)
     ToneCheck dB                            within --tone-tol (0.01 dB): the decision is exact
                                             integer; the dB value is the firmware's log10
     debug records (--debug)                 every dbg_metric and flag word, exact
@@ -86,10 +88,11 @@ class Board:
 
     def run(self, count: int, debug: bool, flags: int = 0) -> tuple[list[pr.EventRecord], int]:
         """Events of this RUN; its timing records (firmware build 10) are left in self.timing and
-        its control records (build 11) in self.control."""
+        its control records (build 11) in self.control, its payload records (build 13) in
+        self.payload."""
         flags |= pr.RUN_FLAG_DEBUG if debug else 0
         reply = self.call(pr.RUN, struct.pack("<II", count, flags))
-        evs, done, self.timing, self.control = pr.parse_run_reply(reply)
+        evs, done, self.timing, self.control, self.payload = pr.parse_run_reply_all(reply)
         return evs, done
 
     def get_debug(self, count: int) -> np.ndarray:
@@ -167,6 +170,24 @@ def compare_timing(got: list[pr.TimingRecord], exp: list[pr.TimingRecord]) -> tu
     for t, e in by_t.items():
         ok = False
         lines.append(f"  MISSING  timing t_trig {t}: {describe_timing(e)}")
+    return ok, lines
+
+
+def compare_payload(got: list[pr.PayloadRecord], exp: list[pr.PayloadRecord]) -> tuple[bool, list[str]]:
+    """Every record exact and in order (one summary line per packet)."""
+    lines, ok = [], got == exp
+    by_pkt: dict[int, list] = {}
+    for r in exp:
+        by_pkt.setdefault(r.t_trig, [[], []])[1].append(r)
+    for r in got:
+        by_pkt.setdefault(r.t_trig, [[], []])[0].append(r)
+    for t, (g, e) in sorted(by_pkt.items()):
+        same = g == e
+        bad = next((i for i, (x, y) in enumerate(zip(g, e)) if x != y), min(len(g), len(e)))
+        lines.append(f"  {'ok      ' if same else 'MISMATCH'} payload t_trig {t:8d}: {len(g)} symbol signature(s)"
+                     + ("" if same else f", expected {len(e)}; first difference at symbol {bad}"))
+    if not by_pkt:
+        lines.append("  payload records: none (none expected)")
     return ok, lines
 
 
@@ -331,6 +352,8 @@ def main(argv=None) -> int:
         events: dict[int, pr.EventRecord] = {}
         timing: dict[int, pr.TimingRecord] = {}
         control: dict[int, pr.ControlRecord] = {}
+        payload: list[pr.PayloadRecord] = []
+        has_pl = bool(info.flags & pr.BOARD_PAYLOAD) and a.input_stage in (1, 2)
         has_timing = bool(info.flags & pr.BOARD_TIMING) and a.input_stage in (1, 2)
         has_cf = bool(info.flags & pr.BOARD_CF) and a.input_stage in (1, 2)
         dbg_parts = []
@@ -371,6 +394,7 @@ def main(argv=None) -> int:
                 timing[r.t_trig] = r
             for r in b.control:
                 control[r.t_trig] = r
+            payload += b.payload
             if a.debug:
                 dbg_parts.append(b.get_debug(done // div))
         mb = iq.nbytes / 1e6
@@ -408,6 +432,12 @@ def main(argv=None) -> int:
             cok, clines = compare_control(cf_got, res.control)
             ok &= cok
             lines += clines
+            if has_pl:
+                pok, plines = compare_payload(payload, res.payload)
+                ok &= pok
+                lines += plines
+            elif params.rearm:
+                lines.append("  (no payload FFT records: the board's bitstream or firmware predates them)")
         else:
             lines.append("  (no control-field receiver: the board's bitstream or firmware predates it)")
     elif a.input_stage in (1, 2):
@@ -442,7 +472,7 @@ def main(argv=None) -> int:
     print("PASS" if ok else "FAIL")
 
     result.update({"pass": ok, "events": [vars(e) for e in got], "timing": [vars(r) for r in tm_got],
-                   "control": [vars(r) for r in cf_got],
+                   "control": [vars(r) for r in cf_got], "payload": [vars(r) for r in payload],
                    "report": lines})
     a.vector.with_name(a.vector.stem + "_result.json").write_text(json.dumps(result, indent=2))
     if a.plot and dbg_parts:

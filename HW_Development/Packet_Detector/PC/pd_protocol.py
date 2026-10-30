@@ -37,7 +37,10 @@ Commands (request payload -> reply payload)
                                                   events. Then (firmware build 11 and later,
                                                   BoardInfo flag BOARD_CF) u32 n_control and
                                                   n_control x ControlRecord (control field after
-                                                  each good timing record)
+                                                  each good timing record). Then (firmware
+                                                  build 13 and later, BOARD_PAYLOAD) u32
+                                                  n_payload and n_payload x PayloadRecord (one
+                                                  per payload symbol of each accepted packet)
     GET_DEBUG     u32 offset, u32 count     -> count x DebugRecord (from the last RUN with
                                                        capture enabled); after a PL-loopback RUN
                                                        the 4-byte records are the samples as they
@@ -96,6 +99,9 @@ BOARD_CF = 0x8                         # bitstream has the control-field receive
 #                                        timing records
 BOARD_REARM = 0x10                     # bitstream has the Rx state machine's re-arm (ID 5.0, firmware
 #                                        build 12): Params.rearm is used (else always the holdoff)
+BOARD_PAYLOAD = 0x20                   # bitstream has the shared fast FFT with the speculative payload
+#                                        FFT (ID 6.0, firmware build 13): the RUN reply carries payload
+#                                        records after the control records (only with Params.rearm)
 
 # EventRecord.status bits
 EV_CFO_VALID = 0x1                     # N_CFO samples were available, cfo_inc is valid
@@ -294,13 +300,34 @@ class ControlRecord:
         return [(self.message >> i) & 1 for i in range(CF_MSG_BITS)]
 
 
-def parse_run_reply(reply: bytes) -> tuple[list[EventRecord], int, list[TimingRecord], list[ControlRecord]]:
-    """RUN reply -> (events, samples processed, timing records, control records). Replies of
-    older firmware end after the events (build <= 9) or after the timing records (build 10)."""
+@dataclass
+class PayloadRecord:
+    """Speculative payload FFT: one per payload symbol of an accepted packet (control record CRC
+    ok and every field valid, Params.rearm), in order (cf_reference.payload_records)."""
+    t_trig: int                        # the packet's t_trig
+    sym: int                           # payload symbol 0 .. PacketLength - 1
+    sig_a: int                         # grid signature (cf_reference.grid_signature)
+    sig_b: int
+
+    FMT = struct.Struct("<IHxxII")     # 16 bytes
+
+    def pack(self) -> bytes:
+        return self.FMT.pack(*astuple(self))
+
+    @classmethod
+    def unpack_many(cls, b: bytes, n: int) -> list["PayloadRecord"]:
+        s = cls.FMT.size
+        return [cls(*cls.FMT.unpack(b[i * s:(i + 1) * s])) for i in range(n)]
+
+
+def parse_run_reply_all(reply: bytes):
+    """RUN reply -> (events, samples processed, timing records, control records, payload
+    records). Replies of older firmware end after the events (build <= 9), the timing records
+    (build 10) or the control records (builds 11, 12)."""
     n_ev, done = struct.unpack_from("<II", reply)
     evs = EventRecord.unpack_many(reply[8:], n_ev)
     off = 8 + EventRecord.FMT.size * n_ev
-    tms, cfs = [], []
+    tms, cfs, pls = [], [], []
     if len(reply) >= off + 4:
         (n_tm,) = struct.unpack_from("<I", reply, off)
         tms = TimingRecord.unpack_many(reply[off + 4:], n_tm)
@@ -308,7 +335,16 @@ def parse_run_reply(reply: bytes) -> tuple[list[EventRecord], int, list[TimingRe
         if len(reply) >= off + 4:
             (n_cf,) = struct.unpack_from("<I", reply, off)
             cfs = ControlRecord.unpack_many(reply[off + 4:], n_cf)
-    return evs, done, tms, cfs
+            off += 4 + ControlRecord.FMT.size * n_cf
+            if len(reply) >= off + 4:
+                (n_pl,) = struct.unpack_from("<I", reply, off)
+                pls = PayloadRecord.unpack_many(reply[off + 4:], n_pl)
+    return evs, done, tms, cfs, pls
+
+
+def parse_run_reply(reply: bytes) -> tuple[list[EventRecord], int, list[TimingRecord], list[ControlRecord]]:
+    """parse_run_reply_all without the payload records."""
+    return parse_run_reply_all(reply)[:4]
 
 
 DEBUG_DTYPE = np.dtype([("metric", "<u2"), ("bits", "<u2")])   # 4 bytes per sample

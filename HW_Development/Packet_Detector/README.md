@@ -242,6 +242,25 @@ cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
 cd PC && python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 && python pd_board_regression.py
 ```
 
+Step 11: **shared fast FFT and speculative payload FFT** (`RTL/pd_fft2.v`, `cf_rx.v`,
+`pd_cf.v`; `Docs/Specification_PayloadInput.md` §5, `BITTRUE.md` change 12). The control-field
+FFT now does two butterflies per clock (2640 instead of 5200 clocks per symbol, +4 DSP, about
++6 BRAM36, identical results), and the same FFT carries on with the payload symbols straight
+after the control field, while the control field is still being decoded (at most 8 symbols
+ahead); the control record keeps PacketLength of them or drops them. Each payload symbol gives a
+64-bit signature of its 841 bins in the RUN reply, so the board checks the payload FFT bit for
+bit against the model (`pd_hw_test` "payload", regression column "payload"). Only with
+`rearm` 1. At 20 Msps the control record comes 1600 samples sooner than before (3770 after the
+payload start) and the last payload symbol is through the FFT about 700 samples after the packet
+ends. Bitstream ID 6.0 (PL_LEVEL 0x5C, PL_DATA 0x60), firmware build 13 (`BOARD_PAYLOAD`).
+
+```bash
+cd SIM && ./run_cf.sh && ./run_sim.sh && ./run_sim.sh cfmod 1 && PLGAP=20000 ./run_sim.sh && cd ..
+cd HW && vivado -mode batch -source build_hw.tcl && cd ..
+cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
+cd PC && python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 && python pd_board_regression.py
+```
+
 **Board regression** (`PC/pd_board_regression.py`): the RTL simulation's coverage on the board.
 Each case runs on the board and, with the same commands, through `pd_board_emulator`'s logic
 in-process; every RUN reply and every debug record must match. Cases: rep3 and the defects

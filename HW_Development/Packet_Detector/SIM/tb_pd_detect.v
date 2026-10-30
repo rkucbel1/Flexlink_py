@@ -52,6 +52,9 @@ module tb_pd_detect;
     wire [33:0] tm_p_max;
     wire [47:0] tm_p_sum;
     wire        cf_valid, cf_crc_ok, cf_err, arm_late;
+    wire [4:0]   pl_cnt;
+    wire [127:0] pl_head;
+    reg          pl_pop = 1'b0;
     reg         rearm = 1'b0, arm_late_seen = 1'b0;
     wire [31:0] cf_t, cf_n_end;
     wire [53:0] cf_msg;
@@ -63,7 +66,7 @@ module tb_pd_detect;
         .input_stage(input_stage), .dc_shift(dc_shift),
         .eta_hi_sq(eta_hi_sq), .eta_lo_sq(eta_lo_sq), .qual_len(qual_len),
         .blank_len(blank_len), .arm_holdoff(arm_holdoff), .n_cfo(n_cfo), .tone_lin(tone_lin), .t_pk(t_pk),
-        .rearm(rearm), .arm_late(arm_late),
+        .rearm(rearm), .arm_late(arm_late), .pl_cnt(pl_cnt), .pl_head(pl_head), .pl_pop(pl_pop),
         .s_iq_tvalid(s_valid), .s_iq_tdata(s_data), .s_iq_tready(s_ready),
         .lpf_valid(lpf_valid), .lpf_i(lpf_i), .lpf_q(lpf_q),
         .trig(trig), .t_trig(t_trig),
@@ -100,12 +103,19 @@ module tb_pd_detect;
     reg [7:0]  xc_h [0:255];
     reg [15:0] xc_m [0:255];
     reg [55:0] xc_g [0:255];
+    integer f_pl, n_pl, pl_seen, pl_gap, pl_wait;
+    reg [31:0] xp_t [0:4095];
+    reg [7:0]  xp_s [0:4095];
+    reg [31:0] xp_a [0:4095];
+    reg [31:0] xp_b [0:4095];
 
     // ------------------------------------------------------------------ checkers
     integer errors, lpf_seen, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, stalls;
     initial begin
         errors = 0; lpf_seen = 0; dbg_seen = 0; trig_seen = 0; cfo_seen = 0; ev_seen = 0;
         tm_seen = 0; tm_good = 0; tm_busy_n = 0; n_tm = 0; n_cf = 0; cf_seen = 0; cf_ok = 0;
+        n_pl = 0; pl_seen = 0; pl_wait = 0;
+        if (!$value$plusargs("plgap=%d", pl_gap)) pl_gap = 0;
         ev_fails = 0; stalls = 0;
         rst_n = 1'b0; s_valid = 1'b0; s_data = 32'd0;
     end
@@ -249,6 +259,26 @@ module tb_pd_detect;
             if (cf_crc_ok) cf_ok = cf_ok + 1;
             cf_seen = cf_seen + 1;
         end
+        // payload records: read whenever there is one, at most one every PL_GAP clocks (tests the
+        // hold-off of the speculative FFT when the reader is slow)
+        pl_pop <= 1'b0;
+        if (pl_wait > 0) pl_wait = pl_wait - 1;
+        if (rst_n && pl_cnt != 5'd0 && !pl_pop && pl_wait == 0) begin
+            pl_pop <= 1'b1; pl_wait = pl_gap;
+            if (pl_seen >= n_pl) begin
+                errors = errors + 1;
+                if (errors <= maxerr) $display("ERROR payload: unexpected record t %0d sym %0d", pl_head[31:0], pl_head[38:32]);
+            end else if (pl_head[31:0] !== xp_t[pl_seen] || pl_head[38:32] !== xp_s[pl_seen][6:0] ||
+                         pl_head[95:64] !== xp_a[pl_seen] || pl_head[127:96] !== xp_b[pl_seen]) begin
+                errors = errors + 1;
+                if (errors <= maxerr)
+                    $display("ERROR payload %0d: t %0d sym %0d sig %h %h, expected %0d %0d %h %h", pl_seen,
+                             pl_head[31:0], pl_head[38:32], pl_head[95:64], pl_head[127:96],
+                             xp_t[pl_seen], xp_s[pl_seen], xp_a[pl_seen], xp_b[pl_seen]);
+            end else if (pl_head[38:32] == 7'd0)
+                $display("  payload of t_trig %0d: symbol 0 signature %h %h (ok)", pl_head[31:0], pl_head[95:64], pl_head[127:96]);
+            pl_seen = pl_seen + 1;
+        end
         if (rst_n && arm_late && !arm_late_seen) begin
             errors = errors + 1; arm_late_seen = 1'b1;
             if (errors <= maxerr) $display("ERROR re-arm: a decision came after its sample");
@@ -284,8 +314,9 @@ module tb_pd_detect;
         f_open = $fopen("exp_open.txt", "r");
         f_tm   = $fopen("exp_tm.txt", "r");
         f_cf   = $fopen("exp_cf.txt", "r");
+        f_pl   = $fopen("exp_pl.txt", "r");
         if (f_cfg == 0 || f_in == 0 || f_lpf == 0 || f_dbg == 0 || f_trig == 0 || f_cfo == 0 || f_tone == 0 ||
-            f_open == 0 || f_tm == 0 || f_cf == 0) begin
+            f_open == 0 || f_tm == 0 || f_cf == 0 || f_pl == 0) begin
             $display("FAIL: cannot open the vector files (cfg.txt ...) in the current directory");
             $finish;
         end
@@ -304,6 +335,9 @@ module tb_pd_detect;
         r = $fscanf(f_cf, "%d\n", n_cf);
         for (k2 = 0; k2 < n_cf; k2 = k2 + 1)
             r = $fscanf(f_cf, "%h %h %h %h %h %h\n", xc_t[k2], xc_n[k2], xc_s[k2], xc_h[k2], xc_m[k2], xc_g[k2]);
+        r = $fscanf(f_pl, "%d\n", n_pl);
+        for (k2 = 0; k2 < n_pl; k2 = k2 + 1)
+            r = $fscanf(f_pl, "%h %h %h %h\n", xp_t[k2], xp_s[k2], xp_a[k2], xp_b[k2]);
         input_stage = cfg_stage[1:0];  dc_shift  = cfg_shift[3:0];
         eta_hi_sq   = cfg_hi[15:0];  eta_lo_sq = cfg_lo[15:0];  qual_len = cfg_q[15:0];
         blank_len   = cfg_blank;     arm_holdoff = cfg_hold;  n_cfo = cfg_ncfo[15:0];
@@ -336,7 +370,9 @@ module tb_pd_detect;
         // wait until nothing is in flight (the last checks take up to 2 x ceil(13 / NU) x N clocks)
         guard = 0;
         @(negedge clk);
-        while (busy && guard < 30 * cfg_ncfo + 160000) begin @(negedge clk); guard = guard + 1; end
+        while ((busy || pl_cnt != 5'd0) && guard < 30 * cfg_ncfo + 160000 + 17 * pl_gap) begin
+            @(negedge clk); guard = guard + 1;
+        end
         if (busy) begin errors = errors + 1; $display("ERROR: still busy %0d clocks after the input ended", guard); end
         repeat (20) @(negedge clk);
         if (busy) begin errors = errors + 1; $display("ERROR: busy again after it went low"); end
@@ -368,10 +404,13 @@ module tb_pd_detect;
         if (cf_seen != n_cf) begin
             errors = errors + 1; $display("ERROR: %0d control records, expected %0d", cf_seen, n_cf);
         end
+        if (pl_seen != n_pl) begin
+            errors = errors + 1; $display("ERROR: %0d payload records, expected %0d", pl_seen, n_pl);
+        end
         $display("  input stalled for %0d clocks (tone check catching up, timing searches)", stalls);
         if (errors == 0)
-            $display("PASS: %0d samples, %0d debug records, %0d trigger(s), %0d CFO result(s), %0d event(s) (%0d failing the tone check), %0d timing record(s) (%0d good, %0d busy), %0d control record(s) (%0d CRC ok) match the bit-true model",
-                     n_samples, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, tm_seen, tm_good, tm_busy_n, cf_seen, cf_ok);
+            $display("PASS: %0d samples, %0d debug records, %0d trigger(s), %0d CFO result(s), %0d event(s) (%0d failing the tone check), %0d timing record(s) (%0d good, %0d busy), %0d control record(s) (%0d CRC ok), %0d payload record(s) match the bit-true model",
+                     n_samples, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, tm_seen, tm_good, tm_busy_n, cf_seen, cf_ok, pl_seen);
         else
             $display("FAIL: %0d error(s)", errors);
         $finish;

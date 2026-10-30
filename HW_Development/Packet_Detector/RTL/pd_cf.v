@@ -13,7 +13,18 @@
 // overwritten. Samples of a timing search not finished yet are safe without that: pd_timing keeps
 // them within 2^12 - 64 samples of the input, and this buffer is twice as long.
 // At 20 Msps (5 clocks per sample) nothing stalls: a control field starts at most ~5000 samples
-// behind the input and falls ~1300 further behind while it runs (the FFTs stop its input).
+// behind the input and falls ~700 further behind while it runs (the FFTs stop its input).
+//
+// Speculative payload FFT (pl_en, i.e. re-arm by the Rx state machine, so packets cannot
+// overlap): cf_rx carries on with the payload symbols after the control field (see there); each
+// symbol's 841 bins give a signature (cf_reference.grid_signature) that goes into the payload
+// FIFO (16 records). Records of symbols started before the control field was decided are
+// pending: a good decision keeps the first PacketLength of them, a rejected one drops them all;
+// after a good decision new records are kept at once (and symbols >= PacketLength, which can
+// only be in flight, are dropped). A payload symbol starts only while the FIFO has room, so
+// nothing is lost if the firmware is slow (the sample input is then held by the stall).
+// Payload FIFO head: pl_cnt kept records, pl_head = {sig_b, sig_a, 25'b0 sym, t_trig},
+// pl_pop removes it.
 `timescale 1ns / 1ps
 `default_nettype none
 
@@ -24,6 +35,7 @@ module pd_cf #(
     input  wire               clk,
     input  wire               rst_n,
     input  wire               en,          // input_stage 1 or 2
+    input  wire               pl_en,       // speculative payload FFT (Params.rearm)
     // DC blocker output
     input  wire               y_valid,
     input  wire signed [11:0] y_i,
@@ -45,9 +57,12 @@ module pd_cf #(
     output wire [5:0]         cf_shift,
     output wire signed [15:0] cf_metric,
     output wire               busy,        // work in progress that does not wait for samples
-    output reg                err          // start queue overflow (sticky; cannot happen)
+    output reg                err,         // start queue overflow (sticky; cannot happen)
+    // payload records
+    output wire [4:0]         pl_cnt,
+    output wire [127:0]       pl_head,
+    input  wire               pl_pop
 );
-    localparam integer LEN   = 4560;
     localparam integer DEPTH = 1 << DB;
     localparam [31:0]  LIM   = DEPTH - MARGIN;
 
@@ -89,14 +104,15 @@ module pd_cf #(
 
     // ------------------------------------------------------------------ reader
     reg         active;
-    reg  [12:0] fetched;                    // samples fetched for the running control field
+    wire        rx_more;                    // cf_rx will still take samples
+    wire        rx_busy;
     reg  [1:0]  pv;                         // fetch -> buffer data (one clock) -> FIFO
     reg  [2:0]  infl;
     reg  [23:0] ff [0:3];
     reg  [1:0]  ff_wr, ff_rd;
     reg  [2:0]  ff_n;
     wire        avail = $signed(rp - wp) < 0;
-    wire        fetch = active && avail && (fetched != LEN) && ({1'b0, ff_n} + {1'b0, infl} < 4'd4);
+    wire        fetch = active && rx_more && avail && ({1'b0, ff_n} + {1'b0, infl} < 4'd4);
     wire        cf_ready;
     wire        ff_pop = (ff_n != 3'd0) && cf_ready;
     reg         cf_start;
@@ -104,20 +120,23 @@ module pd_cf #(
     always @(posedge clk) begin
         if (!rst_n) begin
             active <= 1'b0; q_pop <= 1'b0; cf_start <= 1'b0; pv <= 2'd0; infl <= 3'd0;
-            ff_wr <= 2'd0; ff_rd <= 2'd0; ff_n <= 3'd0; rp <= 32'd0; fetched <= 13'd0;
+            ff_wr <= 2'd0; ff_rd <= 2'd0; ff_n <= 3'd0; rp <= 32'd0;
         end else begin
             q_pop <= 1'b0; cf_start <= 1'b0;
-            if (!active && q_n != 3'd0 && !q_pop) begin
+            if (!active && q_n != 3'd0 && !q_pop && infl == 3'd0 && pv == 2'd0) begin
+                // new job: samples prefetched for the last one are dropped
                 active <= 1'b1; q_pop <= 1'b1; cf_start <= 1'b1;
-                rp <= q_s[q_rd]; fetched <= 13'd0;
-            end else if (active && rec_v)
-                active <= 1'b0;
-            if (fetch) begin rp <= rp + 32'd1; fetched <= fetched + 13'd1; end
+                rp <= q_s[q_rd];
+                ff_wr <= 2'd0; ff_rd <= 2'd0; ff_n <= 3'd0;
+            end else begin
+                if (active && !rx_busy) active <= 1'b0;
+                if (fetch) rp <= rp + 32'd1;
+                if (pv[0]) begin ff[ff_wr] <= b_rd; ff_wr <= ff_wr + 2'd1; end
+                if (ff_pop) ff_rd <= ff_rd + 2'd1;
+                ff_n <= ff_n + {2'd0, pv[0]} - {2'd0, ff_pop};
+            end
             pv   <= {pv[0], fetch};
             infl <= infl + {2'd0, fetch} - {2'd0, pv[0]};
-            if (pv[0]) begin ff[ff_wr] <= b_rd; ff_wr <= ff_wr + 2'd1; end
-            if (ff_pop) ff_rd <= ff_rd + 2'd1;
-            ff_n <= ff_n + {2'd0, pv[0]} - {2'd0, ff_pop};
         end
     end
     wire [23:0] ff_head = ff[ff_rd];
@@ -127,14 +146,20 @@ module pd_cf #(
     wire [31:0] age_q  = wp - q_s[q_rd];
     always @(posedge clk) begin
         if (!rst_n || !en) stall <= 1'b0;
-        else stall <= (active && (fetched != LEN) && !age_rp[31] && (age_rp >= LIM)) ||
+        else stall <= (active && rx_more && !age_rp[31] && (age_rp >= LIM)) ||
                       ((q_n != 3'd0) && !age_q[31] && (age_q >= LIM));
     end
 
     // ------------------------------------------------------------------ receiver
-    wire cf_busy;
+    wire               pg_valid, pl_dec, pl_ok;
+    wire [6:0]         pg_sym, pl_len;
+    wire [9:0]         pg_col;
+    wire signed [17:0] pg_re, pg_im;
+    wire               pl_room;
     cf_rx u_rx (.clk(clk), .rst_n(rst_n), .start(cf_start), .cfo_inc(q_inc[q_rd]), .t_trig(q_t[q_rd]),
-                .n_end(q_e[q_rd]), .busy(cf_busy),
+                .n_end(q_e[q_rd]), .busy(rx_busy), .pl_en(pl_en), .pl_room(pl_room), .s_more(rx_more),
+                .pg_valid(pg_valid), .pg_sym(pg_sym), .pg_col(pg_col), .pg_re(pg_re), .pg_im(pg_im),
+                .pl_dec(pl_dec), .pl_ok(pl_ok), .pl_len(pl_len),
                 .s_valid(ff_n != 3'd0), .s_ready(cf_ready), .s_i(ff_head[11:0]), .s_q(ff_head[23:12]),
                 .rec_valid(rec_v), .rec_crc_ok(cf_crc_ok), .rec_msg(cf_msg), .rec_shift(cf_shift),
                 .rec_metric(cf_metric), .rec_t_trig(cf_t), .rec_n_end(cf_n_end),
@@ -143,8 +168,72 @@ module pd_cf #(
     assign cf_valid = rec_v;
 
     // busy: something to do that does not wait for new samples
-    wire starving = active && cf_ready && (ff_n == 3'd0) && (infl == 3'd0) && !avail && (fetched != LEN);
+    wire starving = active && rx_more && cf_ready && (ff_n == 3'd0) && (infl == 3'd0) && !avail;
     assign busy = (active && !starving) || (!active && q_n != 3'd0) || q_pop || cf_start;
+
+    // ------------------------------------------------------------------ payload signatures
+    // x = re0, im0, re1, im1, ... (18 bit unsigned each): A += x, B += A per value; two values
+    // per bin: A' = A + re + im, B' = B + 2 A + 2 re + im
+    // (the bins are registered first: they come straight from the FFT's block RAM)
+    reg         gv;
+    reg  [9:0]  gc;
+    reg  [6:0]  gs;
+    reg  [17:0] gr, gi;
+    always @(posedge clk) begin
+        gv <= pg_valid && rst_n; gc <= pg_col; gs <= pg_sym; gr <= pg_re; gi <= pg_im;
+    end
+    reg  [31:0] sg_a, sg_b;
+    wire [31:0] ur = {14'd0, gr};
+    wire [31:0] ui = {14'd0, gi};
+    wire        first = (gc == 10'd0);
+    wire [31:0] a0 = first ? 32'd0 : sg_a;
+    wire [31:0] b0 = first ? 32'd0 : sg_b;
+    wire [31:0] a1 = a0 + ur + ui;
+    wire [31:0] b1 = b0 + {a0[30:0], 1'b0} + {ur[30:0], 1'b0} + ui;
+    reg         sg_w;                       // signature of the symbol complete
+    reg  [6:0]  sg_s;
+    always @(posedge clk) begin
+        sg_w <= 1'b0;
+        if (gv) begin
+            sg_a <= a1; sg_b <= b1;
+            if (gc == 10'd840) begin sg_w <= 1'b1; sg_s <= gs; end
+        end
+        if (!rst_n) sg_w <= 1'b0;
+    end
+
+    // ------------------------------------------------------------------ payload FIFO
+    // [rd, cm) kept, [cm, wr) pending (before the decision)
+    reg  [127:0] pl_mem [0:15];
+    reg  [4:0]   pl_wr, pl_cm, pl_rd;
+    reg  [31:0]  j_t;                       // t_trig of the running job
+    reg          j_dec, j_ok;
+    reg  [6:0]   j_len;
+    wire [4:0]   n_pend = pl_wr - pl_cm;
+    wire         w_take = sg_w && (!j_dec || (j_ok && sg_s < j_len));   // write this record
+    wire [4:0]   n_pw   = n_pend + {4'd0, w_take && !j_dec};             // pending incl. it
+    wire [4:0]   keep   = ({5'd0, pl_len} < {2'd0, n_pw}) ? pl_len[4:0] : n_pw;
+    always @(posedge clk) begin
+        if (w_take) pl_mem[pl_wr[3:0]] <= {sg_b, sg_a, 25'd0, sg_s, j_t};
+    end
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            pl_wr <= 5'd0; pl_cm <= 5'd0; pl_rd <= 5'd0; j_dec <= 1'b0;
+        end else begin
+            if (cf_start) begin j_t <= q_t[q_rd]; j_dec <= 1'b0; end
+            if (pl_dec) begin
+                j_dec <= 1'b1; j_ok <= pl_ok; j_len <= pl_len;
+                if (pl_ok) begin pl_cm <= pl_cm + keep; pl_wr <= pl_cm + keep; end
+                else pl_wr <= pl_cm;
+            end else if (w_take) begin
+                pl_wr <= pl_wr + 5'd1;
+                if (j_dec) pl_cm <= pl_cm + 5'd1;
+            end
+            if (pl_pop && pl_cm != pl_rd) pl_rd <= pl_rd + 5'd1;
+        end
+    end
+    assign pl_room = (pl_wr - pl_rd) < 5'd16;
+    assign pl_cnt  = pl_cm - pl_rd;
+    assign pl_head = pl_mem[pl_rd[3:0]];
 endmodule
 
 `default_nettype wire

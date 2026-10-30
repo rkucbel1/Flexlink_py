@@ -140,6 +140,8 @@ class Result:
     extra: list[dict] = field(default_factory=list)   # values per event, for reports
     timing: list[TimingRecord] = field(default_factory=list)   # Preamble B timing (input_stage 1, 2)
     control: list = field(default_factory=list)   # ControlRecord per good timing record (cf_reference)
+    payload: list = field(default_factory=list)   # PayloadRecord per payload symbol (cf_reference,
+    #                                               only with p.rearm)
 
 
 # --------------------------------------------------------------------------------------- #
@@ -636,6 +638,8 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False, control: bool = True)
         if control:
             import cf_reference                         # imports this module
             res.control = cf_reference.control_records(y, events, res.timing)
+            if getattr(p, "rearm", 0):
+                res.payload = cf_reference.payload_records(y, events, res.timing, res.control)
     if debug:
         with np.errstate(divide="ignore", invalid="ignore"):
             met = np.where(den > 0, num // np.maximum(den, 1), 0)

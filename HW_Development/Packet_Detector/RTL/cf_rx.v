@@ -13,8 +13,19 @@
 //   3. cf_chest    channel estimate, soft values, combining, Viterbi input scaling
 //   4. cf_viterbi  70 bits, metric;  5. cf_crc10 over bits 0..63
 // rec_valid: rec_crc_ok, rec_msg (bit i = message bit i), rec_shift, rec_metric.
-// Clocks per control field: 4560 input + 4 x (5200 FFT + 850 unload) + ~10600 decoding
-// + 4760 Viterbi, about 44000 (0.44 ms at 100 MHz).
+// Clocks per control field: 4560 input + 4 x (2640 FFT + 850 unload) + ~10600 decoding
+// + 4760 Viterbi, about 34000 (0.34 ms at 100 MHz).
+//
+// The FFT is pd_fft2 (two butterflies per clock), shared with the payload: with pl_en the
+// front end (de-rotator, FFT, unload) carries on after the 4 control-field symbols with payload
+// symbol p = 0, 1, ... (stream symbol 4 + p, same window and phase ramp) while the back end
+// (cf_chest, Viterbi, CRC) decodes the control field; the bins of payload symbols come out on
+// pg_* (pg_sym = p, pg_col = 0..840). Before the control field is decided at most PL_SPEC
+// payload symbols are started; then pl_dec (one clock after rec_valid) gives pl_ok (CRC ok and
+// every field code valid, as pd_arm) and pl_len (PacketLength in symbols), and the front end
+// stops at symbol pl_len (or at once if not pl_ok). A payload symbol starts only with pl_room.
+// Without pl_en the front end stops after the control field (4560 samples), as before.
+// s_more: the front end will still take samples (pd_cf fetches for it while it is set).
 `timescale 1ns / 1ps
 `default_nettype none
 
@@ -26,6 +37,9 @@ module cf_rx (
     input  wire [31:0]        t_trig,
     input  wire [31:0]        n_end,
     output wire               busy,
+    input  wire               pl_en,
+    input  wire               pl_room,
+    output wire               s_more,
     input  wire               s_valid,
     output wire               s_ready,
     input  wire signed [11:0] s_i,
@@ -37,6 +51,15 @@ module cf_rx (
     output reg  signed [15:0] rec_metric,
     output reg  [31:0]        rec_t_trig,
     output reg  [31:0]        rec_n_end,
+    // payload symbols (speculative) and the decision
+    output wire               pg_valid,
+    output wire [6:0]         pg_sym,
+    output wire [9:0]         pg_col,
+    output wire signed [17:0] pg_re,
+    output wire signed [17:0] pg_im,
+    output reg                pl_dec,
+    output reg                pl_ok,
+    output reg  [6:0]         pl_len,
     // testbench only
     output reg                dbg_grid_we,
     output reg  [11:0]        dbg_grid_addr,
@@ -50,16 +73,30 @@ module cf_rx (
     output wire signed [45:0] dbg_v,
     output wire [69:0]        dbg_bits
 );
-    localparam [3:0] R_IDLE = 4'd0, R_IN = 4'd1, R_DRAIN = 4'd2, R_FFT = 4'd3, R_FWAIT = 4'd4,
-                     R_UNLOAD = 4'd5, R_CE = 4'd6, R_CEW = 4'd7, R_VIT = 4'd8, R_CRC = 4'd9;
-    reg [3:0]  state;
+    localparam integer PL_SPEC = 8;             // payload symbols started before the decision
+    // front end
+    localparam [2:0] F_IDLE = 3'd0, F_IN = 3'd1, F_DRAIN = 3'd2, F_FFT = 3'd3, F_FWAIT = 3'd4,
+                     F_UNLOAD = 3'd5;
+    // back end
+    localparam [2:0] B_IDLE = 3'd0, B_CE = 3'd1, B_CEW = 3'd2, B_VIT = 3'd3, B_CRC = 3'd4, B_DEC = 3'd5;
+    reg [2:0]  fst, bst;
     reg [23:0] inc, ph;
     reg [10:0] pos;                             // sample position in the symbol, 0..1139
-    reg [1:0]  isym;                            // symbol of the input sample
-    reg [1:0]  fsym;                            // symbol in the FFT
+    reg [6:0]  isym;                            // symbol of the input sample (0..3 control field)
+    reg [6:0]  fsym;                            // symbol in the FFT
     reg [9:0]  cnt;
-    assign busy = (state != R_IDLE);
-    assign s_ready = (state == R_IN);
+    reg        pl_on;                           // pl_en latched at start
+    reg        decided, d_ok;
+    reg [6:0]  d_len;
+    reg        be_go;
+    assign busy = (fst != F_IDLE) || (bst != B_IDLE) || be_go || start;
+    // gate at the first sample of every payload symbol
+    wire       at_pl  = (pos == 11'd0) && (isym >= 7'd4);
+    wire [6:0] pidx   = isym - 7'd4;
+    wire       pl_end = !pl_on || (decided && !(d_ok && pidx < d_len));
+    wire       pl_go  = !pl_end && pl_room && (decided || pidx < PL_SPEC);
+    assign s_ready = (fst == F_IN) && (!at_pl || pl_go);
+    assign s_more  = (fst != F_IDLE);
     wire acc = s_valid && s_ready;
 
     // ================================================================ de-rotator
@@ -109,7 +146,7 @@ module cf_rx (
     wire        fft_done;
     wire [9:0]  fft_oaddr = cnt + 10'd604;
     wire signed [17:0] fft_ore, fft_oim;
-    cf_fft u_fft (.clk(clk), .rst_n(rst_n), .in_we(f_we), .in_idx(f_idx), .in_re(f_re), .in_im(f_im),
+    pd_fft2 u_fft (.clk(clk), .rst_n(rst_n), .in_we(f_we), .in_idx(f_idx), .in_re(f_re), .in_im(f_im),
                   .start(fft_start), .busy(), .done(fft_done), .out_addr(fft_oaddr),
                   .out_re(fft_ore), .out_im(fft_oim));
 
@@ -122,14 +159,20 @@ module cf_rx (
     wire       ref_neg;
     cf_ref_rom u_ref (.clk(clk), .addr(c_j), .q(ref_neg));
     always @(posedge clk) begin
-        u_v <= (state == R_UNLOAD) && (cnt <= 10'd840);
+        u_v <= (fst == F_UNLOAD) && (cnt <= 10'd840);
         u_c <= cnt; u_m3 <= c_m3; u_j <= c_j;
         if (!rst_n) u_v <= 1'b0;
     end
-    wire        g_we = u_v;
-    wire [11:0] g_waddr = {fsym, u_c};
+    wire        cf_sym = (fsym[6:2] == 5'd0);    // control-field symbol 0..3
+    wire        g_we = u_v && cf_sym;
+    wire [11:0] g_waddr = {fsym[1:0], u_c};
     wire [35:0] g_wdata = {fft_ore, fft_oim};
-    wire        p_we = u_v && (u_m3 == 2'd2);
+    wire        p_we = g_we && (u_m3 == 2'd2);
+    assign pg_valid = u_v && !cf_sym;
+    assign pg_sym   = fsym - 7'd4;
+    assign pg_col   = u_c;
+    assign pg_re    = fft_ore;
+    assign pg_im    = fft_oim;
     wire signed [18:0] pr = ref_neg ? -{fft_ore[17], fft_ore} : {fft_ore[17], fft_ore};
     wire signed [18:0] pq = ref_neg ? -{fft_oim[17], fft_oim} : {fft_oim[17], fft_oim};
     always @(posedge clk) begin
@@ -145,10 +188,10 @@ module cf_rx (
     pd_sdp_ram #(.W(36), .A(12)) u_grid (.clk(clk), .we(g_we), .waddr(g_waddr), .wdata(g_wdata),
                                          .raddr(ce_gaddr), .rdata(ce_gdata));
     (* keep_hierarchy = "yes" *)
-    pd_sdp_ram #(.W(38), .A(9)) u_p0 (.clk(clk), .we(p_we && fsym == 2'd0), .waddr(u_j),
+    pd_sdp_ram #(.W(38), .A(9)) u_p0 (.clk(clk), .we(p_we && fsym == 7'd0), .waddr(u_j),
                                       .wdata({pr, pq}), .raddr(ce_paddr), .rdata(ce_p0));
     (* keep_hierarchy = "yes" *)
-    pd_sdp_ram #(.W(38), .A(9)) u_p3 (.clk(clk), .we(p_we && fsym == 2'd3), .waddr(u_j),
+    pd_sdp_ram #(.W(38), .A(9)) u_p3 (.clk(clk), .we(p_we && fsym == 7'd3), .waddr(u_j),
                                       .wdata({pr, pq}), .raddr(ce_paddr), .rdata(ce_p3));
 
     // ================================================================ decoding
@@ -171,48 +214,87 @@ module cf_rx (
                               .done(crc_done), .crc(), .ok(crc_ok));
     assign dbg_bits = vbits;
 
-    // ================================================================ control
+    // ================================================================ control-field decision
+    // PacketLength, CBS_A_Flag, RM_A_Flag codes (MSB first) as cf_reference.CF_VALID / pd_arm
+    wire [2:0] c_pl  = {vbits[4], vbits[5], vbits[6]};
+    wire [1:0] c_cbs = {vbits[10], vbits[11]};
+    wire [3:0] c_rm  = {vbits[14], vbits[15], vbits[16], vbits[17]};
+    reg  [6:0] c_len;
+    always @* begin
+        case (c_pl)
+            3'b001: c_len = 7'd4;
+            3'b011: c_len = 7'd37;
+            3'b111: c_len = 7'd49;
+            3'b100: c_len = 7'd73;
+            3'b110: c_len = 7'd97;
+            3'b101: c_len = 7'd121;
+            default: c_len = 7'd0;
+        endcase
+    end
+    wire f_ok = (c_len != 7'd0) && (c_cbs != 2'b11) && (c_rm <= 4'b1000);
+
+    // ================================================================ front end
     always @(posedge clk) begin
         if (!rst_n) begin
-            state <= R_IDLE; rec_valid <= 1'b0; fft_start <= 1'b0;
-            ce_start <= 1'b0; vit_start <= 1'b0; crc_start <= 1'b0;
+            fst <= F_IDLE; fft_start <= 1'b0; be_go <= 1'b0;
         end else begin
-            rec_valid <= 1'b0; fft_start <= 1'b0; ce_start <= 1'b0; vit_start <= 1'b0; crc_start <= 1'b0;
-            case (state)
-                R_IDLE: if (start) begin
-                    inc <= cfo_inc; ph <= 24'd0; pos <= 11'd0; isym <= 2'd0; fsym <= 2'd0;
-                    rec_t_trig <= t_trig; rec_n_end <= n_end;
-                    state <= R_IN;
+            fft_start <= 1'b0; be_go <= 1'b0;
+            case (fst)
+                F_IDLE: if (start && bst == B_IDLE) begin
+                    inc <= cfo_inc; ph <= 24'd0; pos <= 11'd0; isym <= 7'd0; fsym <= 7'd0;
+                    rec_t_trig <= t_trig; rec_n_end <= n_end; pl_on <= pl_en;
+                    fst <= F_IN;
                 end
-                R_IN: if (acc) begin
+                F_IN: if (at_pl && pl_end) fst <= F_IDLE;
+                      else if (acc) begin
                     ph <= ph + inc;
-                    if (pos == 11'd1139) begin pos <= 11'd0; isym <= isym + 2'd1; end
+                    if (pos == 11'd1139) begin pos <= 11'd0; isym <= isym + 7'd1; end
                     else pos <= pos + 11'd1;
-                    if (pos == 11'd1127) begin cnt <= 10'd0; state <= R_DRAIN; end
-                    else if (isym == 2'd3 && pos == 11'd1139) state <= R_CE;
+                    if (pos == 11'd1127) begin cnt <= 10'd0; fst <= F_DRAIN; end
                 end
-                R_DRAIN: if (cnt == 10'd6) begin fft_start <= 1'b1; state <= R_FFT; end
+                F_DRAIN: if (cnt == 10'd6) begin fft_start <= 1'b1; fst <= F_FFT; end
                          else cnt <= cnt + 10'd1;
-                R_FFT: state <= R_FWAIT;
-                R_FWAIT: if (fft_done) begin
-                    cnt <= 10'd0; c_m3 <= 2'd0; c_j <= 9'd0; state <= R_UNLOAD;
+                F_FFT: fst <= F_FWAIT;
+                F_FWAIT: if (fft_done) begin
+                    cnt <= 10'd0; c_m3 <= 2'd0; c_j <= 9'd0; fst <= F_UNLOAD;
                 end
-                R_UNLOAD: begin
+                F_UNLOAD: begin
                     c_m3 <= (c_m3 == 2'd2) ? 2'd0 : c_m3 + 2'd1;
                     if (c_m3 == 2'd2) c_j <= c_j + 9'd1;
                     if (cnt == 10'd842) begin
-                        fsym <= fsym + 2'd1;
-                        state <= R_IN;
+                        if (fsym == 7'd3) be_go <= 1'b1;
+                        fsym <= fsym + 7'd1;
+                        fst <= F_IN;
                     end else cnt <= cnt + 10'd1;
                 end
-                R_CE: begin ce_start <= 1'b1; state <= R_CEW; end
-                R_CEW: if (ce_done) begin vit_start <= 1'b1; rec_shift <= ce_shift; state <= R_VIT; end
-                R_VIT: if (vit_done) begin crc_start <= 1'b1; rec_metric <= vmetric; state <= R_CRC; end
-                R_CRC: if (crc_done) begin
+                default: fst <= F_IDLE;
+            endcase
+        end
+    end
+
+    // ================================================================ back end
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            bst <= B_IDLE; rec_valid <= 1'b0; ce_start <= 1'b0; vit_start <= 1'b0; crc_start <= 1'b0;
+            pl_dec <= 1'b0; decided <= 1'b0;
+        end else begin
+            rec_valid <= 1'b0; ce_start <= 1'b0; vit_start <= 1'b0; crc_start <= 1'b0; pl_dec <= 1'b0;
+            if (fst == F_IDLE && start && bst == B_IDLE) decided <= 1'b0;
+            case (bst)
+                B_IDLE: if (be_go) begin ce_start <= 1'b1; bst <= B_CE; end
+                B_CE:   bst <= B_CEW;
+                B_CEW: if (ce_done) begin vit_start <= 1'b1; rec_shift <= ce_shift; bst <= B_VIT; end
+                B_VIT: if (vit_done) begin crc_start <= 1'b1; rec_metric <= vmetric; bst <= B_CRC; end
+                B_CRC: if (crc_done) begin
                     rec_valid <= 1'b1; rec_crc_ok <= crc_ok; rec_msg <= vbits[53:0];
-                    state <= R_IDLE;
+                    d_ok <= crc_ok && f_ok; d_len <= c_len;
+                    bst <= B_DEC;
                 end
-                default: state <= R_IDLE;
+                B_DEC: begin
+                    pl_dec <= 1'b1; pl_ok <= d_ok; pl_len <= d_len; decided <= 1'b1;
+                    bst <= B_IDLE;
+                end
+                default: bst <= B_IDLE;
             endcase
         end
     end
