@@ -45,6 +45,7 @@ class Board:
         self.tm_done = set()                            # t_trig of timing records already reported
         self.cf_done = set()                            # t_trig of control records already reported
         self.pl_done = set()                            # (t_trig, sym) of payload records reported
+        self.ch_done = set()                            # (t_trig, sym) of channel-estimate records reported
         self.debug = None                               # DEBUG_DTYPE records of the last RUN
 
     # ---- commands -------------------------------------------------------- #
@@ -102,6 +103,8 @@ class Board:
         self.cf_done.update(r.t_trig for r in cf)
         pl = [r for r in res.payload if (r.t_trig, r.sym) not in self.pl_done]
         self.pl_done.update((r.t_trig, r.sym) for r in pl)
+        ch = [r for r in res.chest if (r.t_trig, r.sym) not in self.ch_done]
+        self.ch_done.update((r.t_trig, r.sym) for r in ch)
         self.debug = None
         if want_dbg:
             self.debug = np.empty(count // div, pr.DEBUG_DTYPE)
@@ -109,7 +112,8 @@ class Board:
         return (struct.pack("<II", len(out), count) + b"".join(e.pack() for e in out)
                 + struct.pack("<I", len(tm)) + b"".join(r.pack() for r in tm)
                 + struct.pack("<I", len(cf)) + b"".join(r.pack() for r in cf)
-                + struct.pack("<I", len(pl)) + b"".join(r.pack() for r in pl))
+                + struct.pack("<I", len(pl)) + b"".join(r.pack() for r in pl)
+                + struct.pack("<I", len(ch)) + b"".join(r.pack() for r in ch))
 
     def get_debug(self, payload: bytes) -> bytes:
         offset, count = struct.unpack_from("<II", payload)
@@ -121,7 +125,7 @@ class Board:
 
     def handle(self, cmd: int, payload: bytes) -> bytes:
         if cmd == pr.PING:
-            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR | pr.BOARD_TIMING | pr.BOARD_CF | pr.BOARD_REARM | pr.BOARD_PAYLOAD).pack()
+            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR | pr.BOARD_TIMING | pr.BOARD_CF | pr.BOARD_REARM | pr.BOARD_PAYLOAD | pr.BOARD_CHEST).pack()
         if cmd == pr.RESET:
             self.reset()
             return b""

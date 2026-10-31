@@ -11,7 +11,9 @@ decision exact), the Preamble B timing records (every field exact; firmware buil
 bitstream 3.0, input stages 1 and 2), the control records (every field exact; firmware build
 11 and bitstream 4.0; column "control" = records / CRC ok), the payload records of the
 speculative payload FFT (every symbol's grid signature exact; firmware build 13 and bitstream
-6.0, cases with rearm 1; column "payload" = records) and, for cases with debug, every debug
+6.0, cases with rearm 1; column "payload" = records), the channel-estimate records (packet
+record and every symbol's H signature exact; firmware build 14 and bitstream 7.0, cases with
+rearm 1; column "chest" = records) and, for cases with debug, every debug
 record.
 
 Cases (the RTL simulation's coverage, on the board):
@@ -188,7 +190,7 @@ def session(target, iq: np.ndarray, p: pr.Params, sizes: list[int], debug: bool,
         else:
             target.call(pr.LOAD_SAMPLES, struct.pack("<I", 0) + pr.iq_to_bytes(blk))
         reply = target.call(pr.RUN, struct.pack("<II", n, pr.RUN_FLAG_DEBUG if debug else 0))
-        evs, done, tms, cfs, pls = pr.parse_run_reply_all(reply)
+        evs, done, tms, cfs, pls, chs = pr.parse_run_reply_chest(reply)
         tms = sorted(tms, key=lambda r: r.t_trig)
         dbg = None
         if debug:
@@ -196,14 +198,19 @@ def session(target, iq: np.ndarray, p: pr.Params, sizes: list[int], debug: bool,
                 dbg = target.get_debug(done // (2 if p.input_stage == 2 else 1))
             else:
                 dbg = target.b.debug.copy()       # the whole capture (GET_DEBUG is limited to 1 MB)
-        out.append((evs, done, dbg, tms, cfs, pls))
+        out.append((evs, done, dbg, tms, cfs, pls, chs))
         i += n
     return out
 
 
-def compare(got, exp, tone_tol_q8: int, timing: bool, control: bool = False, payload: bool = False) -> list[str]:
+def compare(got, exp, tone_tol_q8: int, timing: bool, control: bool = False, payload: bool = False,
+            chest: bool = False) -> list[str]:
     errs = []
-    for k, ((ge, gd, gdbg, gt, gc, gp), (ee, ed, edbg, et, ec, ep)) in enumerate(zip(got, exp)):
+    for k, ((ge, gd, gdbg, gt, gc, gp, gh), (ee, ed, edbg, et, ec, ep, eh)) in enumerate(zip(got, exp)):
+        if chest and gh != eh:
+            bad = [(g, e) for g, e in zip(gh, eh) if g != e]
+            errs.append(f"RUN {k}: channel-estimate records differ ({len(gh)} board, {len(eh)} model)"
+                        + (f", first: board {astuple(bad[0][0])} model {astuple(bad[0][1])}" if bad else ""))
         if payload and gp != ep:
             bad = [(g, e) for g, e in zip(gp, ep) if g != e]
             errs.append(f"RUN {k}: payload records differ ({len(gp)} board, {len(ep)} model)"
@@ -269,6 +276,10 @@ def main(argv=None) -> int:
     timing = bool(info.flags & pr.BOARD_TIMING)
     control = bool(info.flags & pr.BOARD_CF)
     payload = bool(info.flags & pr.BOARD_PAYLOAD)
+    chest = bool(info.flags & pr.BOARD_CHEST)
+    if payload and not chest:
+        print("Note: no payload channel estimate on this board (bitstream before 7.0 or firmware before "
+              "build 14): channel-estimate records not compared\n")
     if control and not payload:
         print("Note: no speculative payload FFT on this board (bitstream before 6.0 or firmware before "
               "build 13): payload records not compared\n")
@@ -283,7 +294,7 @@ def main(argv=None) -> int:
               "timing records not compared\n")
     report, n_fail = [], 0
     print(f"{'case':22s} {'samples':>9s} {'RUNs':>4s} {'events':>6s} {'fail':>4s} {'trunc':>5s} {'timing':>11s} "
-          f"{'control':>8s} {'payload':>7s} {'debug':>9s} {'board s':>7s}  result")
+          f"{'control':>8s} {'payload':>7s} {'chest':>5s} {'debug':>9s} {'board s':>7s}  result")
     for name, desc, build, plan, debug in todo:
         try:
             iq, p = build()
@@ -303,7 +314,7 @@ def main(argv=None) -> int:
             print(f"{name:22s} communication error: {exc}")
             return 2
         exp = session(EmuTarget(), iq, p, sizes, debug, False)
-        errs = compare(got, exp, tol, timing, control, payload)
+        errs = compare(got, exp, tol, timing, control, payload, chest)
         evs = [e for r in got for e in r[0]]
         n_tf = sum(1 for e in evs if e.status & pr.EV_TONE_FAIL)
         n_tr = sum(1 for e in evs if e.status & pr.EV_TRUNCATED)
@@ -316,15 +327,17 @@ def main(argv=None) -> int:
         cf_col = f"{len(cfs)}/{n_crc}" if p.input_stage in (1, 2) else "-"
         pls = [c for r in (got if payload else exp) for c in r[5]]
         pl_col = str(len(pls)) if p.input_stage in (1, 2) and p.rearm else "-"
+        chs = [c for r in (got if chest else exp) for c in r[6]]
+        ch_col = str(len(chs)) if p.input_stage in (1, 2) and p.rearm else "-"
         ok = not errs
         n_fail += not ok
-        print(f"{name:22s} {n:9d} {len(sizes):4d} {len(evs):6d} {n_tf:4d} {n_tr:5d} {tm_col:>11s} {cf_col:>8s} {pl_col:>7s} "
+        print(f"{name:22s} {n:9d} {len(sizes):4d} {len(evs):6d} {n_tf:4d} {n_tr:5d} {tm_col:>11s} {cf_col:>8s} {pl_col:>7s} {ch_col:>5s} "
               f"{(str(n_dbg) if debug else '-'):>9s} {t_board:7.1f}  {'PASS' if ok else 'FAIL'}")
         for e in errs[:5]:
             print(f"    {e}")
         rec = {"case": name, "description": desc, "samples": n, "runs": len(sizes), "events": len(evs),
                "tone_fail": n_tf, "truncated": n_tr, "timing_records": len(tms), "timing_good": n_good,
-               "control_records": len(cfs), "control_crc_ok": n_crc, "payload_records": len(pls),
+               "control_records": len(cfs), "control_crc_ok": n_crc, "payload_records": len(pls), "chest_records": len(chs),
                "debug_records": n_dbg, "board_s": round(t_board, 2),
                "result": "PASS" if ok else "FAIL", "errors": errs[:20], "params": p.as_dict()}
         report.append(rec)

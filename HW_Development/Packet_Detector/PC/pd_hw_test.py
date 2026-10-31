@@ -89,10 +89,10 @@ class Board:
     def run(self, count: int, debug: bool, flags: int = 0) -> tuple[list[pr.EventRecord], int]:
         """Events of this RUN; its timing records (firmware build 10) are left in self.timing and
         its control records (build 11) in self.control, its payload records (build 13) in
-        self.payload."""
+        self.payload, its channel-estimate records (build 14) in self.chest."""
         flags |= pr.RUN_FLAG_DEBUG if debug else 0
         reply = self.call(pr.RUN, struct.pack("<II", count, flags))
-        evs, done, self.timing, self.control, self.payload = pr.parse_run_reply_all(reply)
+        evs, done, self.timing, self.control, self.payload, self.chest = pr.parse_run_reply_chest(reply)
         return evs, done
 
     def get_debug(self, count: int) -> np.ndarray:
@@ -188,6 +188,34 @@ def compare_payload(got: list[pr.PayloadRecord], exp: list[pr.PayloadRecord]) ->
                      + ("" if same else f", expected {len(e)}; first difference at symbol {bad}"))
     if not by_pkt:
         lines.append("  payload records: none (none expected)")
+    return ok, lines
+
+
+def describe_chest(r: pr.PayloadRecord) -> str:
+    """Packet record fields (pl_reference.chest_records)."""
+    return (f"k {r.sig_a & 0xFF}, class {(r.sig_a >> 8) & 0xF}, {'high' if r.sig_a >> 12 & 1 else 'low'}-SNR "
+            f"mode, n0 {r.sig_a >> 16}, sum_N 0x{r.sig_b:08x}")
+
+
+def compare_chest(got: list[pr.PayloadRecord], exp: list[pr.PayloadRecord]) -> tuple[bool, list[str]]:
+    """Every channel-estimate record exact and in order (one line per packet)."""
+    lines, ok = [], got == exp
+    by_pkt: dict[int, list] = {}
+    for r in exp:
+        by_pkt.setdefault(r.t_trig, [[], []])[1].append(r)
+    for r in got:
+        by_pkt.setdefault(r.t_trig, [[], []])[0].append(r)
+    for t, (g, e) in sorted(by_pkt.items()):
+        same = g == e
+        pk = next((r for r in (g or e) if r.sym == pr.CH_PKT), None)
+        nh = sum(r.sym != pr.CH_PKT for r in g)
+        bad = next((i for i, (x, y) in enumerate(zip(g, e)) if x != y), min(len(g), len(e)))
+        lines.append(f"  {'ok      ' if same else 'MISMATCH'} chest   t_trig {t:8d}: "
+                     + (describe_chest(pk) + ", " if pk else "") + f"{nh} H signature(s)"
+                     + ("" if same else f", expected {len(e)} records; first difference at record {bad}"
+                        + (f" (board {g[bad]}, model {e[bad]})" if bad < min(len(g), len(e)) else "")))
+    if not by_pkt:
+        lines.append("  channel-estimate records: none (none expected)")
     return ok, lines
 
 
@@ -353,6 +381,8 @@ def main(argv=None) -> int:
         timing: dict[int, pr.TimingRecord] = {}
         control: dict[int, pr.ControlRecord] = {}
         payload: list[pr.PayloadRecord] = []
+        chest: list[pr.PayloadRecord] = []
+        has_ch = bool(info.flags & pr.BOARD_CHEST) and a.input_stage in (1, 2)
         has_pl = bool(info.flags & pr.BOARD_PAYLOAD) and a.input_stage in (1, 2)
         has_timing = bool(info.flags & pr.BOARD_TIMING) and a.input_stage in (1, 2)
         has_cf = bool(info.flags & pr.BOARD_CF) and a.input_stage in (1, 2)
@@ -395,6 +425,7 @@ def main(argv=None) -> int:
             for r in b.control:
                 control[r.t_trig] = r
             payload += b.payload
+            chest += b.chest
             if a.debug:
                 dbg_parts.append(b.get_debug(done // div))
         mb = iq.nbytes / 1e6
@@ -438,6 +469,12 @@ def main(argv=None) -> int:
                 lines += plines
             elif params.rearm:
                 lines.append("  (no payload FFT records: the board's bitstream or firmware predates them)")
+            if has_ch:
+                hok, hlines = compare_chest(chest, res.chest)
+                ok &= hok
+                lines += hlines
+            elif params.rearm and has_pl:
+                lines.append("  (no channel-estimate records: the board's bitstream or firmware predates them)")
         else:
             lines.append("  (no control-field receiver: the board's bitstream or firmware predates it)")
     elif a.input_stage in (1, 2):

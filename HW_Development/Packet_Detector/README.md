@@ -261,6 +261,23 @@ cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
 cd PC && python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 && python pd_board_regression.py
 ```
 
+Step 12b: **payload channel estimate** (`RTL/pl_chest.v`, `pl_roms.v`, `pl_mulseq.v`, in
+`pd_cf.v`; `Specification_PayloadReceiver.md` step 12b, `BITTRUE.md` change 14). For every
+accepted packet the board reports the delay class, SNR mode, packet shift and noise sum, and a
+signature of the channel estimate H of every payload symbol, all bit for bit against the model
+(`pd_hw_test` "chest", regression column "chest"). The delay profiles run on the shared FFT
+between symbols. With pilots in every symbol (RefSymbolSpacing 1) the estimate is slower than
+real time (about 6.6 k instead of 5.7 k clocks per symbol); the input is then held back, nothing
+is lost. Bitstream ID 7.0 (CH_LEVEL 0x64, CH_DATA 0x68, STATUS bit16 CH_ERR), firmware build 14
+(`BOARD_CHEST`).
+
+```bash
+cd SIM && ./run_chest.sh && ./run_cf.sh && ./run_sim.sh && ./run_sim.sh cfmod 1 && PLGAP=20000 ./run_sim.sh && cd ..
+cd HW && vivado -mode batch -source synth_detect.tcl && vivado -mode batch -source build_hw.tcl && cd ..
+cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
+cd PC && python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 && python pd_board_regression.py
+```
+
 **Board regression** (`PC/pd_board_regression.py`): the RTL simulation's coverage on the board.
 Each case runs on the board and, with the same commands, through `pd_board_emulator`'s logic
 in-process; every RUN reply and every debug record must match. Cases: rep3 and the defects

@@ -379,6 +379,8 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
         for c in res.control))
     (out / "exp_pl.txt").write_text(f"{len(res.payload)}\n" + "".join(
         f"{r.t_trig:08x} {r.sym:02x} {r.sig_a:08x} {r.sig_b:08x}\n" for r in res.payload))
+    (out / "exp_ch.txt").write_text(f"{len(res.chest)}\n" + "".join(
+        f"{r.t_trig:08x} {r.sym:04x} {r.sig_a:08x} {r.sig_b:08x}\n" for r in res.chest))
     u16 = (iq & 0xFFFF)
     np.savetxt(out / "in.txt", u16, fmt="%04x")
     np.savetxt(out / "exp_lpf.txt", lpf & 0xFFF, fmt="%03x")
@@ -395,7 +397,7 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     print(f"{out}: {iq.shape[0]} samples, input_stage {stage}, {len(trig)} trigger(s) at {shown}, "
           f"{len(cfo_lines)} CFO result(s), {n_fail} failing the tone check, {len(res.timing)} timing "
           f"record(s) ({good} good, {busy} busy), {len(res.control)} control record(s) "
-          f"({sum(c.crc_ok for c in res.control)} CRC ok), {len(res.payload)} payload record(s)")
+          f"({sum(c.crc_ok for c in res.control)} CRC ok), {len(res.payload)} payload record(s), {len(res.chest)} channel-estimate record(s)")
     return out
 
 

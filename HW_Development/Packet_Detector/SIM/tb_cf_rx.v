@@ -43,6 +43,8 @@ module tb_cf_rx;
     cf_rx dut (.clk(clk), .rst_n(rst_n), .start(start), .cfo_inc(cfo_inc), .t_trig(32'd1234),
                .n_end(32'd5678), .busy(), .pl_en(1'b0), .pl_room(1'b1), .s_more(),
                .pg_valid(), .pg_sym(), .pg_col(), .pg_re(), .pg_im(), .pl_dec(), .pl_ok(), .pl_len(),
+               .job_req(1'b0), .job_gnt(), .job_we(1'b0), .job_idx(10'd0), .job_re(18'sd0), .job_im(18'sd0),
+               .job_start(1'b0), .job_oaddr(10'd0), .job_done(), .job_ore(), .job_oim(),
                .s_valid(s_valid), .s_ready(s_ready), .s_i(s_i), .s_q(s_q),
                .rec_valid(rec_valid), .rec_crc_ok(rec_crc_ok), .rec_msg(rec_msg), .rec_shift(rec_shift),
                .rec_metric(rec_metric), .rec_t_trig(rec_t_trig), .rec_n_end(rec_n_end),

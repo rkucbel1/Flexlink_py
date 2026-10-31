@@ -61,7 +61,12 @@ module pd_cf #(
     // payload records
     output wire [4:0]         pl_cnt,
     output wire [127:0]       pl_head,
-    input  wire               pl_pop
+    input  wire               pl_pop,
+    // channel-estimate records (pl_chest, step 12b), as the payload records
+    output wire [4:0]         ch_cnt,
+    output wire [127:0]       ch_head,
+    input  wire               ch_pop,
+    output wire               ch_err       // pl_chest's packet queue overflowed (sticky; cannot happen)
 );
     localparam integer DEPTH = 1 << DB;
     localparam [31:0]  LIM   = DEPTH - MARGIN;
@@ -155,11 +160,18 @@ module pd_cf #(
     wire [6:0]         pg_sym, pl_len;
     wire [9:0]         pg_col;
     wire signed [17:0] pg_re, pg_im;
-    wire               pl_room;
+    wire               pl_room, ch_room;
+    wire               ch_busy, ch_wait;           // pl_chest (below)
+    wire               jb_req, jb_gnt, jb_we, jb_start, jb_done;
+    wire [9:0]         jb_idx, jb_oaddr;
+    wire signed [17:0] jb_re, jb_im, jb_ore, jb_oim;
     cf_rx u_rx (.clk(clk), .rst_n(rst_n), .start(cf_start), .cfo_inc(q_inc[q_rd]), .t_trig(q_t[q_rd]),
                 .n_end(q_e[q_rd]), .busy(rx_busy), .pl_en(pl_en), .pl_room(pl_room), .s_more(rx_more),
                 .pg_valid(pg_valid), .pg_sym(pg_sym), .pg_col(pg_col), .pg_re(pg_re), .pg_im(pg_im),
                 .pl_dec(pl_dec), .pl_ok(pl_ok), .pl_len(pl_len),
+                .job_req(jb_req), .job_gnt(jb_gnt), .job_we(jb_we), .job_idx(jb_idx), .job_re(jb_re),
+                .job_im(jb_im), .job_start(jb_start), .job_oaddr(jb_oaddr), .job_done(jb_done),
+                .job_ore(jb_ore), .job_oim(jb_oim),
                 .s_valid(ff_n != 3'd0), .s_ready(cf_ready), .s_i(ff_head[11:0]), .s_q(ff_head[23:12]),
                 .rec_valid(rec_v), .rec_crc_ok(cf_crc_ok), .rec_msg(cf_msg), .rec_shift(cf_shift),
                 .rec_metric(cf_metric), .rec_t_trig(cf_t), .rec_n_end(cf_n_end),
@@ -169,7 +181,8 @@ module pd_cf #(
 
     // busy: something to do that does not wait for new samples
     wire starving = active && rx_more && cf_ready && (ff_n == 3'd0) && (infl == 3'd0) && !avail;
-    assign busy = (active && !starving) || (!active && q_n != 3'd0) || q_pop || cf_start;
+    assign busy = (active && !starving) || (!active && q_n != 3'd0) || q_pop || cf_start ||
+                  (pl_en && ch_busy && !ch_wait);
 
     // ------------------------------------------------------------------ payload signatures
     // x = re0, im0, re1, im1, ... (18 bit unsigned each): A += x, B += A per value; two values
@@ -231,9 +244,63 @@ module pd_cf #(
             if (pl_pop && pl_cm != pl_rd) pl_rd <= pl_rd + 5'd1;
         end
     end
-    assign pl_room = (pl_wr - pl_rd) < 5'd16;
+    assign pl_room = ((pl_wr - pl_rd) < 5'd16) && (!pl_en || ch_room);
     assign pl_cnt  = pl_cm - pl_rd;
     assign pl_head = pl_mem[pl_rd[3:0]];
+
+    // ------------------------------------------------------------------ channel estimate (12b)
+    wire        pk_v, h_v;
+    wire [31:0] pk_t, pk_a, pk_b, h_t;
+    wire [6:0]  h_s;
+    wire [9:0]  h_c;
+    wire signed [15:0] h_r, h_i;
+    wire        ch_out_room;
+    pl_chest u_ch (.clk(clk), .rst_n(rst_n), .pg_valid(pg_valid), .pg_sym(pg_sym), .pg_col(pg_col),
+                   .pg_re(pg_re), .pg_im(pg_im), .pl_dec(pl_dec && pl_en), .pl_ok(pl_ok), .pl_msg(cf_msg), .pl_t(j_t),
+                   .room(ch_room), .job_req(jb_req), .job_gnt(jb_gnt), .job_we(jb_we), .job_idx(jb_idx),
+                   .job_re(jb_re), .job_im(jb_im), .job_start(jb_start), .fft_done(jb_done),
+                   .job_oaddr(jb_oaddr), .fft_ore(jb_ore), .fft_oim(jb_oim), .out_room(ch_out_room),
+                   .pk_valid(pk_v), .pk_t(pk_t), .pk_a(pk_a), .pk_b(pk_b), .h_valid(h_v), .h_t(h_t),
+                   .h_sym(h_s), .h_col(h_c), .h_re(h_r), .h_im(h_i), .y_re(), .y_im(),
+                   .busy(ch_busy), .waiting(ch_wait), .err(ch_err));
+    // per-symbol signature of H (as the bins: x = re0, im0, ... 18 bit each)
+    reg  [31:0] hs_a, hs_b;
+    wire [31:0] hr = {14'd0, h_r[15], h_r[15], h_r};
+    wire [31:0] hi = {14'd0, h_i[15], h_i[15], h_i};
+    wire        hfirst = (h_c == 10'd0);
+    wire [31:0] ha0 = hfirst ? 32'd0 : hs_a;
+    wire [31:0] hb0 = hfirst ? 32'd0 : hs_b;
+    wire [31:0] ha1 = ha0 + hr + hi;
+    wire [31:0] hb1 = hb0 + {ha0[30:0], 1'b0} + {hr[30:0], 1'b0} + hi;
+    reg         hs_w;
+    reg  [6:0]  hs_s;
+    reg  [31:0] hs_t;
+    always @(posedge clk) begin
+        hs_w <= 1'b0;
+        if (h_v) begin
+            hs_a <= ha1; hs_b <= hb1;
+            if (h_c == 10'd840) begin hs_w <= 1'b1; hs_s <= h_s; hs_t <= h_t; end
+        end
+        if (!rst_n) hs_w <= 1'b0;
+    end
+    // channel-record FIFO: packet record {sumN, a, 0x8000, t}, symbol record {sig_b, sig_a, sym, t}
+    reg  [127:0] ch_mem [0:15];
+    reg  [4:0]   ch_wr, ch_rd;
+    always @(posedge clk) begin
+        if (pk_v) ch_mem[ch_wr[3:0]] <= {pk_b, pk_a, 32'h0000_8000, pk_t};
+        else if (hs_w) ch_mem[ch_wr[3:0]] <= {hs_b, hs_a, 25'd0, hs_s, hs_t};
+    end
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            ch_wr <= 5'd0; ch_rd <= 5'd0;
+        end else begin
+            if (pk_v || hs_w) ch_wr <= ch_wr + 5'd1;
+            if (ch_pop && ch_wr != ch_rd) ch_rd <= ch_rd + 5'd1;
+        end
+    end
+    assign ch_out_room = (ch_wr - ch_rd) < 5'd15;
+    assign ch_cnt  = ch_wr - ch_rd;
+    assign ch_head = ch_mem[ch_rd[3:0]];
 endmodule
 
 `default_nettype wire

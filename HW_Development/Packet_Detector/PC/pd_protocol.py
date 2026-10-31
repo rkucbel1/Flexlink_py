@@ -40,7 +40,10 @@ Commands (request payload -> reply payload)
                                                   each good timing record). Then (firmware
                                                   build 13 and later, BOARD_PAYLOAD) u32
                                                   n_payload and n_payload x PayloadRecord (one
-                                                  per payload symbol of each accepted packet)
+                                                  per payload symbol of each accepted packet).
+                                                  Then (build 14, BOARD_CHEST) u32 n_chest and
+                                                  n_chest x PayloadRecord: channel-estimate
+                                                  records (sym CH_PKT = packet record)
     GET_DEBUG     u32 offset, u32 count     -> count x DebugRecord (from the last RUN with
                                                        capture enabled); after a PL-loopback RUN
                                                        the 4-byte records are the samples as they
@@ -102,6 +105,10 @@ BOARD_REARM = 0x10                     # bitstream has the Rx state machine's re
 BOARD_PAYLOAD = 0x20                   # bitstream has the shared fast FFT with the speculative payload
 #                                        FFT (ID 6.0, firmware build 13): the RUN reply carries payload
 #                                        records after the control records (only with Params.rearm)
+BOARD_CHEST = 0x40                     # bitstream has the payload channel estimate (ID 7.0, firmware
+#                                        build 14): the RUN reply carries channel-estimate records
+#                                        after the payload records (only with Params.rearm)
+CH_PKT = 0x8000                        # PayloadRecord.sym of a channel-estimate packet record
 
 # EventRecord.status bits
 EV_CFO_VALID = 0x1                     # N_CFO samples were available, cfo_inc is valid
@@ -322,12 +329,19 @@ class PayloadRecord:
 
 def parse_run_reply_all(reply: bytes):
     """RUN reply -> (events, samples processed, timing records, control records, payload
-    records). Replies of older firmware end after the events (build <= 9), the timing records
-    (build 10) or the control records (builds 11, 12)."""
+    records); parse_run_reply_chest also returns the channel-estimate records. Replies of older
+    firmware end after the events (build <= 9), the timing records (build 10), the control
+    records (builds 11, 12) or the payload records (build 13)."""
+    return parse_run_reply_chest(reply)[:5]
+
+
+def parse_run_reply_chest(reply: bytes):
+    """RUN reply -> (events, samples processed, timing, control, payload, channel-estimate
+    records)."""
     n_ev, done = struct.unpack_from("<II", reply)
     evs = EventRecord.unpack_many(reply[8:], n_ev)
     off = 8 + EventRecord.FMT.size * n_ev
-    tms, cfs, pls = [], [], []
+    tms, cfs, pls, chs = [], [], [], []
     if len(reply) >= off + 4:
         (n_tm,) = struct.unpack_from("<I", reply, off)
         tms = TimingRecord.unpack_many(reply[off + 4:], n_tm)
@@ -339,7 +353,11 @@ def parse_run_reply_all(reply: bytes):
             if len(reply) >= off + 4:
                 (n_pl,) = struct.unpack_from("<I", reply, off)
                 pls = PayloadRecord.unpack_many(reply[off + 4:], n_pl)
-    return evs, done, tms, cfs, pls
+                off += 4 + PayloadRecord.FMT.size * n_pl
+                if len(reply) >= off + 4:
+                    (n_ch,) = struct.unpack_from("<I", reply, off)
+                    chs = PayloadRecord.unpack_many(reply[off + 4:], n_ch)
+    return evs, done, tms, cfs, pls, chs
 
 
 def parse_run_reply(reply: bytes) -> tuple[list[EventRecord], int, list[TimingRecord], list[ControlRecord]]:

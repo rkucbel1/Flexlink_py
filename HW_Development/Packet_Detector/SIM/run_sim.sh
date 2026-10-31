@@ -75,6 +75,7 @@ else
        ../RTL/pd_cordic.v ../RTL/pd_cfo_cascade.v ../RTL/pd_cfo_lane.v ../RTL/pd_tone_rom.v
        ../RTL/pd_sdp_ram.v ../RTL/pd_tone_check.v ../RTL/pd_timing.v ../RTL/cf_roms.v ../RTL/cf_tdp_ram.v
        ../RTL/pd_fft2.v ../RTL/cf_chest.v ../RTL/cf_viterbi.v ../RTL/cf_crc10.v ../RTL/cf_rx.v ../RTL/pd_cf.v
+       ../RTL/pl_chest.v ../RTL/pl_roms.v ../RTL/pl_mulseq.v
        ../RTL/pd_arm.v ../RTL/pd_detect_top.v)
 args=("$VEC" --input-stage "$STAGE")
 [[ -n "${MAX:-}" ]] && args+=(--max-samples "$MAX")
@@ -92,7 +93,7 @@ case "$SIM" in
     # xelab compiles the design to C with its own compiler; LIBRARY_PATH from the environment can
     # make that compiler pick up the wrong system libraries (xelab warns, and may crash).
     unset LIBRARY_PATH
-    xvlog --nolog -d PD_SIM_CHECKS "${RTL[@]/#/../../}" "../../$TB"
+    xvlog --nolog -d PD_SIM_CHECKS -i ../../../RTL "${RTL[@]/#/../../}" "../../$TB"
     # extra options, e.g. XELAB_OPTS="-mt off -v 1" (single-threaded, verbose) to diagnose a crash
     # shellcheck disable=SC2086
     xelab --nolog --debug off ${XELAB_OPTS:-} "$TOP" -s "${TOP}_sim"
@@ -100,7 +101,7 @@ case "$SIM" in
         -testplusarg "gap=$GAP" -testplusarg "seed=$SEED" -testplusarg "fixgap=$FIXGAP" -testplusarg "plgap=${PLGAP:-0}" | tee ../../sim.log
     ;;
   verilator)
-    verilator --binary --timing -Wno-fatal -DPD_SIM_CHECKS --top-module "$TOP" \
+    verilator --binary --timing -Wno-fatal -DPD_SIM_CHECKS -I../RTL --top-module "$TOP" \
         --Mdir "work/obj_$TOP" -o "$TOP" -j 2 "${RTL[@]}" "$TB" > work/verilator_build.log
     (cd "$DIR" && "../obj_$TOP/$TOP" "+gap=$GAP" "+seed=$SEED" "+fixgap=$FIXGAP" "+plgap=${PLGAP:-0}") | tee sim.log
     ;;

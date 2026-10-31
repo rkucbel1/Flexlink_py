@@ -190,6 +190,28 @@ table are new.
     (each mod 2^18), A = Σ x, B = Σ of the running sums, both mod 2^32. That checks the payload
     FFT bit for bit on the board before the rest of the payload chain exists.
 
+13. **Payload receiver bit-true model** (`PC/pl_reference.py`, tables `PC/pl_tables.npz` from
+    `gen_pl_tables.py`, checks `PC/pl_check.py`; `Docs/Specification_PayloadInput.md` §6b).
+    It starts from the payload grid of change 12 plus the control-field settings and ends with
+    the transport blocks and their CRC24 results. The steps are: channel estimate
+    (window-select FIR8, drift, smoothing, linear time), noise, max-log LLRs as integers,
+    descrambling, copy combining, de-interleaving, the frozen layered decoder of §5b, and CRC24.
+    No RTL yet.
+
+14. **Payload channel estimate in the PL, and its records** (`pl_reference.chest_records`;
+    RTL `pl_chest.v`, `pl_roms.v`, `pl_mulseq.v`, `pd_cf.v`; bitstream 7.0, firmware build 14).
+    The channel-estimate part of change 13 (packet shift k, pilots, delay class, SNR mode, FIR8,
+    drift, smoothing, time interpolation) runs on the board. Its delay-profile FFTs use the
+    control-field FFT between symbols (`cf_rx` job port). Per accepted packet the RUN reply gets
+    one packet record (sym 0x8000; sig_a = k | class << 8 | hi << 12 | n0 << 16, sig_b = ΣN mod
+    2^32), then per payload symbol the signature of H(s) (as change 12, 841 values sign-extended
+    to 18 bit). H(s) is reported once the reference rows it needs are in the stream, so a packet
+    cut by the end of the data gives fewer records; the model pads missing symbols with zeros
+    and stops where the stream stops. The control-field check is stricter (also `cf_rx`,
+    `pd_arm`, `cf_reference.fields_valid`): PacketLength 4 needs RefSymbolSpacing 1 or 3 (else
+    there are fewer than two reference rows), and NoOfTxAntenna must be 1. Such packets are
+    now rejected and re-armed at once.
+
 ## Verification
 
 ### Word-length sweeps (each block against its floating-point version)

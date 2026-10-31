@@ -22,6 +22,11 @@ pd_make_vector.py  ──►  TestVectors/<name>.bin,        ──►  pd_hw_te
 | `pd_hw_test.py` | Client: PING, RESET, SET_PARAMS, LOAD, read-back check, RUN (optionally in chunks), GET_DEBUG, compare, plot. Exit 0 = PASS, 1 = FAIL, 2 = no connection. |
 | `pd_noise_rate.py` | False-trigger rate on the board: long noise (the bit-true study's decimated noise, white noise, or a `.bin` file from your channel model) streamed continuously, rate with 95% interval per `eta_hi`, triggers passing the tone check. |
 | `pd_board_regression.py` | Board regression: 21 cases (real packets, CFO sweep, stress vector with parameter variants, split RUNs, noise), each compared reply by reply and record by record with the emulator's logic run in-process. `--list`, `--only`, `--quick`. Exit 0 = all PASS. |
+| `cf_reference.py`, `cf_tables.py`, `gen_cf_tables.py` | Bit-true model of the control-field receiver and the speculative payload FFT (`grid_symbol`, `payload_records`); its fixed tables and their generator. |
+| `pl_reference.py` | **Bit-true model of the payload receiver** (`Docs/Specification_PayloadInput.md` §6b): payload grid + control-field settings → channel estimate (window-select FIR8, drift, smoothing, linear time), noise, LLRs, descrambling, copy combining, de-interleaving, layered LDPC, CRC24. `payload_results(y, events, timing, control)` runs it after `pd_reference.detect`. |
+| `pl_tables.npz`, `gen_pl_tables.py` | Its fixed tables (pilot bits, grid rows, FIR weights per pilot spacing / delay class / SNR mode, Hann window, interleavers, LDPC prototypes) and their generator (needs `Flexlink_BasicModules` and h5py). |
+| `pl_check.py` | Checks of the payload model: `tables` (CRC24, encoder), `loop` (every modulation, code and pilot pattern through the channel model: every block must decode), `vector <json>` (a simulator test vector through the detector and the payload model: every CRC must pass), `ranges` (word lengths), `bler …` (bit-true against float, SNR at 10 % block error). |
+| `ldpc_study/`, `ce_study/` | The float studies behind the LDPC decoder (§5b) and the channel estimate (§6a). |
 
 ## Quick start (no board needed)
 

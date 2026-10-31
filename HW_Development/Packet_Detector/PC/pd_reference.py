@@ -142,6 +142,8 @@ class Result:
     control: list = field(default_factory=list)   # ControlRecord per good timing record (cf_reference)
     payload: list = field(default_factory=list)   # PayloadRecord per payload symbol (cf_reference,
     #                                               only with p.rearm)
+    chest: list = field(default_factory=list)     # channel-estimate records (pl_reference.chest_records,
+    #                                               PayloadRecord layout; only with p.rearm)
 
 
 # --------------------------------------------------------------------------------------- #
@@ -640,6 +642,8 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False, control: bool = True)
             res.control = cf_reference.control_records(y, events, res.timing)
             if getattr(p, "rearm", 0):
                 res.payload = cf_reference.payload_records(y, events, res.timing, res.control)
+                import pl_reference
+                res.chest = pl_reference.chest_records(y, events, res.timing, res.control)
     if debug:
         with np.errstate(divide="ignore", invalid="ignore"):
             met = np.where(den > 0, num // np.maximum(den, 1), 0)

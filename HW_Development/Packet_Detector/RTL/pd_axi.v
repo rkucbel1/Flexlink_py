@@ -10,8 +10,10 @@
 //   S_AXI   AXI4-Lite registers: control, status, parameters, event, timing and control FIFOs
 //
 // Register map (byte offsets; RW = read/write, RO = read only):
-//   0x00 ID          RO  0x50440600 ("PD", version 6.0: shared fast FFT with the speculative
-//                        payload FFT; 5.0 had no payload records, 4.0 no REARM, 3.0 no control
+//   0x00 ID          RO  0x50440700 ("PD", version 7.0: payload channel estimate and its H
+//                        records; 6.0 had no CH records, its control-field check accepted
+//                        grids without pilots and NoOfTxAntenna 1; 6.0 added the shared fast
+//                        FFT with the speculative payload FFT; 5.0 had no payload records, 4.0 no REARM, 3.0 no control
 //                        field, 2.0 no timing, 1.0 no input stage 2)
 //   0x04 CTRL        RW  bit0 RESET (1 = detector held in reset; 1 after power-up)
 //                        bit1 DEBUG (send debug records on M_AXIS; change only when not BUSY)
@@ -23,7 +25,8 @@
 //                        bit12 TM_ERR (timing start queue overflow); both sticky, cannot happen,
 //                        bit13 CF_OVF (control record lost), bit14 CF_ERR (control-field start
 //                        queue overflow); both sticky, cannot happen, bit15 ARM_LATE (a re-arm
-//                        decision came after its sample; sticky, cannot happen)
+//                        decision came after its sample; sticky, cannot happen), bit16 CH_ERR
+//                        (channel-estimate packet queue overflow; sticky, cannot happen)
 //   0x0C SAMPLES     RO  input samples taken since RESET (stage 2: 40 Msps samples, twice the
 //                        detector's sample_cnt)
 //   0x10 OPEN_T      RO  t_trig of the first open window (valid when OPEN)
@@ -48,6 +51,8 @@
 //                        1 also enables the speculative payload FFT and its records
 //   0x5C PL_LEVEL    RO  words in the payload-record FIFO (4 per record, 16 records)
 //   0x60 PL_DATA     RO  next payload-record word (reading removes it)
+//   0x64 CH_LEVEL    RO  words in the channel-estimate record FIFO (4 per record, 16 records)
+//   0x68 CH_DATA     RO  next channel-estimate word (reading removes it)
 //
 // Event (8 words, in this order): t_trig, cfo_inc, {ang32, ang16}, {ang256, ang128},
 //   num[31:0], {fail, 23'b0, num[39:32]}, den[31:0], {24'b0, den[39:32]}
@@ -61,6 +66,11 @@
 // Payload record (4 words): t_trig, {25'b0, sym}, sig_a, sig_b (cf_reference.grid_signature
 //   of the payload symbol's 841 FFT bins). A full FIFO holds the speculative FFT (not the input
 //   directly), so the firmware may read them at any pace.
+//
+// Channel-estimate record (4 words; pl_reference.chest_records), in order per packet:
+//   packet record   t_trig, 0x8000, {n0[15:0], 3'b0, hi, class[3:0], k[7:0]}, sum_N[31:0]
+//   symbol record   t_trig, {25'b0, sym}, sig_a, sig_b (grid_signature of the 841 H values)
+// A full FIFO holds the channel estimate (and through it the payload FFT), never the input.
 //
 // Flow control: the sample input is held back (S_AXIS tready = 0) while the tone check is
 // catching up, while a timing search runs (one sample per 5 clocks), while the event or the
@@ -145,7 +155,7 @@ module pd_axi (
     (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 M_AXIS TREADY" *)
     input  wire        m_axis_tready
 );
-    localparam [31:0] ID = 32'h5044_0600;     // "PD", version 6.0 (6.0: payload FFT, 5.0: re-arm, 4.0: control field)
+    localparam [31:0] ID = 32'h5044_0700;     // "PD", version 7.0 (7.0: channel estimate, 6.0: payload FFT, 5.0: re-arm, 4.0: control field)
     localparam integer CF_DEPTH = 8;             // control records
     localparam integer CF_LIMIT = CF_DEPTH - 2;  // hold the input above this
     localparam integer TM_DEPTH = 32;            // timing records
@@ -191,6 +201,9 @@ module pd_axi (
     wire [4:0]   det_pl_cnt;
     wire [127:0] det_pl_head;
     wire         pl_last;
+    wire [4:0]   det_ch_cnt;
+    wire [127:0] det_ch_head;
+    wire         ch_last, det_ch_err;
     reg         gate;                             // input allowed (registered)
     wire        det_tvalid = s_axis_tvalid && gate;
     wire        accept     = det_tvalid && det_tready;
@@ -215,6 +228,7 @@ module pd_axi (
         .cf_msg(det_cf_msg), .cf_shift(det_cf_shift), .cf_metric(det_cf_metric), .cf_err(det_cf_err),
         .arm_late(det_arm_late),
         .pl_cnt(det_pl_cnt), .pl_head(det_pl_head), .pl_pop(pl_last),
+        .ch_cnt(det_ch_cnt), .ch_head(det_ch_head), .ch_pop(ch_last), .ch_err(det_ch_err),
         .busy(det_busy), .open_n(det_open_n), .open_t(det_open_t));
 
     wire       stage2 = (r_stage == 2'd2);
@@ -337,6 +351,17 @@ module pd_axi (
     wire [31:0]  pl_word  = det_pl_head[{pl_w, 5'd0} +: 32];
     wire [6:0]   pl_level = {det_pl_cnt, 2'd0} - {5'd0, pl_w};
 
+    // ------------------------------------------------------------------ channel-estimate records
+    reg  [1:0]   ch_w;
+    reg          ch_rd_pulse;
+    assign       ch_last = ch_rd_pulse && (ch_w == 2'd3);
+    always @(posedge aclk) begin
+        if (!det_rst_n) ch_w <= 2'd0;
+        else if (ch_rd_pulse) ch_w <= ch_w + 2'd1;
+    end
+    wire [31:0]  ch_word  = det_ch_head[{ch_w, 5'd0} +: 32];
+    wire [6:0]   ch_level = {det_ch_cnt, 2'd0} - {5'd0, ch_w};
+
     // ------------------------------------------------------------------ debug FIFO
     // res = records reserved: accepted samples whose record has not left the FIFO (or been
     // dropped with DEBUG = 0). The input is held while res is near the FIFO size.
@@ -391,8 +416,11 @@ module pd_axi (
     assign m_axis_tkeep  = 4'hF;
 
     // ------------------------------------------------------------------ AXI4-Lite
-    wire busy = det_busy || (ser_n != 4'd0) || (dbg_cnt != 0);
-    wire [31:0] status = {16'd0, det_arm_late, cf_err_r, cf_ovf, tm_err_r, tm_ovf, ctrl_loop, !det_rst_n, ev_ovf, det_open_n, 2'd0,
+    // det_busy registered first (a long path otherwise; one clock late is harmless for polling)
+    reg  det_busy_r;
+    always @(posedge aclk) det_busy_r <= det_busy;
+    wire busy = det_busy_r || (ser_n != 4'd0) || (dbg_cnt != 0);
+    wire [31:0] status = {15'd0, det_ch_err, det_arm_late, cf_err_r, cf_ovf, tm_err_r, tm_ovf, ctrl_loop, !det_rst_n, ev_ovf, det_open_n, 2'd0,
                           det_open_n != 4'd0, busy};
     reg  awready_r, wready_r, arready_r;
     reg  [11:0] wa;
@@ -440,13 +468,14 @@ module pd_axi (
 
     always @(posedge aclk) begin
         if (!aresetn) begin
-            arready_r <= 1'b0; s_axi_rvalid <= 1'b0; ev_pop <= 1'b0; tm_pop <= 1'b0; cf_pop <= 1'b0; pl_rd_pulse <= 1'b0;
+            arready_r <= 1'b0; s_axi_rvalid <= 1'b0; ev_pop <= 1'b0; tm_pop <= 1'b0; cf_pop <= 1'b0; pl_rd_pulse <= 1'b0; ch_rd_pulse <= 1'b0;
         end else begin
             arready_r <= 1'b0;
             ev_pop    <= 1'b0;
             tm_pop    <= 1'b0;
             cf_pop    <= 1'b0;
             pl_rd_pulse <= 1'b0;
+            ch_rd_pulse <= 1'b0;
             if (!arready_r && !s_axi_rvalid && s_axi_arvalid) begin
                 arready_r <= 1'b1;
                 case (s_axi_araddr[7:2])
@@ -482,6 +511,11 @@ module pd_axi (
                     6'h18: begin
                         s_axi_rdata <= (det_pl_cnt != 0) ? pl_word : 32'd0;
                         pl_rd_pulse <= (det_pl_cnt != 0) && det_rst_n;
+                    end
+                    6'h19: s_axi_rdata <= {25'd0, ch_level};
+                    6'h1A: begin
+                        s_axi_rdata <= (det_ch_cnt != 0) ? ch_word : 32'd0;
+                        ch_rd_pulse <= (det_ch_cnt != 0) && det_rst_n;
                     end
                     6'h15: begin
                         s_axi_rdata <= (cf_cnt != 0) ? cf_word : 32'd0;

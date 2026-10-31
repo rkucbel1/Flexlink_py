@@ -55,7 +55,7 @@
 /* ---------------------------------------------------------------------------------- */
 #define PD_PORT                 5001
 #define PD_PROTOCOL_VERSION     1u
-#define PD_BUILD                13u              /* bump when the firmware changes */
+#define PD_BUILD                14u              /* bump when the firmware changes */
 
 #define SAMPLE_BUF_ADDR         0x10000000u
 #define DEBUG_BUF_ADDR          0x18000000u
@@ -84,6 +84,7 @@
 #define PD_ID_V4                0x0400u         /* 4.0: control-field receiver (control FIFO) */
 #define PD_ID_V5                0x0500u         /* 5.0: re-arm by the Rx state machine (REARM) */
 #define PD_ID_V6                0x0600u         /* 6.0: shared fast FFT, payload records (PL FIFO) */
+#define PD_ID_V7                0x0700u         /* 7.0: payload channel estimate (CH FIFO) */
 #define R_ID                    0x00u
 #define R_CTRL                  0x04u
 #define R_STATUS                0x08u
@@ -101,6 +102,8 @@
 #define R_REARM                 0x58u
 #define R_PL_LEVEL              0x5Cu
 #define R_PL_DATA               0x60u
+#define R_CH_LEVEL              0x64u
+#define R_CH_DATA               0x68u
 #define CTRL_RESET              0x1u
 #define CTRL_DEBUG              0x2u
 #define CTRL_LOOPBACK           0x4u
@@ -112,6 +115,7 @@
 #define STATUS_CF_OVF           0x2000u
 #define STATUS_CF_ERR           0x4000u
 #define STATUS_ARM_LATE         0x8000u
+#define STATUS_CH_ERR           0x10000u
 #define IDLE_TIMEOUT_POLLS      10000000u
 
 /* ---------------------------------------------------------------------------------- */
@@ -140,6 +144,7 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define BOARD_FLAG_CF           0x8u            /* bitstream has the control-field receiver (ID 4.0) */
 #define BOARD_FLAG_REARM        0x10u           /* bitstream has the state machine's re-arm (ID 5.0) */
 #define BOARD_FLAG_PAYLOAD      0x20u           /* bitstream has the speculative payload FFT (ID 6.0) */
+#define BOARD_FLAG_CHEST        0x40u           /* bitstream has the payload channel estimate (ID 7.0) */
 #define EV_CFO_VALID            0x1u
 #define EV_TONE_FAIL            0x2u
 #define EV_TRUNCATED            0x4u
@@ -150,8 +155,9 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define MAX_CF                  1024u           /* control records per RUN */
 #define PL_SIZE                 16u             /* payload record (pd_protocol.PayloadRecord) */
 #define MAX_PL                  8192u           /* payload records per RUN */
-#define MAX_EVENTS              ((MAX_PAYLOAD - 20u - MAX_TM * TM_SIZE - MAX_CF * CF_SIZE - MAX_PL * PL_SIZE \
-                                  - EV_SIZE) / EV_SIZE)
+#define MAX_CH                  8192u           /* channel-estimate records per RUN (PL_SIZE each) */
+#define MAX_EVENTS              ((MAX_PAYLOAD - 24u - MAX_TM * TM_SIZE - MAX_CF * CF_SIZE - MAX_PL * PL_SIZE \
+                                  - MAX_CH * PL_SIZE - EV_SIZE) / EV_SIZE)
 #define TONE_THRESH_MAX_Q8      (24u * 256u)
 
 /* ---------------------------------------------------------------------------------- */
@@ -202,6 +208,9 @@ static int cf_lost;
 static u8  pl_out[MAX_PL * PL_SIZE]; /* payload records of the RUN */
 static u32 pl_n;
 static int pl_lost;
+static u8  ch_out[MAX_CH * PL_SIZE]; /* channel-estimate records of the RUN */
+static u32 ch_n;
+static int ch_lost;
 
 /* ---------------------------------------------------------------------------------- */
 /* Helpers                                                                             */
@@ -455,12 +464,39 @@ static void drain_payload(void)
     }
 }
 
+/* Read every complete channel-estimate record (4 words) into ch_out (pd_protocol.PayloadRecord
+ * layout: t_trig, sym (0x8000 = packet record), sig_a, sig_b). */
+static void drain_chest(void)
+{
+    if (det_version < PD_ID_V7) {
+        return;
+    }
+    while (pd_rd(R_CH_LEVEL) >= 4u) {
+        u32 w[4], i;
+        u8 *r;
+        for (i = 0; i < 4u; i++) {
+            w[i] = pd_rd(R_CH_DATA);
+        }
+        if (ch_n >= MAX_CH) {
+            ch_lost = 1;
+            continue;
+        }
+        r = ch_out + PL_SIZE * ch_n;
+        wr32(r + 0, w[0]);                                      /* t_trig */
+        wr32(r + 4, w[1] & 0xFFFFu);                            /* sym (u16) + 2 pad bytes */
+        wr32(r + 8, w[2]);                                      /* sig_a */
+        wr32(r + 12, w[3]);                                     /* sig_b */
+        ch_n++;
+    }
+}
+
 static void drain_all(void)
 {
     drain_events();
     drain_timing();
     drain_control();
     drain_payload();
+    drain_chest();
 }
 
 /* Hold the detector in reset, write the parameters, release it. */
@@ -575,6 +611,8 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     cf_lost = 0;
     pl_n = 0;
     pl_lost = 0;
+    ch_n = 0;
+    ch_lost = 0;
     start = pd_rd(R_SAMPLES);
     start20 = start / div;
     pd_wr(R_CTRL, debug ? CTRL_DEBUG : 0u);
@@ -605,6 +643,10 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
         snprintf(err, err_len, "re-arm decision after its sample (STATUS 0x%08lx)", (unsigned long)st);
         return -3;
     }
+    if (st & STATUS_CH_ERR) {
+        snprintf(err, err_len, "channel-estimate packet queue overflow (STATUS 0x%08lx)", (unsigned long)st);
+        return -3;
+    }
     if (st & (STATUS_CF_OVF | STATUS_CF_ERR)) {
         snprintf(err, err_len, "control FIFO overflow or start queue overflow (STATUS 0x%08lx)", (unsigned long)st);
         return -3;
@@ -617,6 +659,11 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     if (pl_lost) {
         snprintf(err, err_len, "more than %lu payload records in one RUN - run in smaller pieces",
                  (unsigned long)MAX_PL);
+        return -5;
+    }
+    if (ch_lost) {
+        snprintf(err, err_len, "more than %lu channel-estimate records in one RUN - run in smaller pieces",
+                 (unsigned long)MAX_CH);
         return -5;
     }
     if (tm_lost) {
@@ -647,13 +694,17 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     wr32(ev_out + 0, ev_n);
     wr32(ev_out + 4, count);
     /* reply: n_events, count, events, then n_timing and the timing records, then (build 11)
-     * n_control and the control records, then (build 13) n_payload and the payload records */
+     * n_control and the control records, then (build 13) n_payload and the payload records,
+     * then (build 14) n_chest and the channel-estimate records */
     wr32(ev_out + 8u + EV_SIZE * ev_n, tm_n);
     memcpy(ev_out + 12u + EV_SIZE * ev_n, tm_out, TM_SIZE * tm_n);
     wr32(ev_out + 12u + EV_SIZE * ev_n + TM_SIZE * tm_n, cf_n);
     memcpy(ev_out + 16u + EV_SIZE * ev_n + TM_SIZE * tm_n, cf_out, CF_SIZE * cf_n);
     wr32(ev_out + 16u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n, pl_n);
     memcpy(ev_out + 20u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n, pl_out, PL_SIZE * pl_n);
+    wr32(ev_out + 20u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * pl_n, ch_n);
+    memcpy(ev_out + 24u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * pl_n, ch_out,
+           PL_SIZE * ch_n);
     return 0;
 }
 
@@ -746,7 +797,8 @@ static void handle_message(struct tcp_pcb *pcb)
                             (det_version >= PD_ID_V3 ? BOARD_FLAG_TIMING : 0u) |
                             (det_version >= PD_ID_V4 ? BOARD_FLAG_CF : 0u) |
                             (det_version >= PD_ID_V5 ? BOARD_FLAG_REARM : 0u) |
-                            (det_version >= PD_ID_V6 ? BOARD_FLAG_PAYLOAD : 0u));
+                            (det_version >= PD_ID_V6 ? BOARD_FLAG_PAYLOAD : 0u) |
+                            (det_version >= PD_ID_V7 ? BOARD_FLAG_CHEST : 0u));
         reply(pcb, cmd, ST_OK, seq, tx_small, 16);
         return;
 
@@ -893,7 +945,7 @@ static void handle_message(struct tcp_pcb *pcb)
                 debug_count = rd32(params + 28) == 2u ? count / 2u : count;
             }
             reply(pcb, cmd, ST_OK, seq, ev_out,
-                  20u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * pl_n);
+                  24u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * pl_n + PL_SIZE * ch_n);
             return;
         }
         debug_count = 0;

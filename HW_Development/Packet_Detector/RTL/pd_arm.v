@@ -84,7 +84,10 @@ module pd_arm (
             default: begin pl_len = 18'd0; pl_ok = 1'b0; end
         endcase
     end
-    wire        f_ok  = pl_ok && (c_cbs != 2'b11) && (c_rm <= 4'b1000);
+    // also a valid payload grid (PacketLength 4 only with RefSymbolSpacing 1 or 3) and one Tx antenna
+    // (cf_reference.fields_valid)
+    wire        f_ok  = pl_ok && (c_cbs != 2'b11) && (c_rm <= 4'b1000) && !(c_pl == 3'b001 && cf_msg[0]) &&
+                        !cf_msg[9];
 
     always @(posedge clk) begin
         if (!rst_n) begin

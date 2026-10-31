@@ -26,6 +26,9 @@
 // stops at symbol pl_len (or at once if not pl_ok). A payload symbol starts only with pl_room.
 // Without pl_en the front end stops after the control field (4560 samples), as before.
 // s_more: the front end will still take samples (pd_cf fetches for it while it is set).
+// FFT job port: pl_chest's delay profiles run on this FFT (job_req -> job_gnt while idle or after a
+// symbol's unload; the sample input waits meanwhile). A start that comes during a job is kept.
+// The decision (pl_ok) also needs a valid payload grid and one Tx antenna (cf_reference.fields_valid).
 `timescale 1ns / 1ps
 `default_nettype none
 
@@ -60,6 +63,19 @@ module cf_rx (
     output reg                pl_dec,
     output reg                pl_ok,
     output reg  [6:0]         pl_len,
+    // FFT job (pl_chest's delay profiles): granted between two payload symbols or while idle;
+    // with job_gnt the FFT's input, start and output address are the job's
+    input  wire               job_req,
+    output wire               job_gnt,
+    input  wire               job_we,
+    input  wire [9:0]         job_idx,
+    input  wire signed [17:0] job_re,
+    input  wire signed [17:0] job_im,
+    input  wire               job_start,
+    input  wire [9:0]         job_oaddr,
+    output wire               job_done,
+    output wire signed [17:0] job_ore,
+    output wire signed [17:0] job_oim,
     // testbench only
     output reg                dbg_grid_we,
     output reg  [11:0]        dbg_grid_addr,
@@ -76,7 +92,7 @@ module cf_rx (
     localparam integer PL_SPEC = 8;             // payload symbols started before the decision
     // front end
     localparam [2:0] F_IDLE = 3'd0, F_IN = 3'd1, F_DRAIN = 3'd2, F_FFT = 3'd3, F_FWAIT = 3'd4,
-                     F_UNLOAD = 3'd5;
+                     F_UNLOAD = 3'd5, F_JOB = 3'd6;
     // back end
     localparam [2:0] B_IDLE = 3'd0, B_CE = 3'd1, B_CEW = 3'd2, B_VIT = 3'd3, B_CRC = 3'd4, B_DEC = 3'd5;
     reg [2:0]  fst, bst;
@@ -89,7 +105,10 @@ module cf_rx (
     reg        decided, d_ok;
     reg [6:0]  d_len;
     reg        be_go;
-    assign busy = (fst != F_IDLE) || (bst != B_IDLE) || be_go || start;
+    reg        st_pend;                         // start seen while a job had the FFT
+    reg  [2:0] j_ret;                           // front-end state after the job
+    assign busy = (fst != F_IDLE) || (bst != B_IDLE) || be_go || start || st_pend;
+    assign job_gnt = (fst == F_JOB);
     // gate at the first sample of every payload symbol
     wire       at_pl  = (pos == 11'd0) && (isym >= 7'd4);
     wire [6:0] pidx   = isym - 7'd4;
@@ -146,9 +165,13 @@ module cf_rx (
     wire        fft_done;
     wire [9:0]  fft_oaddr = cnt + 10'd604;
     wire signed [17:0] fft_ore, fft_oim;
-    pd_fft2 u_fft (.clk(clk), .rst_n(rst_n), .in_we(f_we), .in_idx(f_idx), .in_re(f_re), .in_im(f_im),
-                  .start(fft_start), .busy(), .done(fft_done), .out_addr(fft_oaddr),
-                  .out_re(fft_ore), .out_im(fft_oim));
+    pd_fft2 u_fft (.clk(clk), .rst_n(rst_n), .in_we(job_gnt ? job_we : f_we), .in_idx(job_gnt ? job_idx : f_idx),
+                  .in_re(job_gnt ? job_re : f_re), .in_im(job_gnt ? job_im : f_im),
+                  .start(job_gnt ? job_start : fft_start), .busy(), .done(fft_done),
+                  .out_addr(job_gnt ? job_oaddr : fft_oaddr), .out_re(fft_ore), .out_im(fft_oim));
+    assign job_done = fft_done;
+    assign job_ore = fft_ore;
+    assign job_oim = fft_oim;
 
     // unload: issue column cnt (R_UNLOAD), data one clock later
     reg        u_v;
@@ -231,16 +254,22 @@ module cf_rx (
             default: c_len = 7'd0;
         endcase
     end
-    wire f_ok = (c_len != 7'd0) && (c_cbs != 2'b11) && (c_rm <= 4'b1000);
+    // also: a valid payload grid (PacketLength 4 only with RefSymbolSpacing 1 or 3) and one Tx antenna
+    wire f_ok = (c_len != 7'd0) && (c_cbs != 2'b11) && (c_rm <= 4'b1000) &&
+                !(c_pl == 3'b001 && vbits[0]) && !vbits[9];
 
     // ================================================================ front end
     always @(posedge clk) begin
         if (!rst_n) begin
-            fst <= F_IDLE; fft_start <= 1'b0; be_go <= 1'b0;
+            fst <= F_IDLE; fft_start <= 1'b0; be_go <= 1'b0; st_pend <= 1'b0;
         end else begin
             fft_start <= 1'b0; be_go <= 1'b0;
+            if (start && !(fst == F_IDLE && bst == B_IDLE && !job_req)) st_pend <= 1'b1;
             case (fst)
-                F_IDLE: if (start && bst == B_IDLE) begin
+                F_IDLE: if (job_req && !start && !st_pend) begin
+                    j_ret <= F_IDLE; fst <= F_JOB;
+                end else if ((start || st_pend) && bst == B_IDLE) begin
+                    st_pend <= 1'b0;
                     inc <= cfo_inc; ph <= 24'd0; pos <= 11'd0; isym <= 7'd0; fsym <= 7'd0;
                     rec_t_trig <= t_trig; rec_n_end <= n_end; pl_on <= pl_en;
                     fst <= F_IN;
@@ -264,9 +293,11 @@ module cf_rx (
                     if (cnt == 10'd842) begin
                         if (fsym == 7'd3) be_go <= 1'b1;
                         fsym <= fsym + 7'd1;
-                        fst <= F_IN;
+                        if (job_req) begin j_ret <= F_IN; fst <= F_JOB; end
+                        else fst <= F_IN;
                     end else cnt <= cnt + 10'd1;
                 end
+                F_JOB: if (!job_req) fst <= j_ret;
                 default: fst <= F_IDLE;
             endcase
         end

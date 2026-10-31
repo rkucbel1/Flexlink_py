@@ -340,8 +340,15 @@ def field_codes(message: int) -> dict[str, int]:
 
 
 def fields_valid(message: int) -> bool:
+    """Every field code has a meaning, the payload grid is valid (PacketLength - 1 a multiple of
+    RefSymbolSpacing: PacketLength 4 needs RefSymbolSpacing 1 or 3, Construct_Resource_Grid) and
+    the board supports the setting (NoOfTxAntenna 1 only)."""
     c = field_codes(message)
-    return all(c[k] in v for k, v in CF_VALID.items())
+    if not all(c[k] in v for k, v in CF_VALID.items()):
+        return False
+    if c["PacketLength"] == 0b001 and c["RefSymbolSpacing"] >= 0b10:
+        return False
+    return c["NoOfTxAntenna"] == 0
 
 
 def packet_length(message: int) -> int:

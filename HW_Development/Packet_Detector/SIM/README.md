@@ -81,6 +81,43 @@ SIM=verilator NOVEC=1 ./run_cf.sh
 
 Ends with one `PASS` line per case; the exit status is 0 only if all pass. Log: `cf_sim.log`.
 
+## Payload channel estimate (`run_chest.sh`)
+
+`tb_pl_chest.v` checks `RTL/pl_chest.v` against `pl_reference.channel` on 16 packets from
+`make_chest_vectors.py`: every modulation, all four pilot spacings in time and frequency, both
+SNR modes, every smoothing length, packet shifts k > 0, PacketLength 4 to 73, and a two-path
+channel where the −30 dB peak threshold sets the delay class. The testbench plays `cf_rx`:
+three rejected packets before every real one, the decision after a random symbol, its own FFT
+as the job server, random gaps and output back-pressure. Every packet record, H and Y' must
+match. `chest_mut.py` injects 19 faults (Verilator), and every one must be caught. In the system
+testbench `tb_pd_detect` the channel-estimate records (`exp_ch.txt`, from
+`pl_reference.chest_records`) are checked too.
+
+```bash
+./run_chest.sh                 # vectors + three runs (xsim if Vivado is sourced, else Verilator)
+SIM=verilator NOVEC=1 ./run_chest.sh
+python chest_mut.py            # fault injection
+```
+
+## Payload LDPC decoder core (`run_ldpc.sh`)
+
+`tb_pl_ldpc.v` checks `RTL/pl_ldpc_core.v` against `pl_reference.decode_ldpc` on
+`make_ldpc_vectors.py`'s code words. There are 540, 45 per code for all 12 codes:
+- random code words with BPSK/AWGN LLRs, from "never converges" to "first iteration";
+- all +63 / −63 / random ±63;
+- all zero and small random values, which tie in every minimum search.
+
+Every hard bit and every iteration count must match. The input comes with random gaps and the
+output with random back-pressure. The testbench also prints the clocks per iteration for each
+code. `ldpc_mut.py` injects 12 faults (Verilator), and every one must be caught. Its docstring
+lists the mutants left out because they cannot change a result.
+
+```bash
+./run_ldpc.sh                  # vectors + two runs (xsim if Vivado is sourced, else Verilator)
+SIM=verilator NOVEC=1 ./run_ldpc.sh
+python ldpc_mut.py             # fault injection, about 5 minutes
+```
+
 ## Firmware + RTL co-simulation (`cosim/`)
 
 `cosim/build.sh` compiles the board firmware `FW/pd_server.c` against small stand-ins for lwIP

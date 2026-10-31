@@ -62,6 +62,12 @@ per good timing record; `pd_axi` 4.0 puts them in the control FIFO (CF_LEVEL 0x5
 | `cf_viterbi.v` | K = 7 soft Viterbi, 64 states one per clock, 70 steps, start and end in state 0, ties to the 0 branch; decisions in distributed RAM, traceback | `viterbi` |
 | `cf_crc10.v` | CRC10 (Gen10) over the 64 decoded bits, one bit per clock | `crc10` |
 | `cf_roms.v` | **generated** by `gen_cf_roms.py`: twiddles, FIR map (first pilot + coefficient set per tone) and the 25 coefficient sets, Gold sequence (2200 bits), de-interleaver, pilot signs | `cf_tables.py` |
+| `pl_ldpc_core.v` | **payload LDPC decoder core** (step 12a): one 802.11n code word at a time, every N and rate, 27 lanes; layered normalised min-sum, APP 10 bit in 27 block-RAM banks (lanes = banks rotated by the circulant shift), compressed messages (mn1', mn2', index per row, one sign per edge), q FIFO between the read pass (P1) and the write pass (P2), column scoreboard for the layer-to-layer hazard, syndrome after each iteration from two LUT-RAM hard-bit copies while P1 starts the next iteration; ≤ 10 iterations, early stop | `decode_ldpc` |
+| `pl_ldpc_rom.v` | **generated** by `gen_pl_ldpc_rom.py`: the circulants of every layer of the 12 codes (column, shift, column-order index; reordered within a layer for speed) and a header per code | `pl_tables.npz` |
+| `pl_chest.v` | **payload channel estimate** (step 12b): 16-symbol grid ring with a 2-deep packet queue (symbols arrive before the decision); packet shift k from rows 0 and 1, pilots, delay profile on the `cf_rx` FFT (job port, between symbols), delay class, SNR mode, noise sum; then per reference row FIR8 in frequency, drift (CORDIC) and smoothing, and per symbol the linear time interpolation; outputs H and Y' per tone, and one packet record | `channel`, `chest_records` |
+| `pl_roms.v`, `pl_coef_base.vh` | **generated** by `gen_pl_roms.py`: FIR8 coefficients (two taps per word), tone table, pilot bits and window | `pl_tables.npz` |
+| `pl_mulseq.v` | sequential multiplier for the once-per-packet products | – |
+| `pl_lutram1.v` | 128 × 1 LUT RAM, asynchronous read (the decoder's hard-bit copies) | – |
 
 **Interface** (`cf_rx`; `pd_cf` drives it inside the detector). `start` with `cfo_inc`, `t_trig`, `n_end` (the last two are passed through to the
 record), then 4560 samples on `s_valid` / `s_ready` / `s_i` / `s_q` (12-bit, the DC blocker output from
