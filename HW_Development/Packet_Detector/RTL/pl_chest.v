@@ -71,6 +71,10 @@ module pl_chest (
     output reg  signed [15:0] h_im,
     output reg  signed [15:0] y_re,
     output reg  signed [15:0] y_im,
+    output reg                h_ref,         // the symbol is a reference row
+    input  wire               h_take,        // the H consumer freed one entry (credit; 16 at reset)
+    output reg  [53:0]        pk_msg,        // the packet's control message (with pk_valid)
+    output reg  [47:0]        pk_sumn,       // its full sumN
     output wire               busy,
     output wire               waiting,       // busy only waiting for symbols or the FFT
     output reg                err            // an accepted packet while the queue is full (sticky)
@@ -227,6 +231,14 @@ module pl_chest (
     localparam [3:0] T_NONE = 0, T_K = 1, T_SCAN = 2, T_JPIL = 3, T_JRD = 4, T_DRIFT = 5, T_FIR = 6,
                      T_SM = 7, T_H = 8;
     reg  [5:0]  es, e_ret;
+    reg  [53:0] cur_msg;
+    // H credits: one per free entry of the consumer's input FIFO (pl_demap: 16)
+    reg  [4:0]  hcred;
+    wire        h_issue = (es == E_HOUT) && (hcred != 5'd0);
+    always @(posedge clk) begin
+        if (!rst_n) hcred <= 5'd16;
+        else hcred <= hcred - (h_issue ? 5'd1 : 5'd0) + (h_take ? 5'd1 : 5'd0);
+    end
     assign busy = (es != E_IDLE) || (q_n != 2'd0);
     reg  [9:0]  cnt;                           // loop counter (column, pilot, bin, tone)
     reg  [8:0]  pcnt;                          // pilot index during a row scan
@@ -370,7 +382,7 @@ module pl_chest (
             case (es)
             // ========================================================== packet start
             E_IDLE: if (q_n != 2'd0 && !q_pop) begin
-                base <= q_base[0]; cur_t <= q_t[0];
+                base <= q_base[0]; cur_t <= q_t[0]; cur_msg <= q_msg[0];
                 mod <= {q_msg[0][7], q_msg[0][8]};
                 scode <= {q_msg[0][2], q_msg[0][3]};
                 case ({q_msg[0][0], q_msg[0][1]})
@@ -496,6 +508,7 @@ module pl_chest (
                 pk_t <= cur_t;
                 pk_a <= {6'd0, n0, 3'd0, hi, 2'd0, cls_of(last), 3'd0, k};
                 pk_b <= sumn[31:0];
+                pk_msg <= cur_msg; pk_sumn <= sumn;
                 half <= hi ? 3'd0 : (R == 4'd1) ? 3'd4 : (R == 4'd3) ? 3'd2 : (R == 4'd6) ? 3'd1 : 3'd0;
                 nxt_row <= 7'd0; nxt_sm <= 7'd0; nxt_sym <= 7'd0;
                 row_sym <= 8'd0; row10 <= 4'd0; sm10 <= 4'd0; sm3 <= 2'd0; sym_j <= 7'd0; sym_t <= 4'd0;
@@ -622,7 +635,7 @@ module pl_chest (
             end
             E_HSET5: es <= E_HSET6;
             E_HSET6: begin rc <= cs_cos; rs <= cs_sin; cnt <= 10'd0; es <= E_HOUT; end
-            E_HOUT: begin
+            E_HOUT: if (hcred != 5'd0) begin
                 s_ra <= {hj_m3, cnt}; s_rb <= {hj1_m3, cnt};
                 g_raddr <= {base[3:0] + hsym[3:0], cnt};
                 tg1 <= T_H; c1 <= cnt;
@@ -916,7 +929,7 @@ module pl_chest (
                     a_we <= 1'b1; a_wslot <= aslot; a_waddr <= ro_c2;
                     a_wd <= {sat16_33({rp1[31], rp1} - {rp2[31], rp2}), sat16_33({rp3[31], rp3} + {rp4[31], rp4})};
                 end else begin
-                    h_valid <= 1'b1; h_t <= cur_t; h_sym <= hsym; h_col <= ro_c2;
+                    h_valid <= 1'b1; h_t <= cur_t; h_sym <= hsym; h_col <= ro_c2; h_ref <= (hmode != 2'd2);
                     h_re <= sat16_33({rp1[31], rp1} - {rp2[31], rp2});
                     h_im <= sat16_33({rp3[31], rp3} + {rp4[31], rp4});
                     y_re <= ro_yr2; y_im <= ro_yi2;

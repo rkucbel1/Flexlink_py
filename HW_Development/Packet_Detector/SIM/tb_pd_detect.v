@@ -59,6 +59,12 @@ module tb_pd_detect;
     wire [127:0] ch_head;
     reg          ch_pop = 1'b0;
     wire         ch_err;
+    wire [4:0]   lq_cnt;
+    wire [127:0] lq_head;
+    reg          lq_pop = 1'b0;
+    wire [11:0]  tb_cnt;
+    wire [31:0]  tb_word;
+    reg          tb_pop = 1'b0;
     reg         rearm = 1'b0, arm_late_seen = 1'b0;
     wire [31:0] cf_t, cf_n_end;
     wire [53:0] cf_msg;
@@ -72,6 +78,8 @@ module tb_pd_detect;
         .blank_len(blank_len), .arm_holdoff(arm_holdoff), .n_cfo(n_cfo), .tone_lin(tone_lin), .t_pk(t_pk),
         .rearm(rearm), .arm_late(arm_late), .pl_cnt(pl_cnt), .pl_head(pl_head), .pl_pop(pl_pop),
         .ch_cnt(ch_cnt), .ch_head(ch_head), .ch_pop(ch_pop), .ch_err(ch_err),
+        .lq_cnt(lq_cnt), .lq_head(lq_head), .lq_pop(lq_pop),
+        .tb_cnt(tb_cnt), .tb_word(tb_word), .tb_pop(tb_pop),
         .s_iq_tvalid(s_valid), .s_iq_tdata(s_data), .s_iq_tready(s_ready),
         .lpf_valid(lpf_valid), .lpf_i(lpf_i), .lpf_q(lpf_q),
         .trig(trig), .t_trig(t_trig),
@@ -93,7 +101,7 @@ module tb_pd_detect;
     integer f_cfg, f_in, f_lpf, f_dbg, f_trig, f_cfo, f_tone, f_open, r, rc, x_open, x_open_t, guard;
     integer n_samples, n_trig, n_cfo_ev, gap, seed, maxerr, fixgap, n_out;
     integer cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q, cfg_blank, cfg_hold, cfg_ncfo, cfg_lin, cfg_tpk, n_tm, cfg_rearm;
-    integer f_tm, tm_seen, tm_good, tm_busy_n, k2, hit;
+    integer f_tm, tm_seen, tm_good, tm_busy_n, k2, j2, hit;
     reg [31:0] xt_t [0:4095];
     reg [31:0] xt_n [0:4095];
     reg [2:0]  xt_s [0:4095];
@@ -114,6 +122,16 @@ module tb_pd_detect;
     reg [31:0] xp_a [0:4095];
     reg [31:0] xp_b [0:4095];
     integer f_ch, n_ch, ch_seen, ch_wait;
+    integer f_lq, n_lq, lq_seen, lq_wait;
+    integer f_tb, n_tb, tb_seen, tb_wait, tb_k, tb_nw, tb_ok_n;
+    reg [31:0] tb_t, tb_hdr;
+    reg [31:0] xb_t [0:1023];
+    reg [31:0] xb_h [0:1023];                  // {ok, 3'b0, it, w, 3'b0, nbits} as the hardware's header
+    reg [31:0] xb_d [0:1023*50];
+    reg [31:0] xl_t [0:4095];
+    reg [15:0] xl_s [0:4095];
+    reg [31:0] xl_a [0:4095];
+    reg [31:0] xl_b [0:4095];
     reg [31:0] xh_t [0:4095];
     reg [15:0] xh_s [0:4095];
     reg [31:0] xh_a [0:4095];
@@ -124,7 +142,7 @@ module tb_pd_detect;
     initial begin
         errors = 0; lpf_seen = 0; dbg_seen = 0; trig_seen = 0; cfo_seen = 0; ev_seen = 0;
         tm_seen = 0; tm_good = 0; tm_busy_n = 0; n_tm = 0; n_cf = 0; cf_seen = 0; cf_ok = 0;
-        n_pl = 0; pl_seen = 0; pl_wait = 0; n_ch = 0; ch_seen = 0; ch_wait = 0;
+        n_pl = 0; pl_seen = 0; pl_wait = 0; n_ch = 0; ch_seen = 0; ch_wait = 0; n_lq = 0; lq_seen = 0; lq_wait = 0; n_tb = 0; tb_seen = 0; tb_wait = 0; tb_k = 0; tb_ok_n = 0;
         if (!$value$plusargs("plgap=%d", pl_gap)) pl_gap = 0;
         ev_fails = 0; stalls = 0;
         rst_n = 1'b0; s_valid = 1'b0; s_data = 32'd0;
@@ -309,6 +327,54 @@ module tb_pd_detect;
                          ch_head[71:64], ch_head[75:72], ch_head[76] ? "high" : "low", ch_head[95:80]);
             ch_seen = ch_seen + 1;
         end
+        // decoder-input records: as the payload records (same gap)
+        lq_pop <= 1'b0;
+        if (lq_wait > 0) lq_wait = lq_wait - 1;
+        if (rst_n && lq_cnt != 5'd0 && !lq_pop && lq_wait == 0) begin
+            lq_pop <= 1'b1; lq_wait = pl_gap;
+            if (lq_seen >= n_lq) begin
+                errors = errors + 1;
+                if (errors <= maxerr) $display("ERROR decoder input: unexpected record t %0d w %0d", lq_head[31:0], lq_head[47:32]);
+            end else if (lq_head[31:0] !== xl_t[lq_seen] || lq_head[63:32] !== {16'd0, xl_s[lq_seen]} ||
+                         lq_head[95:64] !== xl_a[lq_seen] || lq_head[127:96] !== xl_b[lq_seen]) begin
+                errors = errors + 1;
+                if (errors <= maxerr)
+                    $display("ERROR decoder input %0d: t %0d w %0d a %h b %h, expected %0d %0d %h %h", lq_seen,
+                             lq_head[31:0], lq_head[63:32], lq_head[95:64], lq_head[127:96],
+                             xl_t[lq_seen], xl_s[lq_seen], xl_a[lq_seen], xl_b[lq_seen]);
+            end else
+                $display("  decoder input of t_trig %0d, code word %0d: signature %h %h (ok)", lq_head[31:0],
+                         lq_head[47:32], lq_head[95:64], lq_head[127:96]);
+            lq_seen = lq_seen + 1;
+        end
+        // transport blocks: one word per read, at least 3 clocks apart (as AXI-Lite)
+        tb_pop <= 1'b0;
+        if (tb_wait > 0) tb_wait = tb_wait - 1;
+        else if (rst_n && tb_cnt != 12'd0) begin
+            tb_pop <= 1'b1; tb_wait = 3 + pl_gap / 64;
+            if (tb_k == 0) tb_t = tb_word;
+            else if (tb_k == 1) begin tb_hdr = tb_word; tb_nw = (tb_word[10:0] + 31) / 32; end
+            else if (tb_seen < n_tb && tb_word !== xb_d[tb_seen * 50 + tb_k - 2]) begin
+                errors = errors + 1;
+                if (errors <= maxerr) $display("ERROR transport block %0d word %0d: %h, expected %h", tb_seen, tb_k - 2,
+                                               tb_word, xb_d[tb_seen * 50 + tb_k - 2]);
+            end
+            tb_k = tb_k + 1;
+            if (tb_k >= 2 && tb_k == tb_nw + 2) begin
+                if (tb_seen >= n_tb) begin
+                    errors = errors + 1;
+                    if (errors <= maxerr) $display("ERROR transport block: unexpected, t %0d", tb_t);
+                end else if (tb_t !== xb_t[tb_seen] || tb_hdr !== xb_h[tb_seen]) begin
+                    errors = errors + 1;
+                    if (errors <= maxerr) $display("ERROR transport block %0d: t %0d header %h, expected t %0d header %h",
+                                                   tb_seen, tb_t, tb_hdr, xb_t[tb_seen], xb_h[tb_seen]);
+                end else
+                    $display("  transport block of t_trig %0d, code word %0d: %0d bits, CRC %0s, %0d iteration(s) (ok)",
+                             tb_t, tb_hdr[23:14], tb_hdr[10:0], tb_hdr[31] ? "ok" : "FAIL", tb_hdr[27:24]);
+                if (tb_hdr[31]) tb_ok_n = tb_ok_n + 1;
+                tb_seen = tb_seen + 1; tb_k = 0;
+            end
+        end
         if (rst_n && ch_err) begin
             errors = errors + 1;
             if (errors <= maxerr) $display("ERROR chest: packet queue overflow");
@@ -350,8 +416,10 @@ module tb_pd_detect;
         f_cf   = $fopen("exp_cf.txt", "r");
         f_pl   = $fopen("exp_pl.txt", "r");
         f_ch   = $fopen("exp_ch.txt", "r");
+        f_lq   = $fopen("exp_lq.txt", "r");
+        f_tb   = $fopen("exp_tb.txt", "r");
         if (f_cfg == 0 || f_in == 0 || f_lpf == 0 || f_dbg == 0 || f_trig == 0 || f_cfo == 0 || f_tone == 0 ||
-            f_open == 0 || f_tm == 0 || f_cf == 0 || f_pl == 0 || f_ch == 0) begin
+            f_open == 0 || f_tm == 0 || f_cf == 0 || f_pl == 0 || f_ch == 0 || f_lq == 0 || f_tb == 0) begin
             $display("FAIL: cannot open the vector files (cfg.txt ...) in the current directory");
             $finish;
         end
@@ -373,6 +441,17 @@ module tb_pd_detect;
         r = $fscanf(f_pl, "%d\n", n_pl);
         for (k2 = 0; k2 < n_pl; k2 = k2 + 1)
             r = $fscanf(f_pl, "%h %h %h %h\n", xp_t[k2], xp_s[k2], xp_a[k2], xp_b[k2]);
+        r = $fscanf(f_tb, "%d\n", n_tb);
+        for (k2 = 0; k2 < n_tb; k2 = k2 + 1) begin
+            r = $fscanf(f_tb, "%h %h %h %h %h", xb_t[k2], tb_t, tb_hdr, tb_k, tb_nw);
+            // header as the hardware writes it: {crc_ok, 3'b0, iterations, w, 3'b0, nbits}
+            xb_h[k2] = {tb_hdr[0], 3'd0, tb_k[3:0], tb_t[9:0], 3'd0, tb_nw[10:0]};
+            for (j2 = 0; j2 < (tb_nw + 31) / 32; j2 = j2 + 1) r = $fscanf(f_tb, "%h", xb_d[k2 * 50 + j2]);
+        end
+        tb_k = 0;
+        r = $fscanf(f_lq, "%d\n", n_lq);
+        for (k2 = 0; k2 < n_lq; k2 = k2 + 1)
+            r = $fscanf(f_lq, "%h %h %h %h\n", xl_t[k2], xl_s[k2], xl_a[k2], xl_b[k2]);
         r = $fscanf(f_ch, "%d\n", n_ch);
         for (k2 = 0; k2 < n_ch; k2 = k2 + 1)
             r = $fscanf(f_ch, "%h %h %h %h\n", xh_t[k2], xh_s[k2], xh_a[k2], xh_b[k2]);
@@ -408,7 +487,7 @@ module tb_pd_detect;
         // wait until nothing is in flight (the last checks take up to 2 x ceil(13 / NU) x N clocks)
         guard = 0;
         @(negedge clk);
-        while ((busy || pl_cnt != 5'd0 || ch_cnt != 5'd0) && guard < 30 * cfg_ncfo + 160000 + 34 * pl_gap) begin
+        while ((busy || pl_cnt != 5'd0 || ch_cnt != 5'd0 || lq_cnt != 5'd0 || tb_cnt != 12'd0) && guard < 30 * cfg_ncfo + 400000 + 50 * pl_gap) begin
             @(negedge clk); guard = guard + 1;
         end
         if (busy) begin errors = errors + 1; $display("ERROR: still busy %0d clocks after the input ended", guard); end
@@ -445,13 +524,19 @@ module tb_pd_detect;
         if (pl_seen != n_pl) begin
             errors = errors + 1; $display("ERROR: %0d payload records, expected %0d", pl_seen, n_pl);
         end
+        if (tb_seen != n_tb) begin
+            errors = errors + 1; $display("ERROR: %0d transport blocks, expected %0d", tb_seen, n_tb);
+        end
+        if (lq_seen != n_lq) begin
+            errors = errors + 1; $display("ERROR: %0d decoder-input records, expected %0d", lq_seen, n_lq);
+        end
         if (ch_seen != n_ch) begin
             errors = errors + 1; $display("ERROR: %0d channel-estimate records, expected %0d", ch_seen, n_ch);
         end
         $display("  input stalled for %0d clocks (tone check catching up, timing searches)", stalls);
         if (errors == 0)
-            $display("PASS: %0d samples, %0d debug records, %0d trigger(s), %0d CFO result(s), %0d event(s) (%0d failing the tone check), %0d timing record(s) (%0d good, %0d busy), %0d control record(s) (%0d CRC ok), %0d payload record(s), %0d channel-estimate record(s) match the bit-true model",
-                     n_samples, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, tm_seen, tm_good, tm_busy_n, cf_seen, cf_ok, pl_seen, ch_seen);
+            $display("PASS: %0d samples, %0d debug records, %0d trigger(s), %0d CFO result(s), %0d event(s) (%0d failing the tone check), %0d timing record(s) (%0d good, %0d busy), %0d control record(s) (%0d CRC ok), %0d payload record(s), %0d channel-estimate record(s), %0d decoder-input record(s), %0d transport block(s) (%0d CRC ok) match the bit-true model",
+                     n_samples, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, tm_seen, tm_good, tm_busy_n, cf_seen, cf_ok, pl_seen, ch_seen, lq_seen, tb_seen, tb_ok_n);
         else
             $display("FAIL: %0d error(s)", errors);
         $finish;

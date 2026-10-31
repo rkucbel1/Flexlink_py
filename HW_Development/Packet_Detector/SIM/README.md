@@ -81,6 +81,25 @@ SIM=verilator NOVEC=1 ./run_cf.sh
 
 Ends with one `PASS` line per case; the exit status is 0 only if all pass. Log: `cf_sim.log`.
 
+## Payload demapper, combiner and decoder (`run_soft.sh`)
+
+`tb_pl_soft.v` checks `RTL/pl_demap.v`, `pl_comb.v` and `pl_dec.v` (with `pl_ldpc_core.v`)
+against `pl_reference.soft_bits`, `combine`, `decode_ldpc` and `crc24` on 16 packets from `make_lq_vectors.py`: every modulation and all 12 codes, 2 to 32
+copies, NDB_A below and above what fits and 0, a packet with sumN = 0 and packets whose LLRs and
+copy sums saturate. The testbench plays `pl_chest` (packet record, H stream with credits, random
+gaps) and a random consumer. Every decoder input Lq (code order), every code-word record and
+every transport block (bits, CRC result, iterations) must match. `soft_mut.py` injects 25 faults (Verilator), and every one must be caught; its
+docstring lists the equivalent mutations left out. In `tb_pd_detect` the decoder-input records
+(`exp_lq.txt`, from `pl_reference.lq_records`) and the transport blocks (`exp_tb.txt`,
+`tb_records`) are checked too; `./run_sim.sh mods 1` and `./run_sim.sh mods2 1` run rep3 with
+its packets replaced by QPSK / 16QAM / 64QAM / BPSK packets (`make_tb_vectors.mods_vector`).
+
+```bash
+./run_soft.sh                  # vectors + three runs (xsim if Vivado is sourced, else Verilator)
+SIM=verilator NOVEC=1 ./run_soft.sh
+python soft_mut.py             # fault injection
+```
+
 ## Payload channel estimate (`run_chest.sh`)
 
 `tb_pl_chest.v` checks `RTL/pl_chest.v` against `pl_reference.channel` on 16 packets from

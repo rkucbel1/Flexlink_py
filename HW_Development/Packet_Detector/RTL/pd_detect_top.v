@@ -100,6 +100,14 @@ module pd_detect_top (
     output wire [127:0] ch_head,       // see pd_cf
     input  wire         ch_pop,
     output wire         ch_err,        // pl_chest packet queue overflow (sticky; cannot happen)
+    // decoder-input records (rearm only): one per code word
+    output wire [4:0]   lq_cnt,
+    output wire [127:0] lq_head,       // see pd_cf
+    input  wire         lq_pop,
+    // transport blocks (rearm only): FIFO words of complete records (see pl_dec)
+    output wire [11:0]  tb_cnt,
+    output wire [31:0]  tb_word,
+    input  wire         tb_pop,
     output wire        arm_late,       // a re-arm came too late (sticky; cannot happen)
     // state: busy = something still in flight; open_n / open_t = windows still waiting for
     // samples (at most 1 once busy is 0) and the first one's t_trig
@@ -198,7 +206,9 @@ module pd_detect_top (
         .cf_valid(cf_valid), .cf_t(cf_t), .cf_n_end(cf_n_end), .cf_crc_ok(cf_crc_ok), .cf_msg(cf_msg),
         .cf_shift(cf_shift), .cf_metric(cf_metric), .busy(cf_busy), .err(cf_err),
         .pl_cnt(pl_cnt), .pl_head(pl_head), .pl_pop(pl_pop),
-        .ch_cnt(ch_cnt), .ch_head(ch_head), .ch_pop(ch_pop), .ch_err(ch_err));
+        .ch_cnt(ch_cnt), .ch_head(ch_head), .ch_pop(ch_pop), .ch_err(ch_err),
+        .lq_cnt(lq_cnt), .lq_head(lq_head), .lq_pop(lq_pop),
+        .tb_cnt(tb_cnt), .tb_word(tb_word), .tb_pop(tb_pop));
 
     pd_arm u_arm (
         .clk(clk), .rst_n(rst_n), .rearm(rearm), .fe_on(fe_on), .n_cfo(n_cfo), .arm_holdoff(arm_holdoff),

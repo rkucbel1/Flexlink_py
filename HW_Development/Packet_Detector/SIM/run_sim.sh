@@ -75,7 +75,8 @@ else
        ../RTL/pd_cordic.v ../RTL/pd_cfo_cascade.v ../RTL/pd_cfo_lane.v ../RTL/pd_tone_rom.v
        ../RTL/pd_sdp_ram.v ../RTL/pd_tone_check.v ../RTL/pd_timing.v ../RTL/cf_roms.v ../RTL/cf_tdp_ram.v
        ../RTL/pd_fft2.v ../RTL/cf_chest.v ../RTL/cf_viterbi.v ../RTL/cf_crc10.v ../RTL/cf_rx.v ../RTL/pd_cf.v
-       ../RTL/pl_chest.v ../RTL/pl_roms.v ../RTL/pl_mulseq.v
+       ../RTL/pl_chest.v ../RTL/pl_roms.v ../RTL/pl_mulseq.v ../RTL/pl_demap.v ../RTL/pl_comb.v ../RTL/pl_soft_roms.v
+       ../RTL/pl_dec.v ../RTL/pl_ldpc_core.v ../RTL/pl_ldpc_rom.v ../RTL/pl_lutram1.v
        ../RTL/pd_arm.v ../RTL/pd_detect_top.v)
 args=("$VEC" --input-stage "$STAGE")
 [[ -n "${MAX:-}" ]] && args+=(--max-samples "$MAX")

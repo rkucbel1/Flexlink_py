@@ -181,6 +181,60 @@ def cfmod_vector(seed: int = 21) -> tuple[np.ndarray, list[str]]:
     return out, notes
 
 
+# packets of mods_vector: (mod, code, rep, RefSymbolSpacing, RefSignalSpacing, channel, SNR dB,
+# PacketLength, C_init)
+MODS_PLANS = {
+    "mods": [("QPSK", "1296_23", 1, 6, 6, "EVA-70", 12.0, 49, 17),
+             ("16QAM", "648_34", 1, 3, 3, "EPA-5", 18.0, 37, 200),
+             ("64QAM", "1944_56", 1, 12, 24, "AWGN", 28.0, 73, 64)],
+    "mods2": [("BPSK", "648_12", 3, 1, 12, "ETU-300", 3.0, 37, 129),
+              ("64QAM", "648_12", 1, 3, 6, "EVA-70", 10.0, 49, 5),
+              ("16QAM", "1296_56", 1, 6, 3, "AWGN", 15.0, 73, 250)],
+}
+
+
+def mods_vector(name: str, seed: int = 31) -> tuple[np.ndarray, list[str]]:
+    """rep3 (decimated input) with each packet's control field and payload replaced by a packet of
+    another modulation, code, copy count and pilot pattern (pl_check's payload generator, its
+    channel model and noise), with the packet's CFO, at the level of the samples it replaces; the
+    rest of the old payload becomes noise."""
+    import cf_reference as cf
+    sys.path.insert(0, str(HERE.parent / "PC"))
+    import pl_check as K
+    from make_chest_vectors import message
+    meta = json.loads((TV / "rep3.json").read_text())
+    known = {f.name for f in fields(pr.Params)}
+    p = pr.Params(**{k: v for k, v in meta["params"].items() if k in known})
+    p.input_stage, p.rearm = 1, 0
+    iq = np.fromfile(TV / meta["files"]["decimated"], "<i2").reshape(-1, 2).astype(np.int64)
+    res = ref.detect(iq, p, control=False)
+    rng = np.random.default_rng(seed)
+    inc = {e.t_trig: e.cfo_inc for e in res.events}
+    out = iq.copy()
+    notes = []
+    for (mod, code, rep, rs, rf, ch, snr, plen, ci), tm in zip(MODS_PLANS[name],
+                                                              [r for r in res.timing if r.status == pr.TM_GOOD]):
+        cfg = K.cfg_of(mod, code, rep, rs, rf, plen=plen, c_init=ci)
+        wave, _, _ = K.make_packet(cfg, rng)
+        r, d = K.through_channel(wave / np.sqrt(np.mean(np.abs(wave) ** 2)), ch, 200.0, rng)
+        pay = r[d:d + wave.size]
+        cfw = cf_waveform(message(cfg))
+        cfw = cfw / np.sqrt(np.mean(np.abs(cfw) ** 2))
+        a = tm.n_end + 1
+        b = a + cf.CF_LEN + 73 * 1140                    # rep3's control field and payload
+        lvl = np.sqrt(np.mean(np.abs(iq[a:b, 0] + 1j * iq[a:b, 1]) ** 2))
+        clean = np.zeros(b - a, complex)
+        clean[:cf.CF_LEN] = cfw
+        clean[cf.CF_LEN:cf.CF_LEN + pay.size] = pay
+        noise = (rng.standard_normal(b - a) + 1j * rng.standard_normal(b - a)) / np.sqrt(2)
+        ph = 2 * np.pi * (-(inc[tm.t_trig])) / 2 ** 24 * np.arange(a, b)
+        z = lvl * (clean * np.exp(1j * ph) + 10 ** (-snr / 20) * noise) / np.sqrt(1 + 10 ** (-snr / 10))
+        out[a:b] = np.clip(np.round(np.stack([z.real, z.imag], 1)), -2048, 2047).astype(np.int64)
+        notes.append(f"t_trig {tm.t_trig}: {mod} {code} copies {rep + 1} R {rs} S {rf} {ch} {snr:+.0f} dB "
+                     f"PacketLength {plen}, NDB_A {cfg.ndb}")
+    return out, notes
+
+
 def units_vectors(out_root: Path, seed: int = 3) -> Path:
     """CORDIC vectors (random + edge cases) and cascade angle sets (random + exact rounding
     boundaries and one LSB either side) with the model's results."""
@@ -313,6 +367,16 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
         iq, notes = cfmod_vector()
         print("cfmod: " + "; ".join(notes))
         vector = Path("cfmod.json")
+    elif str(vector) in MODS_PLANS:
+        if stage != 1:
+            raise SystemExit(f"{vector}: input stage 1 only")
+        p = json.loads((TV / "rep3.json").read_text())["params"]
+        known = {f.name for f in fields(pr.Params)}
+        p = pr.Params(**{k: v for k, v in p.items() if k in known})
+        p.input_stage = 1
+        iq, notes = mods_vector(str(vector))
+        print(f"{vector}: " + "; ".join(notes))
+        vector = Path(f"{vector}.json")
     elif str(vector) == "stress":
         p = pr.Params(arm_holdoff=500)
         p.input_stage = stage
@@ -379,6 +443,16 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
         for c in res.control))
     (out / "exp_pl.txt").write_text(f"{len(res.payload)}\n" + "".join(
         f"{r.t_trig:08x} {r.sym:02x} {r.sig_a:08x} {r.sig_b:08x}\n" for r in res.payload))
+    tb_lines = []
+    for r in res.tb:
+        words = [0] * ((r.nbits + 31) // 32)
+        for j, b in enumerate(r.bits):
+            words[j // 32] |= int(b) << (j % 32)
+        tb_lines.append(f"{r.t_trig:08x} {r.w:x} {r.crc_ok:x} {r.iters:x} {r.nbits:x} "
+                        + " ".join(f"{x:08x}" for x in words) + "\n")
+    (out / "exp_tb.txt").write_text(f"{len(res.tb)}\n" + "".join(tb_lines))
+    (out / "exp_lq.txt").write_text(f"{len(res.lq)}\n" + "".join(
+        f"{r.t_trig:08x} {r.sym:04x} {r.sig_a:08x} {r.sig_b:08x}\n" for r in res.lq))
     (out / "exp_ch.txt").write_text(f"{len(res.chest)}\n" + "".join(
         f"{r.t_trig:08x} {r.sym:04x} {r.sig_a:08x} {r.sig_b:08x}\n" for r in res.chest))
     u16 = (iq & 0xFFFF)
@@ -397,7 +471,8 @@ def export(vector: Path, stage: int, max_samples: int | None, out_root: Path, ho
     print(f"{out}: {iq.shape[0]} samples, input_stage {stage}, {len(trig)} trigger(s) at {shown}, "
           f"{len(cfo_lines)} CFO result(s), {n_fail} failing the tone check, {len(res.timing)} timing "
           f"record(s) ({good} good, {busy} busy), {len(res.control)} control record(s) "
-          f"({sum(c.crc_ok for c in res.control)} CRC ok), {len(res.payload)} payload record(s), {len(res.chest)} channel-estimate record(s)")
+          f"({sum(c.crc_ok for c in res.control)} CRC ok), {len(res.payload)} payload record(s), {len(res.chest)} channel-estimate record(s), {len(res.lq)} decoder-input record(s), {len(res.tb)} transport block(s) "
+          f"({sum(r.crc_ok for r in res.tb)} CRC ok)")
     return out
 
 

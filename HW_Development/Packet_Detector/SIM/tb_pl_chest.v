@@ -40,6 +40,7 @@ module tb_pl_chest;
                   .job_oaddr(job_oaddr), .fft_ore(fft_ore), .fft_oim(fft_oim), .out_room(out_room),
                   .pk_valid(pk_valid), .pk_t(pk_t), .pk_a(pk_a), .pk_b(pk_b), .h_valid(h_valid), .h_t(h_t),
                   .h_sym(h_sym), .h_col(h_col), .h_re(h_re), .h_im(h_im), .y_re(y_re), .y_im(y_im),
+                  .h_ref(), .h_take(h_valid), .pk_msg(), .pk_sumn(),
                   .busy(busy), .err(err));
     pd_fft2 u_fft (.clk(clk), .rst_n(rst_n), .in_we(job_we && job_gnt), .in_idx(job_idx), .in_re(job_re),
                    .in_im(job_im), .start(job_start && job_gnt), .busy(), .done(fft_done), .out_addr(job_oaddr),

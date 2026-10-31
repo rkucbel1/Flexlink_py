@@ -66,7 +66,15 @@ module pd_cf #(
     output wire [4:0]         ch_cnt,
     output wire [127:0]       ch_head,
     input  wire               ch_pop,
-    output wire               ch_err       // pl_chest's packet queue overflowed (sticky; cannot happen)
+    output wire               ch_err,      // pl_chest's packet queue overflowed (sticky; cannot happen)
+    // decoder-input records (step 12c): per code word {sig_b, sig_a, 22'b0 w, t_trig}
+    output wire [4:0]         lq_cnt,
+    output wire [127:0]       lq_head,
+    input  wire               lq_pop,
+    // transport blocks (step 12d): FIFO words of complete records (pl_dec)
+    output wire [11:0]        tb_cnt,
+    output wire [31:0]        tb_word,
+    input  wire               tb_pop
 );
     localparam integer DEPTH = 1 << DB;
     localparam [31:0]  LIM   = DEPTH - MARGIN;
@@ -162,6 +170,7 @@ module pd_cf #(
     wire signed [17:0] pg_re, pg_im;
     wire               pl_room, ch_room;
     wire               ch_busy, ch_wait;           // pl_chest (below)
+    wire               dm_busy, cb_busy, dc_busy;  // pl_demap, pl_comb, pl_dec (below)
     wire               jb_req, jb_gnt, jb_we, jb_start, jb_done;
     wire [9:0]         jb_idx, jb_oaddr;
     wire signed [17:0] jb_re, jb_im, jb_ore, jb_oim;
@@ -182,7 +191,7 @@ module pd_cf #(
     // busy: something to do that does not wait for new samples
     wire starving = active && rx_more && cf_ready && (ff_n == 3'd0) && (infl == 3'd0) && !avail;
     assign busy = (active && !starving) || (!active && q_n != 3'd0) || q_pop || cf_start ||
-                  (pl_en && ch_busy && !ch_wait);
+                  (pl_en && ((ch_busy && !ch_wait) || dm_busy || cb_busy || dc_busy));
 
     // ------------------------------------------------------------------ payload signatures
     // x = re0, im0, re1, im1, ... (18 bit unsigned each): A += x, B += A per value; two values
@@ -253,7 +262,10 @@ module pd_cf #(
     wire [31:0] pk_t, pk_a, pk_b, h_t;
     wire [6:0]  h_s;
     wire [9:0]  h_c;
-    wire signed [15:0] h_r, h_i;
+    wire signed [15:0] h_r, h_i, hy_r, hy_i;
+    wire        h_rf, h_tk;
+    wire [53:0] pk_m;
+    wire [47:0] pk_sn;
     wire        ch_out_room;
     pl_chest u_ch (.clk(clk), .rst_n(rst_n), .pg_valid(pg_valid), .pg_sym(pg_sym), .pg_col(pg_col),
                    .pg_re(pg_re), .pg_im(pg_im), .pl_dec(pl_dec && pl_en), .pl_ok(pl_ok), .pl_msg(cf_msg), .pl_t(j_t),
@@ -261,7 +273,8 @@ module pd_cf #(
                    .job_re(jb_re), .job_im(jb_im), .job_start(jb_start), .fft_done(jb_done),
                    .job_oaddr(jb_oaddr), .fft_ore(jb_ore), .fft_oim(jb_oim), .out_room(ch_out_room),
                    .pk_valid(pk_v), .pk_t(pk_t), .pk_a(pk_a), .pk_b(pk_b), .h_valid(h_v), .h_t(h_t),
-                   .h_sym(h_s), .h_col(h_c), .h_re(h_r), .h_im(h_i), .y_re(), .y_im(),
+                   .h_sym(h_s), .h_col(h_c), .h_re(h_r), .h_im(h_i), .y_re(hy_r), .y_im(hy_i),
+                   .h_ref(h_rf), .h_take(h_tk), .pk_msg(pk_m), .pk_sumn(pk_sn),
                    .busy(ch_busy), .waiting(ch_wait), .err(ch_err));
     // per-symbol signature of H (as the bins: x = re0, im0, ... 18 bit each)
     reg  [31:0] hs_a, hs_b;
@@ -301,6 +314,54 @@ module pd_cf #(
     assign ch_out_room = (ch_wr - ch_rd) < 5'd15;
     assign ch_cnt  = ch_wr - ch_rd;
     assign ch_head = ch_mem[ch_rd[3:0]];
+
+    // ------------------------------------------------------------------ demapper, combiner (12c)
+    wire        lf_v, lf_s, lf_p;
+    wire signed [11:0] lf_0, lf_1;
+    wire [1:0]  cg_nc, cg_rt;
+    wire [4:0]  cg_rep;
+    wire [9:0]  cg_ndb;
+    wire [7:0]  cg_ci;
+    wire [31:0] cg_t;
+    pl_demap u_dm (.clk(clk), .rst_n(rst_n), .pk_valid(pk_v), .pk_t(pk_t), .pk_msg(pk_m), .pk_n0(pk_a[25:16]),
+                   .pk_sumn(pk_sn), .h_valid(h_v), .h_sym(h_s), .h_col(h_c), .h_ref(h_rf), .h_re(h_r), .h_im(h_i),
+                   .y_re(hy_r), .y_im(hy_i), .h_take(h_tk), .lf_valid(lf_v), .lf_sop(lf_s), .lf_l0(lf_0), .lf_l1(lf_1),
+                   .lf_pop(lf_p), .cfg_ncode(cg_nc), .cfg_rate(cg_rt), .cfg_rep(cg_rep), .cfg_ndb(cg_ndb), .cfg_cinit(cg_ci),
+                   .cfg_t(cg_t), .busy(dm_busy));
+    wire        rc_v;
+    wire [31:0] rc_t, rc_a, rc_b;
+    wire [9:0]  rc_w;
+    wire        lq_room;
+    wire        dq_v, dq_f, dq_l, dq_rdy;
+    wire signed [6:0] dq_0, dq_1;
+    wire [3:0]  dq_code;
+    wire [9:0]  dq_w;
+    wire [31:0] dq_t;
+    pl_comb u_cb (.clk(clk), .rst_n(rst_n), .lf_valid(lf_v), .lf_sop(lf_s), .lf_l0(lf_0), .lf_l1(lf_1),
+                  .lf_pop(lf_p), .cfg_ncode(cg_nc), .cfg_rate(cg_rt), .cfg_rep(cg_rep), .cfg_ndb(cg_ndb), .cfg_cinit(cg_ci),
+                  .cfg_t(cg_t), .lq_ready(dq_rdy), .lq_valid(dq_v), .lq_first(dq_f), .lq_last(dq_l), .lq_v(), .lq_q0(dq_0),
+                  .lq_q1(dq_1), .lq_code(dq_code), .lq_w(dq_w), .lq_t(dq_t),
+                  .rc_room(lq_room), .rc_valid(rc_v), .rc_t(rc_t), .rc_w(rc_w), .rc_a(rc_a), .rc_b(rc_b),
+                  .busy(cb_busy));
+    // LDPC decoder, CRC, transport-block FIFO (12d)
+    pl_dec u_dc (.clk(clk), .rst_n(rst_n), .lq_valid(dq_v), .lq_first(dq_f), .lq_last(dq_l), .lq_q0(dq_0), .lq_q1(dq_1),
+                 .lq_code(dq_code), .lq_w(dq_w), .lq_t(dq_t), .lq_ready(dq_rdy), .tb_cnt(tb_cnt), .tb_word(tb_word),
+                 .tb_pop(tb_pop), .busy(dc_busy));
+    // decoder-input record FIFO
+    reg  [127:0] lq_mem [0:15];
+    reg  [4:0]   lq_wr, lq_rd;
+    always @(posedge clk) if (rc_v) lq_mem[lq_wr[3:0]] <= {rc_b, rc_a, 22'd0, rc_w, rc_t};
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            lq_wr <= 5'd0; lq_rd <= 5'd0;
+        end else begin
+            if (rc_v) lq_wr <= lq_wr + 5'd1;
+            if (lq_pop && lq_wr != lq_rd) lq_rd <= lq_rd + 5'd1;
+        end
+    end
+    assign lq_room = (lq_wr - lq_rd) < 5'd15;
+    assign lq_cnt  = lq_wr - lq_rd;
+    assign lq_head = lq_mem[lq_rd[3:0]];
 endmodule
 
 `default_nettype wire
