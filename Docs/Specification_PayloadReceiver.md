@@ -454,6 +454,89 @@ mode, n0 570, 73 H signatures each). `pd_board_regression`: 39 / 39 PASS; channe
 records exact in rep3 and defects (20 and 40 Msps), cfo_s1_rearm (148), cfmod (38) and the
 split RUNs (pieces). **Step 12b is done.**
 
+### Step 12c status (31 Oct 2026): done – decoder input bit-exact on the board
+
+**Built.**
+- `pl_demap.v`: z, e (6 DSP), the 8 parabola values D(m) per axis, thresholds A z < j e, N for
+  every bit of the RE in parallel, then two scaling lanes (N m: 2 × 2 DSP, shift by sh,
+  rounding, sat12). One RE per 1 (BPSK, QPSK), 2 (16QAM) or 3 (64QAM) clocks.
+- `pl_comb.v`: Gold code from a C_init-dependent start state (no 1600-step run-in), copy sums
+  in two banks (1024 × 32 each, 2 BRAM36), read-out through the inverse interleaver ROM
+  (4096 × 11, dual port), per code-word signature record.
+- `pl_chest` sends H with credits (16), so the demapper can be slower than one RE per clock:
+  per symbol HOUT then takes 841, 1682 or 2523 clocks.
+- `pd_cf`: LQ record FIFO; `pd_axi`: LQ_LEVEL 0x6C / LQ_DATA 0x70, ID 8.0; firmware build 15
+  (`BOARD_LQ`); PC tools compare the records (`pd_hw_test` "decoder", regression column "lq").
+- The decoder input stream (`lq_*`, two values per clock in code order) is ready for step 12d
+  (`lq_ready` tied to 1 for now).
+
+**Checked.**
+- `tb_pl_soft`: 12 packets, 160 code words, every Lq and every record exact; gaps 0, 1, 3;
+  also under Icarus (unwritten memory as X). `soft_mut.py`: 19 / 19 faults caught.
+- `tb_pd_detect`: rep3 (9 code-word records), cfmod (1), cfo (6), highsnr at 40 Msps (3),
+  slow reader, stress with and without re-arm: all exact. `run_chest.sh` still passes.
+- Firmware + RTL co-simulation: `pd_hw_test` rep3 PASS (build 15); regression rep3_s1,
+  cfo_s1_rearm, cfmod_s1, pieces_s1, pieces_s1_end PASS.
+
+**Synthesis** (`synth_detect.tcl`, 31 Oct 2026): **WNS +0.116 ns, timing met**. LUT 34 195
+(4014 as memory), FF 29 880, DSP 205, BRAM 93. Against step 12b: +5.1 k LUT, +12 DSP, +4 BRAM
+(more LUT than the 3–4 k estimate: the parallel parabola values and the two 61-bit shifters).
+Projected whole PL with the LDPC core: about 48 k of 53.2 k LUT, 205 of 220 DSP, about 122 of
+140 BRAM. Step 12d (CRC, transport-block FIFO, glue) fits, but with little margin; if the
+board build gets tight, the demapper can compute one axis per clock (about −1 k LUT).
+
+**Board** (bitstream 8.0, WNS +0.016 ns; firmware build 15): `pd_hw_test` rep3 and
+`pd_board_regression` PASS, every decoder-input record exact. The worst paths were the scale
+divider's variable shift; it now shifts by one per step (in the next build). **Step 12c is done.**
+
+### Step 12d status (31 Oct 2026): done – on the board
+
+**Built.**
+- `pl_dec.v`: the combiner's Lq (2 per clock, code order) gathered 27 per word into the step-12a
+  core (one code word at a time; the combiner's two banks are its input double buffer), CRC24 on
+  the first K bits (27 bits per clock), the transport block packed 32 bits per word into a
+  2048-word FIFO. A record = t_trig, header {crc_ok, iterations, w, nbits}, the bits; the
+  FIFO shows only complete records, and a code word starts only with room for its record, so
+  the decoder output never waits.
+- `pd_axi`: TB_LEVEL 0x74 / TB_DATA 0x78, ID 9.0; firmware build 16 (`BOARD_TB`) adds the
+  blocks to the RUN reply (variable length, `pd_protocol.TBRecord`); `pd_hw_test` "blocks",
+  regression column "blocks" (blocks / CRC ok).
+- Model: `pl_reference.tb_records` (the code words of `lq_records`, decoded).
+- System vectors with every modulation: `make_tb_vectors.mods_vector` replaces rep3's packets
+  (control field and payload) with `pl_check` packets: `mods` (QPSK 1296 2/3, 16QAM 648 3/4,
+  64QAM 1944 5/6), `mods2` (BPSK 4 copies R 1, 64QAM 648 1/2 at 10 dB with CRC failures,
+  16QAM 1296 5/6). Board regression cases `mods_s1`, `mods2_s1`, `mods_pieces_s1`.
+
+**Checked.**
+- `tb_pl_soft` (demapper + combiner + decoder): 16 packets, all 12 codes, 184 code words:
+  every Lq, record and transport block (bits, crc_ok, iterations) exact; gaps 0, 1, 3.
+  `soft_mut.py`: 25 / 25 faults caught (6 in `pl_dec`).
+- `tb_pd_detect`: rep3 (9 blocks), mods (192, all CRC ok), mods2 (255, 217 CRC ok), cfmod,
+  cfo, highsnr, slow reader: every block exact. In cfo and highsnr the decoded blocks fail
+  their CRC in the model too: those vectors' packets are cut short by the next packet, so the
+  later symbols hold another packet's samples.
+- Firmware + RTL co-simulation: `pd_hw_test` rep3 PASS (build 16); regression cfmod_s1,
+  mods_s1, mods2_s1, mods_pieces_s1, pieces_s1, pieces_s1_end PASS.
+
+**Synthesis** (`synth_detect.tcl`, 31 Oct 2026): first run WNS −0.49 ns (67 endpoints): the
+transport-block packer (take, mask, variable shift and merge in one clock) and two LDPC-core
+paths at −0.1 ns (congestion; the core alone had +0.34 ns). The packer now takes its mask one
+word ahead and packs in a second stage; implementation is timing-driven (ExtraTimingOpt
+placement, physical optimisation after placement and routing, in `synth_detect.tcl` and
+`build_hw.tcl`). Second run: **WNS +0.171 ns, timing met**. LUT 43 762 (4232 as memory),
+FF 37 852, DSP 205, BRAM 121.
+
+**Board** (31 Oct 2026). The first `build_hw.tcl` run failed in placement: the unplaced
+instances needed 7252 slices with 7091 free (13 300 in the device; 1154 control sets). The 2:1
+smartconnect between the DMA and DDR (about 2100 LUT) was replaced by two AXI4 → AXI3 protocol
+converters: DMA reads (MM2S) on HP0, writes (S2MM) on HP1, both 32 bit (400 MB/s each way; the
+samples need 80 MB/s). No RTL or firmware change. Second run: **WNS +0.100 ns**, LUT 47 290 of
+53 200 (89 %), BRAM 123.5 of 140, DSP 205 of 220. Firmware build 16: `pd_hw_test` rep3 and
+`pd_board_regression` (all cases, transport blocks included) PASS.
+
+The device is now nearly full (89 % LUT, 88 % BRAM, 93 % DSP); further PL work needs area
+savings first (candidates: axis-serial demapper about 1000 LUT, `pd_timing` lane count).
+
 ## 9. Open points
 
 1. Wiener time interpolation stays a later option (§6a / §6b). The row store and smoothing

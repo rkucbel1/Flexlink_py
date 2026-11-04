@@ -278,6 +278,36 @@ cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
 cd PC && python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 && python pd_board_regression.py
 ```
 
+Step 12c: **payload demapper and combiner** (`RTL/pl_demap.v`, `pl_comb.v`,
+`pl_soft_roms.v`, in `pd_cf.v`; `Specification_PayloadReceiver.md` step 12c, `BITTRUE.md`
+change 15). The LLRs of every Data RE, descrambled and summed over the copies, de-interleaved
+into the LDPC decoder's input; per code word the board reports a signature of that input, bit
+for bit against the model (`pd_hw_test` "decoder", regression column "lq"). pl_chest now sends
+H with credits (the demapper takes one RE per 1, 2 or 3 clocks). Bitstream ID 8.0 (LQ_LEVEL
+0x6C, LQ_DATA 0x70), firmware build 15 (`BOARD_LQ`).
+
+```bash
+cd SIM && ./run_soft.sh && ./run_chest.sh && ./run_sim.sh && ./run_sim.sh cfmod 1 && cd ..
+cd HW && vivado -mode batch -source synth_detect.tcl && vivado -mode batch -source build_hw.tcl && cd ..
+cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
+cd PC && python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 && python pd_board_regression.py
+```
+
+Step 12d: **LDPC decoder and transport blocks** (`RTL/pl_dec.v` with the step-12a core
+`pl_ldpc_core.v`, in `pd_cf.v`; `BITTRUE.md` change 16). The board now decodes the payload: per
+code word the transport block, its CRC result and the iteration count, bit for bit against the
+model (`pd_hw_test` "blocks", regression column "blocks" = blocks / CRC ok). New regression cases
+`mods_s1`, `mods2_s1`, `mods_pieces_s1`: rep3 with its packets replaced by QPSK, 16QAM, 64QAM and
+BPSK packets of several codes, copy counts and pilot patterns. Bitstream ID 9.0 (TB_LEVEL 0x74,
+TB_DATA 0x78), firmware build 16 (`BOARD_TB`).
+
+```bash
+cd SIM && ./run_soft.sh && ./run_sim.sh && ./run_sim.sh mods 1 && ./run_sim.sh mods2 1 && cd ..
+cd HW && vivado -mode batch -source synth_detect.tcl && vivado -mode batch -source build_hw.tcl && cd ..
+cd FW && vitis -s build_firmware.py && xsdb run_board.tcl && cd ..
+cd PC && python pd_hw_test.py ../TestVectors/rep3.json --input-stage 1 && python pd_board_regression.py
+```
+
 **Board regression** (`PC/pd_board_regression.py`): the RTL simulation's coverage on the board.
 Each case runs on the board and, with the same commands, through `pd_board_emulator`'s logic
 in-process; every RUN reply and every debug record must match. Cases: rep3 and the defects

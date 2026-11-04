@@ -474,15 +474,15 @@ def soft_bits(Yr, Yi, cfg: PLConfig, res: PLResult | None = None):
     return _satm(_rnd(N * m, sh), LF_BITS)
 
 
-def decode_soft(lf, cfg: PLConfig, res: PLResult):
-    """Steps 9-13 on the per-copy LLRs."""
-    nbits = lf.size
-    g = C.gold(cfg.c_init, nbits)
+def combine(lf, cfg: PLConfig, nbits: int | None = None):
+    """Steps 9-11: the decoder input (Lq per code word, code order) from the per-copy LLRs of the
+    sequence; nbits = how many of them exist (default all): whole code words only."""
+    nbits = lf.size if nbits is None else nbits
+    g = C.gold(cfg.c_init, lf.size)
     lf = np.where(g == 1, -lf, lf)
     N, cw = cfg.n, cfg.n * (cfg.rep + 1)
     nblk = min(cfg.ndb, nbits // cw)
     il = _T[f"il_{N}"]
-    code = code_of(cfg.code)
     llr = np.zeros((nblk, N), np.int64)
     amax = (1 << (ACC_BITS - 1)) - 1
     for w in range(nblk):
@@ -491,6 +491,15 @@ def decode_soft(lf, cfg: PLConfig, res: PLResult):
             acc = np.clip(acc + lf[w * cw + c * N: w * cw + (c + 1) * N], -amax, amax)
         q = _satm(_rnd(acc, F), LLR_BITS)
         llr[w, il] = q                                   # de-interleave: code[il[i]] = q[i]
+    return llr
+
+
+def decode_soft(lf, cfg: PLConfig, res: PLResult):
+    """Steps 9-13 on the per-copy LLRs."""
+    N = cfg.n
+    llr = combine(lf, cfg)
+    nblk = llr.shape[0]
+    code = code_of(cfg.code)
     res.debug["llr_q"] = llr
     if nblk:
         hard, used = decode_ldpc(code, llr)
@@ -601,4 +610,70 @@ def chest_records(y: np.ndarray, events, timing, control) -> list:
                 break
             a, b = C.grid_signature(Hr[s], Hi[s])
             out.append(PayloadRecord(c.t_trig, s, a, b))
+    return out
+
+
+# --------------------------------------------------------------------------------------------
+# Decoder-input records (step 12c): per accepted packet and code word w the signature
+# (cf_reference.grid_signature, x = code[0], code[1], ..., each mod 2^18) of the LDPC input Lq in
+# code order. A code word is reported once all its LLRs exist, i.e. the H of every symbol it
+# uses is out (chest_records); at most NDB_A of them. sym = w.
+
+def _packet_llrs(y: np.ndarray, events, timing, control):
+    """Per accepted packet: (control record, PLConfig, decoder inputs of its complete code words)."""
+    inc = {e.t_trig: e.cfo_inc for e in events}
+    for c in control:
+        if not (c.crc_ok and C.fields_valid(c.message)):
+            continue
+        cfg = PLConfig.from_message(c.message)
+        n0s = c.n_end + 1
+        m = min(y.shape[0], n0s + (C.CF_SYMS + cfg.plen) * C.CF_SYM) - n0s
+        xr, xi = R.derotate(y[n0s:n0s + m, 0], y[n0s:n0s + m, 1], inc[c.t_trig] & 0xFFFFFF, C.X_BITS_CF)
+        Yr = np.zeros((cfg.plen, 841), np.int64)
+        Yi = np.zeros((cfg.plen, 841), np.int64)
+        n_av = 0
+        for s in range(cfg.plen):
+            if (C.CF_SYMS + s) * C.CF_SYM + C.CF_CP + C.FFT_START + C.FFT_N > m:
+                break
+            Yr[s], Yi[s] = C.grid_symbol(xr, xi, C.CF_SYMS + s)
+            n_av = s + 1
+        if n_av <= cfg.ref_sym:
+            continue
+        res = PLResult(cfg)
+        lf = soft_bits(Yr, Yi, cfg, res)
+        n_h = 0                                          # symbols whose H is out
+        while n_h < cfg.plen and chest_needs_row(cfg, n_h, res.hi) * cfg.ref_sym < n_av:
+            n_h += 1
+        types = signal_types(cfg)
+        nbits = int((types[:n_h] == DATA).sum()) * BITS[cfg.mod]
+        yield c, cfg, combine(lf, cfg, nbits)
+
+
+def lq_records(y: np.ndarray, events, timing, control) -> list:
+    from pd_protocol import PayloadRecord
+    out = []
+    for c, cfg, llr in _packet_llrs(y, events, timing, control):
+        for w, q in enumerate(llr):
+            a, b = C.grid_signature(q[0::2], q[1::2])
+            out.append(PayloadRecord(c.t_trig, w, a, b))
+    return out
+
+
+# --------------------------------------------------------------------------------------------
+# Transport-block records (step 12d): per accepted packet and complete code word (as
+# lq_records) the decoded transport block (the first K - 24 bits), crc_ok and the iterations.
+
+def tb_records(y: np.ndarray, events, timing, control) -> list:
+    from pd_protocol import TBRecord
+    out = []
+    for c, cfg, llr in _packet_llrs(y, events, timing, control):
+        if llr.shape[0] == 0:
+            continue
+        code = code_of(cfg.code)
+        hard, used = decode_ldpc(code, llr)
+        K = code.K
+        for w in range(llr.shape[0]):
+            msg = hard[w, :K]
+            ok = crc24(msg[:K - 24]) == sum(int(b) << (23 - i) for i, b in enumerate(msg[K - 24:]))
+            out.append(TBRecord(c.t_trig, w, int(ok), int(used[w]), K - 24, tuple(int(b) for b in msg[:K - 24])))
     return out

@@ -46,6 +46,8 @@ class Board:
         self.cf_done = set()                            # t_trig of control records already reported
         self.pl_done = set()                            # (t_trig, sym) of payload records reported
         self.ch_done = set()                            # (t_trig, sym) of channel-estimate records reported
+        self.lq_done = set()                            # (t_trig, w) of decoder-input records reported
+        self.tb_done = set()                            # (t_trig, w) of transport blocks reported
         self.debug = None                               # DEBUG_DTYPE records of the last RUN
 
     # ---- commands -------------------------------------------------------- #
@@ -105,6 +107,10 @@ class Board:
         self.pl_done.update((r.t_trig, r.sym) for r in pl)
         ch = [r for r in res.chest if (r.t_trig, r.sym) not in self.ch_done]
         self.ch_done.update((r.t_trig, r.sym) for r in ch)
+        lq = [r for r in res.lq if (r.t_trig, r.sym) not in self.lq_done]
+        self.lq_done.update((r.t_trig, r.sym) for r in lq)
+        tb = [r for r in res.tb if (r.t_trig, r.w) not in self.tb_done]
+        self.tb_done.update((r.t_trig, r.w) for r in tb)
         self.debug = None
         if want_dbg:
             self.debug = np.empty(count // div, pr.DEBUG_DTYPE)
@@ -113,7 +119,9 @@ class Board:
                 + struct.pack("<I", len(tm)) + b"".join(r.pack() for r in tm)
                 + struct.pack("<I", len(cf)) + b"".join(r.pack() for r in cf)
                 + struct.pack("<I", len(pl)) + b"".join(r.pack() for r in pl)
-                + struct.pack("<I", len(ch)) + b"".join(r.pack() for r in ch))
+                + struct.pack("<I", len(ch)) + b"".join(r.pack() for r in ch)
+                + struct.pack("<I", len(lq)) + b"".join(r.pack() for r in lq)
+                + struct.pack("<I", len(tb)) + b"".join(r.pack() for r in tb))
 
     def get_debug(self, payload: bytes) -> bytes:
         offset, count = struct.unpack_from("<II", payload)
@@ -125,7 +133,7 @@ class Board:
 
     def handle(self, cmd: int, payload: bytes) -> bytes:
         if cmd == pr.PING:
-            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR | pr.BOARD_TIMING | pr.BOARD_CF | pr.BOARD_REARM | pr.BOARD_PAYLOAD | pr.BOARD_CHEST).pack()
+            return pr.BoardInfo(pr.PROTOCOL_VERSION, 0, self.max_samples, pr.BOARD_EMULATOR | pr.BOARD_TIMING | pr.BOARD_CF | pr.BOARD_REARM | pr.BOARD_PAYLOAD | pr.BOARD_CHEST | pr.BOARD_LQ | pr.BOARD_TB).pack()
         if cmd == pr.RESET:
             self.reset()
             return b""

@@ -4,6 +4,7 @@ Reads and writes the project's JSON parameter files (located via flexlink_paths)
     Flexlink_BasicModules/Channel_Defects/Channel_Defects.json   -> "Set Defects" tab
     Tx/Parameters_Tx_payload.json                                 -> "Set Tx" tab
     Rx/Parameters_Rx_payload.json                                 -> "Set Rx" tab
+    App/Parameters_HIL.json                                       -> "Set Rx" tab, Receiver frame
 
 Only the keys shown in the GUI are changed on Save; every other key and all the
 *_comment entries are kept as they are.
@@ -14,6 +15,10 @@ and shows the Get_Decoded_Bitstream.py output in "Payload Field Results", and th
 field construction (Tx/ControlSignals/Build_Control_Field.log, written by Initialize_Tx.py)
 and its decoding in the Rx chain in "Control Field Results". Each chain's full output is
 kept in Tx/Run_Tx_Chain.log and Rx/Run_Rx_Chain.log.
+
+With "Hardware in the loop" saved on the Set Rx tab, Run replaces the Rx steps by App/Run_HIL.py:
+the waveform goes through the Zedboard FPGA receiver, and the decoded transport blocks are
+checked against the ones the Tx sent (App/HIL/HIL_result.json, App/HIL/HIL_results.csv).
 
 Requires: pip install FreeSimpleGUI
 Run with: python App/Flexlinksimulation.py
@@ -31,10 +36,10 @@ from pathlib import Path
 import FreeSimpleGUI as sg
 
 try:
-    from flexlink_paths import CHANNEL_DEFECTS, ROOT, RX, TX
+    from flexlink_paths import APP, CHANNEL_DEFECTS, ROOT, RX, TX
 except ImportError:  # not installed in the venv: fall back to the project root
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from flexlink_paths import CHANNEL_DEFECTS, ROOT, RX, TX
+    from flexlink_paths import APP, CHANNEL_DEFECTS, ROOT, RX, TX
 
 sg.theme("SystemDefault")
 
@@ -269,10 +274,39 @@ def rx_combo(label, key, options, default):
                      background_color="white", text_color="black")]
 
 
+# Receiver path: the Python Rx chain or hardware in the loop (App/Run_HIL.py, Zedboard FPGA).
+# Radio key -> HIL/RxPath in App/Parameters_HIL.json.
+RX_PATHS = {
+    "-RX_PATH_SIM-": "Simulation",
+    "-RX_PATH_HIL-": "HIL",
+}
+HIL_RATES = [20, 40]
+HIL_DEFAULTS = {"RxPath": "Simulation", "BoardHost": "192.168.50.10", "BoardPort": 5001, "InputRate": 20}
+# Rx settings the FPGA does not use (its algorithms are fixed): greyed out with HIL. The detector
+# thresholds, DC blocker, tone check and timing peak stay: the FPGA takes those.
+RX_SIM_ONLY = ["-RX_NUM_ANT-", "-RX_FFT_START-", "-RX_DET_NORM-", "-RX_CFO-", "-RX_TIMING-",
+               "-RX_EQ_MODE-", "-RX_EQ_DOPPLER-", "-RX_DEMAP-"]
+HIL_ONLY = ["-HIL_HOST-", "-HIL_RATE-"]
+
+rx_path_frame = sg.Frame("Receiver", [
+    [sg.Radio("Simulation: Python Rx chain", "RXPATH", key="-RX_PATH_SIM-", default=True,
+              enable_events=True)],
+    [sg.Radio("Hardware in the loop: Zedboard FPGA", "RXPATH", key="-RX_PATH_HIL-",
+              enable_events=True)],
+    [sg.Text("Board Address", size=(RX_LABEL_W, 1), justification="right"),
+     sg.Input(HIL_DEFAULTS["BoardHost"], key="-HIL_HOST-", size=21)],
+    rx_combo("FPGA Input Rate (Msps)", "-HIL_RATE-", HIL_RATES, 20),
+    [sg.Text("HIL takes one waveform (Number of Rays 1) and checks the decoded transport\n"
+             "blocks against the Tx. Greyed settings are fixed in the FPGA. 20 Msps: the PC\n"
+             "decimates; 40 Msps: the FPGA's half-band does.", font=("Helvetica", 9, "italic"))],
+], font=H2)
+
 rx_tab = [
     [sg.Text("Flexlink - Set Receiver Parameters", font=H1,
              justification="center", expand_x=True, pad=(0, 15))],
     [sg.Push(), sg.Column([
+        [rx_path_frame],
+        [sg.Text("")],
         rx_combo("Number of Rx Antennas", "-RX_NUM_ANT-", [1, 2, 3, 4], 1),
         [sg.Text("FFT Start Time", size=(RX_LABEL_W, 1), justification="right"),
          sg.Input("-12", key="-RX_FFT_START-", size=10, justification="right"),
@@ -357,7 +391,7 @@ sweep_frame = sg.Frame("SNR Sweep", [
     sweep_row("Target block errors", "-SW_TARGET-", "100"),
     [sg.Button("Run Sweep", key="-SW_RUN-", size=10),
      sg.Button("Stop Sweep", key="-SW_STOP_BTN-", size=10, disabled=True)],
-    [sg.Text("Uses the saved Tx/Rx/Defect settings;\nSNR applied to all rays",
+    [sg.Text("Uses the saved Tx/Rx/Defect settings;\nSNR applied to all rays;\nalways the simulated Rx chain",
              font=("Helvetica", 9, "italic"))],
 ], font=H2, vertical_alignment="top", expand_x=True)
 
@@ -414,6 +448,41 @@ RUN_STEPS = [
 RX_STATUS = {0: "every CRC passed", 1: "a block failed", 2: "no packet detected or packet aborted",
              4: "bad packet, control field CRC failed"}
 
+# Hardware in the loop: the Tx steps, then Run_HIL instead of the Rx chain.
+# Run_HIL: 0 every transport block equal to the Tx, 1 a block missing / failed / different,
+# 2 no packet, 4 control field CRC failed -> results shown; 5 board, 6 setup -> run failed.
+HIL_DIR = APP / "HIL"
+HIL_LOG = HIL_DIR / "Run_HIL.log"
+HIL_RESULT = HIL_DIR / "HIL_result.json"
+RUN_STEPS_HIL = RUN_STEPS[:2] + [
+    ("Run_HIL", [APP / "Run_HIL.py", "--log", HIL_LOG], {0, 1, 2, 4}),
+]
+HIL_STATUS = {0: "every transport block received and equal to the Tx",
+              1: "a transport block missing, failed or different from the Tx",
+              2: "no packet detected or packet aborted", 4: "bad packet, control field CRC failed"}
+
+
+def hil_mode():
+    """True when the saved Rx path (App/Parameters_HIL.json) is hardware in the loop."""
+    try:
+        return str(load_json("hil").get("HIL", {}).get("RxPath", "")).upper() == "HIL"
+    except (OSError, ValueError):
+        return False
+
+
+def hil_problems():
+    """Saved settings a HIL run cannot take (the FPGA has one receive path)."""
+    problems = []
+    try:
+        defects = load_json("defects")
+    except (OSError, ValueError) as e:
+        return [str(e)]
+    rays = defects.get("Settings", {}).get("NumberOfRays", 1)
+    if any(int(v) for v in defects.get("Mode", {}).values()) and isinstance(rays, int) and rays > 1:
+        problems.append(f"Number of Rays is {rays}: hardware in the loop takes one waveform. "
+                        "Set Number of Rays to 1 on Set Defects (and Save).")
+    return problems
+
 
 def decode_output(log_text):
     """Output of the last Get_Decoded_Bitstream.py run in a Run_Rx_Chain log."""
@@ -430,8 +499,9 @@ _TX_CONTROL_KEEP = re.compile(r"^(ControlMessage|  \w+ +\d+ bits|CRC Gen|BCC |In
                               r"len\(Sequence\)|Scrambled |BPSK:|Control field:|Error|Bad|.*ERROR)")
 
 
-def control_output(log_text):
-    """Control field construction (Build_Control_Field.log) and its decoding (Rx chain log)."""
+def control_output(log_text, hil_lines=None):
+    """Control field construction (Build_Control_Field.log) and its decoding (Rx chain log,
+    or hil_lines from Run_HIL)."""
     lines = ["Construction (Tx, Initialize_Tx.py):"]
     try:
         tx = CONTROL_LOG.read_text()
@@ -449,9 +519,13 @@ def control_output(log_text):
                 lines.append("  " + ln)
         if failed:
             lines.append(f"  stopped at {failed.group(1)}")
+    lines.append("")
+    if hil_lines is not None:
+        lines.append("Reception (hardware in the loop, Run_HIL.py):")
+        lines += ["  " + ln for ln in hil_lines] or ["  no result"]
+        return "\n".join(lines)
     sections = [sec for sec in re.split(r"^===== ", log_text or "", flags=re.M)
                 if sec.startswith("Control field")]
-    lines.append("")
     lines.append("Reception (Rx, Process_Control_Field_Rx.py):")
     if not sections:
         lines.append("  not run (no packet detected, or Use_ControlField is 0)")
@@ -462,11 +536,22 @@ def control_output(log_text):
     return "\n".join(lines)
 
 
-def run_simulation(window):
-    """Worker thread: run RUN_STEPS in order and post the result as a -RUN_DONE- event."""
-    result = {"ok": False, "steps": [], "payload": ""}
-    for i, (label, cmd, ok_codes) in enumerate(RUN_STEPS, start=1):
-        window.write_event_value("-RUN_PROGRESS-", f"Running {label} ({i}/{len(RUN_STEPS)}) ...")
+def hil_result(since):
+    """This run's App/HIL/HIL_result.json, or None."""
+    try:
+        if HIL_RESULT.stat().st_mtime < since:
+            return None
+        return json.loads(HIL_RESULT.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def run_simulation(window, steps=RUN_STEPS, hil=False):
+    """Worker thread: run the steps in order and post the result as a -RUN_DONE- event."""
+    result = {"ok": False, "steps": [], "payload": "", "hil": hil}
+    start = time.time()
+    for i, (label, cmd, ok_codes) in enumerate(steps, start=1):
+        window.write_event_value("-RUN_PROGRESS-", f"Running {label} ({i}/{len(steps)}) ...")
         try:
             p = subprocess.run([sys.executable, *map(str, cmd)], capture_output=True,
                                text=True, cwd=ROOT)
@@ -481,6 +566,12 @@ def run_simulation(window):
         result["ok"] = True
         rx_rc, rx_out = result["steps"][-1][1], result["steps"][-1][2]
         result["rx_status"] = rx_rc
+        if hil:
+            res = hil_result(start) or {}
+            result["payload"] = "\n".join(res.get("payload_lines", [])) or rx_out.rstrip()
+            result["control"] = control_output(None, res.get("control_lines", []))
+            window.write_event_value("-RUN_DONE-", result)
+            return
         try:
             rx_log = RX_LOG.read_text()
         except OSError:
@@ -582,6 +673,11 @@ def show_run_result(window, result):
     if result["ok"]:
         window["-RES_PAYLOAD-"].update(result["payload"])
         rc = result["rx_status"]
+        if result.get("hil"):
+            window["-STATUS-"].update(f"HIL run finished: {HIL_STATUS.get(rc, f'exit {rc}')}. "
+                                      f"Full output in {TX_LOG.name} and {HIL_LOG.name}; "
+                                      f"every run is listed in HIL/HIL_results.csv.")
+            return
         window["-STATUS-"].update(f"Run finished: {RX_STATUS.get(rc, f'exit {rc}')}. "
                                   f"Full output in {TX_LOG.name} and {RX_LOG.name}.")
         return
@@ -589,7 +685,8 @@ def show_run_result(window, result):
     window["-RES_PAYLOAD-"].update("")
     window["-STATUS-"].update(f"Run stopped: {label} failed (exit {rc}).")
     tail = "\n".join(out.rstrip().splitlines()[-25:])
-    log = {"Run_Tx_Chain": f"\n\nFull output: {TX_LOG}", "Run_Rx_Chain": f"\n\nFull output: {RX_LOG}"}
+    log = {"Run_Tx_Chain": f"\n\nFull output: {TX_LOG}", "Run_Rx_Chain": f"\n\nFull output: {RX_LOG}",
+           "Run_HIL": f"\n\nFull output: {HIL_LOG}"}
     sg.popup_scrolled(f"{label} stopped with exit code {rc}:\n\n{tail}{log.get(label, '')}",
                       title="Run failed", size=(110, 25), font=RESULTS_FONT)
 
@@ -598,6 +695,7 @@ FILES = {
     "defects": CHANNEL_DEFECTS / "Channel_Defects.json",
     "tx": TX / "Parameters_Tx_payload.json",
     "rx": RX / "Parameters_Rx_payload.json",
+    "hil": APP / "Parameters_HIL.json",
 }
 
 # file -> [(gui_key, (section, json_key), kind), ...]
@@ -659,6 +757,11 @@ LINKS = {
         ("-RX_EQ_DOPPLER-", ("Defined_Rx", "EqualizerMaxDoppler"), "number"),
         ("-RX_DEMAP-", ("Defined_Rx", "Demapping"), "text"),
     ],
+    "hil": [
+        (list(RX_PATHS), ("HIL", "RxPath"), "radio"),
+        ("-HIL_HOST-", ("HIL", "BoardHost"), "text"),
+        ("-HIL_RATE-", ("HIL", "InputRate"), "int"),
+    ],
 }
 
 # Tx settings the receiver must match. Saving the Tx tab copies these from
@@ -671,7 +774,7 @@ TX_RX_SHARED = ["EncoderCodeRate", "EncoderBlockSize", "Repetition", "CRC", "Mod
 TAB_FILES = {
     "-TAB_DEFECTS-": ["defects"],
     "-TAB_TX-": ["tx"],  # also writes TX_RX_SHARED into the Rx file
-    "-TAB_RX-": ["rx"],
+    "-TAB_RX-": ["rx", "hil"],
 }
 
 GUI_LABELS = {key: name for name, key in defect_names}
@@ -683,11 +786,19 @@ GUI_LABELS.update({
     "-RX_FFT_START-": "FFT Start Time", "-RX_EQ_DOPPLER-": "Max Doppler",
     "-RX_DET_LO-": "Packet Det. Thresh Lo", "-RX_DET_HI-": "Packet Det. Thresh Hi",
     "-RX_TIMING_PK-": "Timing Peak/Mean Min", "-RX_TONE_CHK-": "Tone Check (dB)",
+    "-HIL_HOST-": "Board Address", "-HIL_RATE-": "FPGA Input Rate",
 })
+
+
+def radio_map(keys):
+    """The {radio key: JSON value} table of a radio group."""
+    return RX_PATHS if keys[0] in RX_PATHS else MP_MODELS
 
 
 def load_json(name):
     path = FILES[name]
+    if name == "hil" and not path.is_file():  # first use: the defaults (written on Save)
+        return {"HIL": dict(HIL_DEFAULTS)}
     try:
         with path.open(encoding="utf-8") as fh:
             data = json.load(fh)
@@ -730,7 +841,7 @@ def save_json(name, data):
 def from_gui(values, gui_key, kind):
     """GUI value -> value to store in the JSON."""
     if kind == "radio":
-        return MP_MODELS[next(k for k in gui_key if values[k])]
+        return radio_map(gui_key)[next(k for k in gui_key if values[k])]
     v = values[gui_key]
     if kind == "bool":
         return int(bool(v))
@@ -747,9 +858,10 @@ def from_gui(values, gui_key, kind):
 def set_gui(window, gui_key, kind, v):
     """JSON value -> GUI element."""
     if kind == "radio":
-        key = next((k for k, m in MP_MODELS.items() if m == str(v).upper()), None)
+        table = radio_map(gui_key)
+        key = next((k for k, m in table.items() if m.upper() == str(v).upper()), None)
         if key is None:
-            raise ValueError(f"MultipathModel {v!r} is not one of {', '.join(MP_MODELS.values())}")
+            raise ValueError(f"{v!r} is not one of {', '.join(table.values())}")
         window[key].update(True)
     elif kind == "bool":
         window[gui_key].update(bool(v))
@@ -779,6 +891,7 @@ def load_into_window(window, names):
                 continue
             set_gui(window, gui_key, kind, v)
     update_snr_enabled(window, window["-NUM_RAYS-"].get())
+    update_rx_path_enabled(window, window["-RX_PATH_HIL-"].get())
     return warnings
 
 
@@ -820,6 +933,13 @@ def save_from_window(values, names):
         if isinstance(pk, (int, float)) and pk < 0:
             errors.append(f"Timing Peak/Mean Min: must be 0 (off) or positive (got {pk:g})")
 
+    if "hil" in pending:
+        hil = pending["hil"].setdefault("HIL", {})
+        hil["BoardHost"] = str(hil.get("BoardHost", "")).strip()
+        if not hil["BoardHost"]:
+            errors.append("Board Address: enter the board's IP address (192.168.50.10)")
+        hil.setdefault("BoardPort", HIL_DEFAULTS["BoardPort"])
+
     if errors:
         raise ValueError("\n".join(errors))
     for name, data in pending.items():
@@ -839,6 +959,14 @@ def consistency_warnings():
     if any_defect and isinstance(rays, int) and isinstance(ants, int) and ants > rays:
         warnings.append(f"Rx uses {ants} antennas but Channel_Defects models only {rays} ray(s).")
     return warnings
+
+
+def update_rx_path_enabled(window, hil):
+    """HIL: grey out the Rx-chain settings the FPGA does not use; the board settings only with HIL."""
+    for key in RX_SIM_ONLY:
+        window[key].update(disabled=bool(hil))
+    for key in HIL_ONLY:
+        window[key].update(disabled=not hil)
 
 
 def update_snr_enabled(window, n_rays):
@@ -868,6 +996,7 @@ def main():
     window = sg.Window("Flexlink", layout, finalize=True, resizable=True)
     window.metadata = False  # True while a Run or a sweep is in progress
     window.sweep_dir = None  # sweep folder while a sweep runs (its STOP file stops it)
+    window.hil_run = False   # the current / last Run went through the FPGA
     sweep_rows = []          # finished sweep points, for the live plot
     run_start = 0.0  # start time of the current Run (plots skip files older than this)
 
@@ -899,11 +1028,19 @@ def main():
             except (ValueError, OSError) as e:
                 sg.popup_error(str(e), title="Invalid plot settings")
                 continue
+            hil = hil_mode()
+            if hil:
+                problems = hil_problems()
+                if problems:
+                    sg.popup_error("\n".join(problems), title="Hardware in the loop")
+                    continue
+            window.hil_run = hil
             set_running(window, True, active_tab)
             run_start = time.time()
             for key in ("-RES_CNTL-", "-RES_PAYLOAD-"):
                 window[key].update("")
-            window.start_thread(lambda: run_simulation(window), "-RUN_THREAD_END-")
+            steps = RUN_STEPS_HIL if hil else RUN_STEPS
+            window.start_thread(lambda: run_simulation(window, steps, hil), "-RUN_THREAD_END-")
             continue
         if event == "-RUN_PROGRESS-":
             window["-STATUS-"].update(values[event])
@@ -915,8 +1052,9 @@ def main():
             if result["ok"]:  # overall EVM and data rate under the decoder output
                 try:
                     import Flexlink_Plots
-                    extra = [Flexlink_Plots.evm_summary(FILES["rx"], run_start),
-                             Flexlink_Plots.data_rate_summary(run_start)]
+                    extra = ([Flexlink_Plots.data_rate_summary(run_start)] if result.get("hil") else
+                             [Flexlink_Plots.evm_summary(FILES["rx"], run_start),
+                              Flexlink_Plots.data_rate_summary(run_start)])
                 except Exception as e:
                     extra = [f"EVM / data rate not available: {e}"]
                 window["-RES_PAYLOAD-"].update(window["-RES_PAYLOAD-"].get().rstrip()
@@ -927,14 +1065,20 @@ def main():
                 msgs = []
             except (ValueError, OSError) as e:
                 selected, msgs = {}, [str(e)]
+            if result.get("hil"):  # no equalized grid from the FPGA: packet plots only
+                rx_only = [k for k in ("before", "after", "evm_sc", "evm_sym") if selected.get(k)]
+                for k in rx_only:
+                    selected[k] = False
+                if rx_only:
+                    msgs.append("constellation and EVM plots need the simulated Rx chain")
             if result["ok"] and any(selected.values()):
                 try:
                     import Flexlink_Plots
-                    msgs = Flexlink_Plots.make_plots(selected, n_symbols, FILES["rx"], run_start)
+                    msgs += Flexlink_Plots.make_plots(selected, n_symbols, FILES["rx"], run_start)
                 except Exception as e:  # e.g. matplotlib missing
-                    msgs = [f"Plots failed: {e}"]
-                if msgs:
-                    window["-STATUS-"].update(window["-STATUS-"].get() + "  Plots: " + "; ".join(msgs))
+                    msgs.append(f"Plots failed: {e}")
+            if msgs:
+                window["-STATUS-"].update(window["-STATUS-"].get() + "  Plots: " + "; ".join(msgs))
             continue
         if event in ("-RUN_THREAD_END-", "-SWEEP_THREAD_END-"):
             continue
@@ -984,6 +1128,9 @@ def main():
             continue
         if event == "-NUM_RAYS-":
             update_snr_enabled(window, values["-NUM_RAYS-"])
+            continue
+        if event in RX_PATHS:
+            update_rx_path_enabled(window, values["-RX_PATH_HIL-"])
             continue
         if event == "-SAVE-":
             limits = {"-TAB_DEFECTS-": INT_LIMITS, "-TAB_TX-": TX_INT_LIMITS}.get(active_tab)

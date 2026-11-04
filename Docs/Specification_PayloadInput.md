@@ -1,8 +1,8 @@
 # Flexlink Rx – Payload Input Buffer and Packet Descriptor (draft)
 
-Status: proposal, October 2026; the re-arm state machine (section 4) is built (bitstream 5.0,
-firmware build 12). Follows `Specification_ControlField.md`; nothing here is built
-yet. It fixes how the payload receiver finds its first sample and its settings, what happens
+Status: proposal, October 2026. Built: the re-arm state machine (section 4; bitstream 5.0,
+firmware build 12) and the shared fast FFT with the speculative payload FFT (section 5;
+bitstream 6.0, firmware build 13; on the board: regression 39/39, every payload signature exact). Follows `Specification_ControlField.md`. It fixes how the payload receiver finds its first sample and its settings, what happens
 when a packet is rejected on the way, and how the payload chain catches up with the input.
 
 ## 1. Idea
@@ -119,6 +119,40 @@ option B's faster FFT as the shared engine, so the payload result comes a few sy
 packet ends. With PacketLength ≤ 73 option A would need about 12 000 samples; it remains the
 fallback if the FFT has to be shared with the control field.
 
+### Built: shared fast FFT, speculative payload FFT (bitstream 6.0, firmware build 13)
+
+One FFT for the control field and the payload, inside the control-field receiver
+(`RTL/pd_fft2.v`, `cf_rx.v`, `pd_cf.v`; model `cf_reference.payload_records`):
+
+- **Faster FFT.** Two butterflies per clock (each bank split into two 512-word dual-port RAMs
+  by address bit 9, so a clock's 4 reads and 4 writes use the 4 ports), 2640 clocks per symbol
+  instead of 5200, results identical to `fft_fixed`. +4 DSP, the banks need 8 instead of 2
+  BRAM36.
+- **No second FFT, no arbiter.** The control field and the payload are consecutive symbols of
+  one stream from the same sample buffer (`pd_cf`'s 8192 samples), so the receiver simply goes
+  on: payload symbol s is stream symbol 4 + s, window `1140 (4 + s) + 104 … + 1127` after `n_end`,
+  the de-rotator's phase ramp continued. The receiver is split into a front end (de-rotator,
+  FFT, unload) and a back end (channel estimate, Viterbi, CRC) that run at the same time.
+- **Speculation.** While the back end decodes the control field the front end starts at most 8
+  payload symbols. The decision (CRC ok and every field code valid, as the re-arm) then keeps the
+  first PacketLength of them or drops them, and the front end stops at PacketLength (or at once).
+  Only with `rearm` 1, where packets cannot overlap.
+- **Speed.** Per symbol 1140 samples in, then 2640 FFT + ~850 unload clocks with the input held:
+  about 4630 clocks against 5700 at 20 Msps, so the FFT keeps up (0 stalls in the RTL simulation
+  at exactly 5 clocks per sample) and lags at most about one symbol.
+- **Check without the rest of the chain.** Each payload symbol's 841 bins give a 64-bit signature
+  (Fletcher-style, `cf_reference.grid_signature`) that goes into a 16-record FIFO (PL_LEVEL 0x5C,
+  PL_DATA 0x60) and the RUN reply (`PayloadRecord`), so the board regression checks the payload
+  FFT bit for bit. A full FIFO holds the FFT, never loses a record. When the grid buffer and the
+  payload chain are built, the bins go there instead (`pg_*` of `cf_rx`) and the signature stays
+  as a check.
+
+Measured at 20 Msps (rep3, `FIXGAP=1 GAP=4`): the control record now comes 3770 samples after
+the payload start (it was 5400), with 2 payload symbols already done; every payload symbol's
+FFT is done about 700 samples after its window, the last one about 690 samples (35 µs) after the
+packet ends. So with the grid buffer the grids wait at most ~4 symbols for the control record
+(the worst-case trigger position adds ~2700 samples: ~6 symbols), not 7.
+
 ## 5a. LDPC decoder sizing
 
 Decided (Oct 2026): size the LDPC decoder first; the payload supports every modulation and
@@ -211,8 +245,8 @@ Findings:
 
 **Frozen for RTL:** layered normalised min-sum, α = 0.75 (m − m>>2), max 10 iterations, early
 stop on zero syndrome, LLRs of the copies summed before the decoder (saturating at 7 bit),
-LLR 7 / APP 10 / message 7 bit, LLR step 1/4 (64QAM rate 1/2: 1), σ² from the payload channel
-estimate. Bit-true model: `decode_layered_fixed(code, quantise(llr_sum, 1/step, 7), 10, 10, 7)`.
+LLR 7 / APP 10 / message 7 bit, LLR step 1/4 (64QAM rate 1/2: 1 — superseded by §6b: 1/4
+in every mode), σ² from the payload channel estimate. Bit-true model: `decode_layered_fixed(code, quantise(llr_sum, 1/step, 7), 10, 10, 7)`.
 
 **Effect on the sizing above:** 10 iterations instead of 15 raise the P = 54 throughput to
 80–120 Mbit/s (need 43), so the decoder idles about half the time and a packet's last code
@@ -224,9 +258,230 @@ to the decoder: **~13 k LUT**, BRAM unchanged (~7).
 The payload channel estimate interpolates between reference symbols (every RefSymbolSpacing =
 1, 3, 6 or 12 symbols). Data symbols between two reference symbols need both, so up to
 RefSymbolSpacing + 1 grids (13 at spacing 12) are held at once: about 13 BRAM36 at 841 × 36 bit.
-The control field's estimator (8-tap FIR, drift-corrected linear in time) carries over for the
-payload's spacing 3; for 6, 12 and the other pilot spacings the weights and their window are a
-study of their own (payload spec).
+The control field's fixed 8-tap FIR is not enough for the payload (long delay spread at
+high rates); the payload uses window-select FIR8 plus smoothing across reference rows, §6a.
+
+## 6a. Payload channel-estimate study (float, done Oct 2026)
+
+Float Monte Carlo through the simulator's time-domain channel (`Delay_Doppler_Channel`, 20 Msps,
+EPA-5 / EVA-70 / ETU-300 Hz and AWGN), 80 packets per point, the frozen decoder of §5b, σ² from
+`estimate_noise_var`, SNR at 10 % code-word error. Results are within about ±0.2 dB
+(Monte-Carlo noise). Raw data: `pl_sweep.jsonl` (64 configurations: all 16 pilot patterns,
+QPSK 648_12, plus 16 / 64QAM and code 1944 at pattern 3/3) and `pl_sweep2.jsonl` (time
+smoothing).
+
+**Frequency.**
+- The control field's fixed FIR8 (delay window −20 … 12 samples) is not enough for the payload.
+  ETU spreads about 100 samples. At 3/3 the FIR8 loss against linear time interpolation is:
+  - QPSK 648_12, ETU: 1.3 dB.
+  - 16QAM ETU: 5.5 dB.
+  - QPSK 1944_56 ETU: 6.9 dB.
+  - 64QAM 648_12 EVA: 2.2 dB.
+- **Window-select FIR8** fixes it. It keeps 4 fixed weight sets (delay windows ending at 12 /
+  28 / 52 / 100, one ROM each), chosen per packet from the measured delay profile of the first
+  reference row (as the adaptive LMMSE does).
+  - It stays within 0.1–0.2 dB of linear time interpolation everywhere: 16QAM ETU 8.0 vs 7.9,
+    QPSK 1944 ETU 8.1 vs 8.1, 64QAM EVA 12.7 vs 12.5.
+  - In AWGN / EPA it picks the short window, so it equals FIR8 there.
+  - 16 taps are no better than 8.
+- Pilot spacing 12 and 24 cannot carry ETU-class delay spread: the alias-free window is
+  1024 / spacing ≈ 85 / 43 samples. Those curves don't reach 10 % within the sweep, with any
+  estimator.
+
+**Time.**
+- Linear interpolation loses to Wiener only when reference symbols are dense, because Wiener
+  also averages noise across reference rows:
+  - RefSymbolSpacing 1: 0.3–1.7 dB.
+  - RefSymbolSpacing 3: 0.1–0.7 dB.
+  - RefSymbolSpacing 6 and 12: about 0.
+- A fixed smoothing across reference rows recovers it. After the frequency FIR, each reference
+  row is replaced by a boxcar of its neighbours, phase-aligned with the common drift that the
+  linear interpolator already measures, with the weights renormalised at the packet edges.
+
+QPSK 648_12, pilot spacing 3, window-select FIR8, SNR at 10 % (dB):
+
+| Channel, RefSymbolSpacing | Wiener LMMSE | linear LMMSE | none | 3 taps | 5 taps | 9 taps |
+| --- | --- | --- | --- | --- | --- | --- |
+| AWGN, 1 | −1.17 | −0.89 | −0.38 | −0.85 | −0.97 | **−1.05** |
+| AWGN, 3 | −1.10 | −1.01 | −0.66 | −0.93 | **−1.02** | −1.09 |
+| AWGN, 6 | −1.04 | −1.03 | −0.61 | **−0.94** | −1.02 | −1.10 |
+| EPA-5, 1 | 3.34 | 3.50 | 3.89 | 3.54 | 3.42 | **3.36** |
+| EPA-5, 3 | 3.62 | 3.75 | 4.11 | 3.85 | **3.77** | 3.61 |
+| EPA-5, 6 | 5.32 | 5.32 | 5.50 | **5.39** | 5.31 | 5.26 |
+| EVA-70, 1 | 2.06 | 3.20 | 3.59 | 2.70 | 2.36 | **2.12** |
+| EVA-70, 3 | 2.77 | 2.96 | 3.17 | 2.89 | **2.80** | 2.70 |
+| EVA-70, 6 | 3.27 | 3.30 | 3.49 | **3.22** | 3.10 | 3.14 |
+| ETU-300, 1 | 1.89 | 3.45 | 3.53 | 2.47 | 2.24 | **1.99** |
+| ETU-300, 3 | 2.80 | 3.39 | 3.46 | 2.91 | **2.68** | 3.14 |
+| ETU-300, 6 | 3.14 | 3.24 | 3.28 | **2.87** | 3.05 | fails |
+
+The smoothing must span no more than about 15–18 OFDM symbols: 9 taps at spacing 6 (54
+symbols) fail at 300 Hz.
+
+**Chosen estimator (bold above):**
+
+| RefSymbolSpacing | Smoothing | Span |
+| --- | --- | --- |
+| 1 | 9 taps | 9 symbols |
+| 3 | 5 taps | 15 symbols |
+| 6 | 3 taps | 18 symbols |
+| 12 | none | – |
+
+The loss against Wiener LMMSE is −0.3 … +0.15 dB in every case measured. That is about Wiener
+performance with fixed weights and no adaptation in time, so the "Wiener time" option is
+covered. It stays a later option only if the high-order modulations show otherwise; the
+smoothing is so far measured on QPSK only.
+
+**Hardware consequences.**
+- Frequency: 4 ROM sets of 8 weights per tone (per pilot spacing), plus the window choice from
+  the first reference row, which is the delay-profile logic of the adaptive estimator in a
+  simple form.
+- Time:
+  - A store of frequency-filtered reference rows: up to 10 rows of 841 × 36 bit, about 10 BRAM36.
+  - The drift estimate, already in the control field.
+  - A boxcar over up to 9 rows: adds only, no multiplies except the phase alignment; the
+    renormalisation is a small table.
+- **Latency:** a data symbol waits for the reference row half a smoothing span past the next
+  one. That is 4 / 6 / 6 / 0 extra symbols at RefSymbolSpacing 1 / 3 / 6 / 12, so at most 6 ×
+  1140 samples ≈ 0.34 ms at 20 Msps. A shorter smoothing trades dB for latency along the table
+  above (3 taps: +2 / +3 / +6 symbols).
+- Grids held: up to 13, as in §6. The noise variance comes from the empty comb and nulls
+  (`estimate_noise_var`).
+
+**Not done:**
+- 12 configurations stopped at the time limit: more ETU pilot patterns, 16QAM EVA, 64QAM AWGN /
+  ETU, QPSK 1944 EVA, 64QAM 1944 AWGN / ETU.
+- Smoothing with 16 / 64QAM. Done in §6b: at high SNR it hurts, so §6b switches it off by
+  pilot SNR.
+- The bit-true widths. Done in §6b.
+
+## 6b. Payload bit-true model (Oct 2026)
+
+`PC/pl_reference.py` is an integer model of the payload receiver. Like the control-field model,
+every step states its widths, rounding and saturation exactly, so the RTL can follow it bit for
+bit. The full definition is in the module text. Tables are in `PC/pl_tables.npz`, written by
+`gen_pl_tables.py`.
+
+**Input and output.** It takes the payload grid (PacketLength × 841 bins from the shared FFT of
+§5) and the control-field settings: modulation, pilot spacings, PacketLength, CBS, rate,
+repetition, NDB_A and C_init. It returns each transport block's bits, CRC24 result and decoder
+iterations. `payload_results()` runs it after `pd_reference.detect` on every accepted packet.
+
+**Chain** (single Tx antenna):
+
+1. **Packet shift.** The grid is shifted so the row-0 pilots fit 13 bits. In practice the shift
+   is 0: the FFT output stays within 13 bits even at 6 dB input backoff.
+2. **Pilots × known sign.** QAM pilots are multiplied by (1 + j). This leaves a known gain of
+   2A/norm, which is folded into the LLR constants.
+3. **Delay class (window choice).**
+   - The input is a Hann-windowed copy of the pilots of reference rows 0 and 1, run through the
+     shared FFT (one pass per row).
+   - The last delay above max(peak − 30 dB, 8 × noise floor), plus 4 samples, picks one of
+     4 windows ending at 24 / 40 / 64 / 112 samples in the hardware frame. Fewer windows exist
+     at pilot spacing 12 (3) and 24 (1).
+4. **SNR mode.** Pilot power against noise on rows 0 and 1:
+   - Pilot SNR about 12 dB or more: high-SNR weights (design noise 0.05) and no smoothing.
+   - Otherwise: low-SNR weights (design noise 0.5) and the smoothing of §6a.
+5. **Frequency.** 8-tap FIR from ROM. There is one table per (pilot spacing, delay class, mode);
+   the number of distinct coefficient sets is 25 / 49 / 97 / 193 for spacing 3 / 6 / 12 / 24.
+6. **Time.**
+   - Drift: `cordic_angle` of the pilot correlation between consecutive reference rows.
+   - Rows phase-aligned, smoothed, interpolated linearly, then rotated back.
+   - One table rotation per symbol and tone (the tone-check table).
+7. **Noise.** Σ|Y|² over the empty Ref_P1 comb and the in-band DC tones of rows 0 and 1.
+8. **LLR without a division per tone.**
+   - Per tone: z = Y·conj(H) and e = |H|².
+   - Per bit: max-log numerator N = min over the bit-1 levels − min over the bit-0 levels of
+     m²·e − C1·m·z (C1 = 2 for BPSK, 4A for QAM).
+   - One per-packet scale m·2^−sh = n0·2^(F+2) / (C2·ΣN), computed by one division per packet.
+   - Per-copy LLR: 12 bits, at step 1/4 with 3 extra fraction bits.
+9. **Descramble, combine, decode.**
+   - Gold descrambling.
+   - Copies summed in a 16-bit saturating accumulator, then rounded to the 7-bit decoder input
+     (step 1/4).
+   - De-interleave, then the frozen decoder of §5b: APP 10 bits, messages 7 bits, at most
+     10 iterations, stopping per code word on a zero syndrome.
+   - CRC24 over the first K bits.
+
+**Changes against §5b and §6a found with the model:**
+- **SNR mode (two weight sets).** §6a used a single design noise and always smoothed.
+  64QAM 1944_34 on ETU-300 then failed even at 40 dB: the weights were biased, and the smoothing
+  averaged over a channel that changes too fast at 300 Hz. With the mode switch it decodes, and
+  QPSK keeps its smoothing gain. Cost: twice the weight ROM.
+- **Delay class from two reference rows, with a Hann window.**
+  - With one unwindowed row, the sinc sidelobes always chose the second window in AWGN, and
+    noise peaks often chose the longest window at low SNR. That cost 0.3 dB on QPSK at −1 dB.
+  - The cost of using two rows: symbol 0's output waits for reference row 1, which symbols
+    1 … R−1 need anyway. The end of the packet is not delayed.
+- **LLR step 1/4 in every mode.** §5b's step 1 for 64QAM rate 1/2 loses up to 1 dB end to end.
+  Each pair below is 64QAM 648_12 at 10 % BLER, step 1 then step 1/4:
+  - AWGN: 0.26 vs 0.06.
+  - EVA-70, repetition 1: 0.18 vs 0.14.
+  - EVA-70, repetition 19: 0.15 vs 0.12.
+
+  §5b used an ideal AWGN demapper with exact σ²; with a real channel estimate and the per-tone
+  σ²/|H|², 1/4 is best or equal in every case. This makes the per-packet step table of §5b
+  unnecessary.
+- **Grid validity.** PacketLength 4 with RefSymbolSpacing 6 or 12 is not a valid grid (it must
+  end with a reference symbol; the simulator's Resource_Grid rejects it). The model rejects
+  the packet; `cf_rx`'s field check must reject it too.
+
+**Checks** (`PC/pl_check.py`):
+- `tables`: CRC24 against the simulator's GenerateCRC. The test encoder (systematic, parity
+  solved from H) gives zero syndrome for all 12 codes.
+- `vector ../TestVectors/rep3.json`: the simulator's own packets through the bit-true detector
+  and this model. The packets are BPSK 648_12, repetition 19, ETU, −8 dB, with all the
+  simulator's defects. All 9 transport blocks pass CRC24. This confirms the scrambler,
+  interleaver, repetition, pilot signs and bit mapping against the simulator's transmitter.
+- `loop`: one packet per case through the time-domain channel at high SNR; every block decodes
+  with the right bits. The cases are:
+  - 4 modulations × 12 codes on AWGN;
+  - all 16 pilot patterns on EPA-5;
+  - every modulation at 1944_34 on ETU-300;
+  - repetition 31 with PacketLength 121.
+- `ranges` (word lengths):
+
+  | Value | Largest seen (bits) | Allowed (bits) |
+  | --- | --- | --- |
+  | Y | 13 | 16 |
+  | H | 14 | 16 |
+  | z | 26 | – |
+  | e | 27 | – |
+  | N | 33 | – |
+  | N·m | 49 | – |
+
+  The cases were 7 configurations × input backoff 6 / 12 / 20 dB; nothing saturates before the
+  LLR.
+
+  Plan the 49-bit product N·m for the RTL: two DSPs, or truncate N first; the model will follow
+  the RTL's choice.
+
+**Bit-true against floating point** (`pl_check.py bler`).
+
+The floating-point receiver runs the same algorithm (window-select FIR8, the same SNR mode and smoothing, max-log, float layered decoder) on unquantised samples, with the simulator's window choice and noise estimate. The bit-true model gets 12-bit samples at 12 dB backoff.
+
+Each column is the SNR in dB at 10 % block error, on the same packets (20–40 packets per point, 1 dB steps, interpolated). The last two columns force one weight set and smoothing setting to show what the SNR mode chooses between.
+
+| Modulation, code, repetition, pilot pattern, channel | Float | Bit-true | Forced low-SNR | Forced high-SNR |
+| --- | --- | --- | --- | --- |
+| QPSK 648_12, rep 1, 3/3, AWGN | -0.99 | -0.99 | -0.99 | -0.73 |
+| QPSK 648_12, rep 1, 3/3, EVA-70 | 2.41 | 2.41 | 2.41 | 3.37 |
+| QPSK 648_12, rep 1, 1/3, ETU-300 | 2.19 | 2.30 | 2.30 | 3.57 |
+| QPSK 648_12, rep 1, 6/12, EPA-5 | 4.42 | 4.46 | 4.46 | 5.08 |
+| QPSK 648_12, rep 1, 12/6, EVA-70 | 3.53 | 3.43 | 3.43 | 3.52 |
+| BPSK 648_12, rep 3, 3/3, EVA-70 | -3.04 | -3.04 | -3.04 | -2.40 |
+| 16QAM 648_12, rep 1, 3/3, EVA-70 | 7.71 | 7.68 | 7.68 | 8.01 |
+| 16QAM 648_12, rep 1, 3/3, ETU-300 | 8.25 | 8.32 | 8.32 | 8.25 |
+| 64QAM 648_12, rep 1, 3/3, AWGN | 8.26 | 8.28 | 8.23 | 8.29 |
+| 64QAM 648_12, rep 1, 3/3, EVA-70 | 12.53 | 12.52 | 12.79 | 12.49 |
+| 64QAM 1944_34, rep 1, 3/3, EVA-70 | 16.16 | 16.16 | 16.72 | 16.16 |
+| QPSK 1944_56, rep 1, 3/3, ETU-300 | 7.40 | 7.48 | 7.48 | 7.65 |
+| 64QAM 1944_34, rep 1, 3/3, ETU-300 | 16.52 | 16.56 | does not reach 10 % | 16.56 |
+| 16QAM 1296_23, rep 1, 6/6, EVA-70 | 10.64 | 10.57 | 10.56 | 10.44 |
+
+- **Fixed-point loss:** bit-true is within ±0.1 dB of float in every case. The largest gap is QPSK on ETU-300 with a pilot every symbol: +0.11 dB.
+- **The SNR mode chooses well:** forcing low-SNR costs up to 0.6 dB at 64QAM and fails on 64QAM ETU-300; forcing high-SNR costs up to 1.3 dB at QPSK. The automatic choice is never more than about 0.1 dB from the better of the two.
+- **Input backoff 6 / 12 / 20 dB:** QPSK AWGN −0.99 / −0.99 / −0.99 dB, 64QAM 648_12 AWGN (first run, step 1) 8.76 / 8.71 / 8.70 dB. The input level does not matter.
 
 ## 7. Resources (estimate)
 
@@ -235,7 +490,7 @@ study of their own (payload spec).
 | input buffer 8192 → 16 384 | +6 | – |
 | descriptors, keep pointer, drop logic | – | – |
 | grid buffer (spacing ≤ 12) | about 13 | – |
-| option B / C FFT | 0–2 | +4 |
+| option C FFT (built, 6.0) | +6 | +4 |
 
 Today: 34 BRAM tiles of 140 and 147 DSP of 220. The payload chain (channel estimate, equaliser
 for 16 / 64QAM, demapper, LDPC) has to fit in the remaining 73 DSP; the demapper's division
@@ -248,7 +503,14 @@ state machine re-arms (built); low latency first; PacketLength ≤ 73 normal.
 
 1. ~~LDPC float-vs-bit-true study~~ — done, §5b. New: noise-variance estimate for the
    demapper's LLR scale.
-2. Shared fast FFT (option B engine) for the control field and the speculative payload FFTs.
+2. ~~Shared fast FFT~~ — built (bitstream 6.0). Next: the grid buffer (grids instead of
+   signatures, kept / dropped the same way) and the payload channel estimate with its noise
+   estimate.
+3. ~~Payload channel estimate~~ — float study done, §6a: window-select FIR8 + smoothing in
+   time, about Wiener performance. Open: latency vs smoothing length (up to 0.34 ms).
+4. ~~Payload bit-true model~~ — done, §6b. The RTL plan is `Specification_PayloadReceiver.md`
+   (grid ring, estimator, demapper, LDPC, build steps 12a–12d), including the grid-validity check
+   in `cf_rx`.
 
 ## 9. Verification (as before)
 

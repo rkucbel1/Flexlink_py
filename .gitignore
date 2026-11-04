@@ -17,6 +17,7 @@ Docs/*.pdf
 /Tx/Generate_RandomPacketOfData/*.h5
 /Rx/*.h5
 App/Sweeps/
+App/HIL/
 
 # File transfer: received files, partly received state, worker copies, test files
 Rx/FileTransfer_State/

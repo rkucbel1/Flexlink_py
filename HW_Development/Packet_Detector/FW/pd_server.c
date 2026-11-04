@@ -55,7 +55,7 @@
 /* ---------------------------------------------------------------------------------- */
 #define PD_PORT                 5001
 #define PD_PROTOCOL_VERSION     1u
-#define PD_BUILD                14u              /* bump when the firmware changes */
+#define PD_BUILD                16u              /* bump when the firmware changes */
 
 #define SAMPLE_BUF_ADDR         0x10000000u
 #define DEBUG_BUF_ADDR          0x18000000u
@@ -85,6 +85,8 @@
 #define PD_ID_V5                0x0500u         /* 5.0: re-arm by the Rx state machine (REARM) */
 #define PD_ID_V6                0x0600u         /* 6.0: shared fast FFT, payload records (PL FIFO) */
 #define PD_ID_V7                0x0700u         /* 7.0: payload channel estimate (CH FIFO) */
+#define PD_ID_V8                0x0800u         /* 8.0: payload demapper / combiner (LQ FIFO) */
+#define PD_ID_V9                0x0900u         /* 9.0: LDPC decoder, transport blocks (TB FIFO) */
 #define R_ID                    0x00u
 #define R_CTRL                  0x04u
 #define R_STATUS                0x08u
@@ -104,6 +106,10 @@
 #define R_PL_DATA               0x60u
 #define R_CH_LEVEL              0x64u
 #define R_CH_DATA               0x68u
+#define R_LQ_LEVEL              0x6Cu
+#define R_LQ_DATA               0x70u
+#define R_TB_LEVEL              0x74u
+#define R_TB_DATA               0x78u
 #define CTRL_RESET              0x1u
 #define CTRL_DEBUG              0x2u
 #define CTRL_LOOPBACK           0x4u
@@ -145,6 +151,8 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define BOARD_FLAG_REARM        0x10u           /* bitstream has the state machine's re-arm (ID 5.0) */
 #define BOARD_FLAG_PAYLOAD      0x20u           /* bitstream has the speculative payload FFT (ID 6.0) */
 #define BOARD_FLAG_CHEST        0x40u           /* bitstream has the payload channel estimate (ID 7.0) */
+#define BOARD_FLAG_LQ           0x80u           /* bitstream has the demapper / combiner (ID 8.0) */
+#define BOARD_FLAG_TB           0x100u          /* bitstream has the LDPC decoder (ID 9.0) */
 #define EV_CFO_VALID            0x1u
 #define EV_TONE_FAIL            0x2u
 #define EV_TRUNCATED            0x4u
@@ -156,8 +164,11 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define PL_SIZE                 16u             /* payload record (pd_protocol.PayloadRecord) */
 #define MAX_PL                  8192u           /* payload records per RUN */
 #define MAX_CH                  8192u           /* channel-estimate records per RUN (PL_SIZE each) */
-#define MAX_EVENTS              ((MAX_PAYLOAD - 24u - MAX_TM * TM_SIZE - MAX_CF * CF_SIZE - MAX_PL * PL_SIZE \
-                                  - MAX_CH * PL_SIZE - EV_SIZE) / EV_SIZE)
+#define MAX_LQ                  4096u           /* decoder-input records per RUN (PL_SIZE each) */
+#define TB_HDR_SIZE             12u             /* transport block (pd_protocol.TBRecord): header ... */
+#define MAX_TB_BYTES            (192u << 10)    /* ... + 4 bytes per 32 bits; per RUN */
+#define MAX_EVENTS              ((MAX_PAYLOAD - 32u - MAX_TM * TM_SIZE - MAX_CF * CF_SIZE - MAX_PL * PL_SIZE \
+                                  - MAX_CH * PL_SIZE - MAX_LQ * PL_SIZE - MAX_TB_BYTES - EV_SIZE) / EV_SIZE)
 #define TONE_THRESH_MAX_Q8      (24u * 256u)
 
 /* ---------------------------------------------------------------------------------- */
@@ -211,6 +222,12 @@ static int pl_lost;
 static u8  ch_out[MAX_CH * PL_SIZE]; /* channel-estimate records of the RUN */
 static u32 ch_n;
 static int ch_lost;
+static u8  lq_out[MAX_LQ * PL_SIZE]; /* decoder-input records of the RUN */
+static u32 lq_n;
+static u8  tb_out[MAX_TB_BYTES];     /* transport blocks of the RUN */
+static u32 tb_n, tb_bytes;
+static int tb_lost;
+static int lq_lost;
 
 /* ---------------------------------------------------------------------------------- */
 /* Helpers                                                                             */
@@ -490,6 +507,69 @@ static void drain_chest(void)
     }
 }
 
+/* Read every complete decoder-input record (4 words) into lq_out (PayloadRecord layout: t_trig,
+ * code word, sig_a, sig_b). */
+static void drain_lq(void)
+{
+    if (det_version < PD_ID_V8) {
+        return;
+    }
+    while (pd_rd(R_LQ_LEVEL) >= 4u) {
+        u32 w[4], i;
+        u8 *r;
+        for (i = 0; i < 4u; i++) {
+            w[i] = pd_rd(R_LQ_DATA);
+        }
+        if (lq_n >= MAX_LQ) {
+            lq_lost = 1;
+            continue;
+        }
+        r = lq_out + PL_SIZE * lq_n;
+        wr32(r + 0, w[0]);                                      /* t_trig */
+        wr32(r + 4, w[1] & 0xFFFFu);                            /* code word (u16) + 2 pad bytes */
+        wr32(r + 8, w[2]);                                      /* sig_a */
+        wr32(r + 12, w[3]);                                     /* sig_b */
+        lq_n++;
+    }
+}
+
+/* Read every complete transport-block record into tb_out (pd_protocol.TBRecord: u32 t_trig,
+ * u16 w, u8 crc_ok, u8 iterations, u16 nbits, 2 pad bytes, then ceil(nbits / 32) u32 words).
+ * The FIFO counts only words of complete records. */
+static void drain_tb(void)
+{
+    if (det_version < PD_ID_V9) {
+        return;
+    }
+    while (pd_rd(R_TB_LEVEL) >= 2u) {
+        u32 t = pd_rd(R_TB_DATA);
+        u32 h = pd_rd(R_TB_DATA);
+        u32 nb = h & 0x7FFu, nw = (nb + 31u) / 32u, i;
+        int keep = (tb_bytes + TB_HDR_SIZE + 4u * nw <= MAX_TB_BYTES);
+        u8 *r = tb_out + tb_bytes;
+        if (keep) {
+            wr32(r + 0, t);
+            wr16(r + 4, (u16)((h >> 14) & 0x3FFu));                 /* code word */
+            r[6] = (u8)(h >> 31);                                    /* crc_ok */
+            r[7] = (u8)((h >> 24) & 0xFu);                           /* iterations */
+            wr16(r + 8, (u16)nb);
+            wr16(r + 10, 0);
+        }
+        for (i = 0; i < nw; i++) {
+            u32 w = pd_rd(R_TB_DATA);
+            if (keep) {
+                wr32(r + TB_HDR_SIZE + 4u * i, w);
+            }
+        }
+        if (keep) {
+            tb_bytes += TB_HDR_SIZE + 4u * nw;
+            tb_n++;
+        } else {
+            tb_lost = 1;
+        }
+    }
+}
+
 static void drain_all(void)
 {
     drain_events();
@@ -497,6 +577,8 @@ static void drain_all(void)
     drain_control();
     drain_payload();
     drain_chest();
+    drain_lq();
+    drain_tb();
 }
 
 /* Hold the detector in reset, write the parameters, release it. */
@@ -613,6 +695,11 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     pl_lost = 0;
     ch_n = 0;
     ch_lost = 0;
+    lq_n = 0;
+    tb_n = 0;
+    tb_bytes = 0;
+    tb_lost = 0;
+    lq_lost = 0;
     start = pd_rd(R_SAMPLES);
     start20 = start / div;
     pd_wr(R_CTRL, debug ? CTRL_DEBUG : 0u);
@@ -661,6 +748,16 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
                  (unsigned long)MAX_PL);
         return -5;
     }
+    if (tb_lost) {
+        snprintf(err, err_len, "more than %lu bytes of transport blocks in one RUN - run in smaller pieces",
+                 (unsigned long)MAX_TB_BYTES);
+        return -5;
+    }
+    if (lq_lost) {
+        snprintf(err, err_len, "more than %lu decoder-input records in one RUN - run in smaller pieces",
+                 (unsigned long)MAX_LQ);
+        return -5;
+    }
     if (ch_lost) {
         snprintf(err, err_len, "more than %lu channel-estimate records in one RUN - run in smaller pieces",
                  (unsigned long)MAX_CH);
@@ -695,7 +792,8 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     wr32(ev_out + 4, count);
     /* reply: n_events, count, events, then n_timing and the timing records, then (build 11)
      * n_control and the control records, then (build 13) n_payload and the payload records,
-     * then (build 14) n_chest and the channel-estimate records */
+     * then (build 14) n_chest and the channel-estimate records, then (build 15) n_lq and the
+     * decoder-input records, then (build 16) n_tb and the transport blocks */
     wr32(ev_out + 8u + EV_SIZE * ev_n, tm_n);
     memcpy(ev_out + 12u + EV_SIZE * ev_n, tm_out, TM_SIZE * tm_n);
     wr32(ev_out + 12u + EV_SIZE * ev_n + TM_SIZE * tm_n, cf_n);
@@ -705,6 +803,12 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     wr32(ev_out + 20u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * pl_n, ch_n);
     memcpy(ev_out + 24u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * pl_n, ch_out,
            PL_SIZE * ch_n);
+    wr32(ev_out + 24u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * (pl_n + ch_n), lq_n);
+    memcpy(ev_out + 28u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * (pl_n + ch_n), lq_out,
+           PL_SIZE * lq_n);
+    wr32(ev_out + 28u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * (pl_n + ch_n + lq_n), tb_n);
+    memcpy(ev_out + 32u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * (pl_n + ch_n + lq_n), tb_out,
+           tb_bytes);
     return 0;
 }
 
@@ -798,7 +902,9 @@ static void handle_message(struct tcp_pcb *pcb)
                             (det_version >= PD_ID_V4 ? BOARD_FLAG_CF : 0u) |
                             (det_version >= PD_ID_V5 ? BOARD_FLAG_REARM : 0u) |
                             (det_version >= PD_ID_V6 ? BOARD_FLAG_PAYLOAD : 0u) |
-                            (det_version >= PD_ID_V7 ? BOARD_FLAG_CHEST : 0u));
+                            (det_version >= PD_ID_V7 ? BOARD_FLAG_CHEST : 0u) |
+                            (det_version >= PD_ID_V8 ? BOARD_FLAG_LQ : 0u) |
+                            (det_version >= PD_ID_V9 ? BOARD_FLAG_TB : 0u));
         reply(pcb, cmd, ST_OK, seq, tx_small, 16);
         return;
 
@@ -945,7 +1051,7 @@ static void handle_message(struct tcp_pcb *pcb)
                 debug_count = rd32(params + 28) == 2u ? count / 2u : count;
             }
             reply(pcb, cmd, ST_OK, seq, ev_out,
-                  24u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * pl_n + PL_SIZE * ch_n);
+                  32u + EV_SIZE * ev_n + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * (pl_n + ch_n + lq_n) + tb_bytes);
             return;
         }
         debug_count = 0;

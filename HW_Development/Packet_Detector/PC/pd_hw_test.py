@@ -89,10 +89,11 @@ class Board:
     def run(self, count: int, debug: bool, flags: int = 0) -> tuple[list[pr.EventRecord], int]:
         """Events of this RUN; its timing records (firmware build 10) are left in self.timing and
         its control records (build 11) in self.control, its payload records (build 13) in
-        self.payload, its channel-estimate records (build 14) in self.chest."""
+        self.payload, its channel-estimate records (build 14) in self.chest, its decoder-input
+        records (build 15) in self.lq, its transport blocks (build 16) in self.tb."""
         flags |= pr.RUN_FLAG_DEBUG if debug else 0
         reply = self.call(pr.RUN, struct.pack("<II", count, flags))
-        evs, done, self.timing, self.control, self.payload, self.chest = pr.parse_run_reply_chest(reply)
+        evs, done, self.timing, self.control, self.payload, self.chest, self.lq, self.tb = pr.parse_run_reply_tb(reply)
         return evs, done
 
     def get_debug(self, count: int) -> np.ndarray:
@@ -216,6 +217,46 @@ def compare_chest(got: list[pr.PayloadRecord], exp: list[pr.PayloadRecord]) -> t
                         + (f" (board {g[bad]}, model {e[bad]})" if bad < min(len(g), len(e)) else "")))
     if not by_pkt:
         lines.append("  channel-estimate records: none (none expected)")
+    return ok, lines
+
+
+def compare_lq(got: list[pr.PayloadRecord], exp: list[pr.PayloadRecord]) -> tuple[bool, list[str]]:
+    """Every decoder-input record exact and in order (one line per packet)."""
+    lines, ok = [], got == exp
+    by_pkt: dict[int, list] = {}
+    for r in exp:
+        by_pkt.setdefault(r.t_trig, [[], []])[1].append(r)
+    for r in got:
+        by_pkt.setdefault(r.t_trig, [[], []])[0].append(r)
+    for t, (g, e) in sorted(by_pkt.items()):
+        same = g == e
+        bad = next((i for i, (x, y) in enumerate(zip(g, e)) if x != y), min(len(g), len(e)))
+        lines.append(f"  {'ok      ' if same else 'MISMATCH'} decoder t_trig {t:8d}: {len(g)} code word signature(s)"
+                     + ("" if same else f", expected {len(e)}; first difference at code word {bad}"))
+    if not by_pkt:
+        lines.append("  decoder-input records: none (none expected)")
+    return ok, lines
+
+
+def compare_tb(got: list[pr.TBRecord], exp: list[pr.TBRecord]) -> tuple[bool, list[str]]:
+    """Every transport block exact (bits, crc_ok, iterations) and in order; one line per packet."""
+    lines, ok = [], got == exp
+    by_pkt: dict[int, list] = {}
+    for r in exp:
+        by_pkt.setdefault(r.t_trig, [[], []])[1].append(r)
+    for r in got:
+        by_pkt.setdefault(r.t_trig, [[], []])[0].append(r)
+    for t, (g, e) in sorted(by_pkt.items()):
+        same = g == e
+        n_ok = sum(r.crc_ok for r in g)
+        its = [r.iters for r in g]
+        bad = next((i for i, (x, y) in enumerate(zip(g, e)) if x != y), min(len(g), len(e)))
+        lines.append(f"  {'ok      ' if same else 'MISMATCH'} blocks  t_trig {t:8d}: {len(g)} transport block(s), "
+                     f"{n_ok} CRC ok, iterations {min(its, default=0)}..{max(its, default=0)}"
+                     + ("" if same else f"; expected {len(e)} ({sum(r.crc_ok for r in e)} CRC ok), first "
+                        f"difference at code word {bad}"))
+    if not by_pkt:
+        lines.append("  transport blocks: none (none expected)")
     return ok, lines
 
 
@@ -382,6 +423,10 @@ def main(argv=None) -> int:
         control: dict[int, pr.ControlRecord] = {}
         payload: list[pr.PayloadRecord] = []
         chest: list[pr.PayloadRecord] = []
+        lqs: list[pr.PayloadRecord] = []
+        tbs: list[pr.TBRecord] = []
+        has_tb = bool(info.flags & pr.BOARD_TB) and a.input_stage in (1, 2)
+        has_lq = bool(info.flags & pr.BOARD_LQ) and a.input_stage in (1, 2)
         has_ch = bool(info.flags & pr.BOARD_CHEST) and a.input_stage in (1, 2)
         has_pl = bool(info.flags & pr.BOARD_PAYLOAD) and a.input_stage in (1, 2)
         has_timing = bool(info.flags & pr.BOARD_TIMING) and a.input_stage in (1, 2)
@@ -426,6 +471,8 @@ def main(argv=None) -> int:
                 control[r.t_trig] = r
             payload += b.payload
             chest += b.chest
+            lqs += b.lq
+            tbs += b.tb
             if a.debug:
                 dbg_parts.append(b.get_debug(done // div))
         mb = iq.nbytes / 1e6
@@ -475,6 +522,18 @@ def main(argv=None) -> int:
                 lines += hlines
             elif params.rearm and has_pl:
                 lines.append("  (no channel-estimate records: the board's bitstream or firmware predates them)")
+            if has_lq:
+                qok, qlines = compare_lq(lqs, res.lq)
+                ok &= qok
+                lines += qlines
+            elif params.rearm and has_ch:
+                lines.append("  (no decoder-input records: the board's bitstream or firmware predates them)")
+            if has_tb:
+                bok, blines = compare_tb(tbs, res.tb)
+                ok &= bok
+                lines += blines
+            elif params.rearm and has_lq:
+                lines.append("  (no transport blocks: the board's bitstream or firmware predates them)")
         else:
             lines.append("  (no control-field receiver: the board's bitstream or firmware predates it)")
     elif a.input_stage in (1, 2):

@@ -43,7 +43,12 @@ Commands (request payload -> reply payload)
                                                   per payload symbol of each accepted packet).
                                                   Then (build 14, BOARD_CHEST) u32 n_chest and
                                                   n_chest x PayloadRecord: channel-estimate
-                                                  records (sym CH_PKT = packet record)
+                                                  records (sym CH_PKT = packet record).
+                                                  Then (build 15, BOARD_LQ) u32 n_lq and n_lq x
+                                                  PayloadRecord: decoder-input records (sym =
+                                                  code word). Then (build 16, BOARD_TB) u32 n_tb
+                                                  and n_tb x TBRecord (variable length:
+                                                  decoded transport blocks)
     GET_DEBUG     u32 offset, u32 count     -> count x DebugRecord (from the last RUN with
                                                        capture enabled); after a PL-loopback RUN
                                                        the 4-byte records are the samples as they
@@ -109,6 +114,11 @@ BOARD_CHEST = 0x40                     # bitstream has the payload channel estim
 #                                        build 14): the RUN reply carries channel-estimate records
 #                                        after the payload records (only with Params.rearm)
 CH_PKT = 0x8000                        # PayloadRecord.sym of a channel-estimate packet record
+BOARD_LQ = 0x80                        # bitstream has the demapper and combiner (ID 8.0, firmware
+#                                        build 15): decoder-input records after the channel-estimate
+#                                        records (only with Params.rearm)
+BOARD_TB = 0x100                       # bitstream has the LDPC decoder (ID 9.0, firmware build 16):
+#                                        transport blocks after the decoder-input records (rearm)
 
 # EventRecord.status bits
 EV_CFO_VALID = 0x1                     # N_CFO samples were available, cfo_inc is valid
@@ -327,21 +337,65 @@ class PayloadRecord:
         return [cls(*cls.FMT.unpack(b[i * s:(i + 1) * s])) for i in range(n)]
 
 
+@dataclass
+class TBRecord:
+    """A decoded transport block (firmware build 16, BOARD_TB): one per complete code word of an
+    accepted packet, in order (pl_reference.tb_records)."""
+    t_trig: int
+    w: int                             # code word in the packet
+    crc_ok: int
+    iters: int                         # LDPC iterations (1 .. 10)
+    nbits: int                         # K - 24
+    bits: tuple                        # the transport block, nbits values 0 / 1
+
+    HDR = struct.Struct("<IHBBH2x")    # 12 bytes, then ceil(nbits / 32) u32 words, bit j in word j // 32
+
+    def pack(self) -> bytes:
+        words = [0] * ((self.nbits + 31) // 32)
+        for j, b in enumerate(self.bits):
+            words[j // 32] |= int(b) << (j % 32)
+        return self.HDR.pack(self.t_trig, self.w, self.crc_ok, self.iters, self.nbits) + struct.pack(f"<{len(words)}I", *words)
+
+    @classmethod
+    def unpack_many(cls, b: bytes, n: int) -> tuple[list["TBRecord"], int]:
+        """n records from b; returns (records, bytes used)."""
+        out, off = [], 0
+        for _ in range(n):
+            t, w, ok, it, nb = cls.HDR.unpack_from(b, off)
+            off += cls.HDR.size
+            nw = (nb + 31) // 32
+            words = struct.unpack_from(f"<{nw}I", b, off)
+            off += 4 * nw
+            out.append(cls(t, w, ok, it, nb, tuple((words[j // 32] >> (j % 32)) & 1 for j in range(nb))))
+        return out, off
+
+
 def parse_run_reply_all(reply: bytes):
     """RUN reply -> (events, samples processed, timing records, control records, payload
     records); parse_run_reply_chest also returns the channel-estimate records. Replies of older
     firmware end after the events (build <= 9), the timing records (build 10), the control
     records (builds 11, 12) or the payload records (build 13)."""
-    return parse_run_reply_chest(reply)[:5]
+    return parse_run_reply_tb(reply)[:5]
 
 
 def parse_run_reply_chest(reply: bytes):
     """RUN reply -> (events, samples processed, timing, control, payload, channel-estimate
     records)."""
+    return parse_run_reply_tb(reply)[:6]
+
+
+def parse_run_reply_lq(reply: bytes):
+    """parse_run_reply_tb without the transport blocks."""
+    return parse_run_reply_tb(reply)[:7]
+
+
+def parse_run_reply_tb(reply: bytes):
+    """RUN reply -> (events, samples processed, timing, control, payload, channel-estimate,
+    decoder-input records, transport blocks)."""
     n_ev, done = struct.unpack_from("<II", reply)
     evs = EventRecord.unpack_many(reply[8:], n_ev)
     off = 8 + EventRecord.FMT.size * n_ev
-    tms, cfs, pls, chs = [], [], [], []
+    tms, cfs, pls, chs, lqs, tbs = [], [], [], [], [], []
     if len(reply) >= off + 4:
         (n_tm,) = struct.unpack_from("<I", reply, off)
         tms = TimingRecord.unpack_many(reply[off + 4:], n_tm)
@@ -357,7 +411,15 @@ def parse_run_reply_chest(reply: bytes):
                 if len(reply) >= off + 4:
                     (n_ch,) = struct.unpack_from("<I", reply, off)
                     chs = PayloadRecord.unpack_many(reply[off + 4:], n_ch)
-    return evs, done, tms, cfs, pls, chs
+                    off += 4 + PayloadRecord.FMT.size * n_ch
+                    if len(reply) >= off + 4:
+                        (n_lq,) = struct.unpack_from("<I", reply, off)
+                        lqs = PayloadRecord.unpack_many(reply[off + 4:], n_lq)
+                        off += 4 + PayloadRecord.FMT.size * n_lq
+                        if len(reply) >= off + 4:
+                            (n_tb,) = struct.unpack_from("<I", reply, off)
+                            tbs, _ = TBRecord.unpack_many(reply[off + 4:], n_tb)
+    return evs, done, tms, cfs, pls, chs, lqs, tbs
 
 
 def parse_run_reply(reply: bytes) -> tuple[list[EventRecord], int, list[TimingRecord], list[ControlRecord]]:

@@ -24,6 +24,8 @@ read_verilog [list \
     [file join $rtl pd_timing.v] [file join $rtl cf_roms.v] [file join $rtl cf_tdp_ram.v] [file join $rtl pd_fft2.v] \
     [file join $rtl cf_chest.v] [file join $rtl cf_viterbi.v] [file join $rtl cf_crc10.v] [file join $rtl cf_rx.v] \
     [file join $rtl pd_cf.v] [file join $rtl pl_chest.v] [file join $rtl pl_roms.v] [file join $rtl pl_mulseq.v] \
+    [file join $rtl pl_demap.v] [file join $rtl pl_comb.v] [file join $rtl pl_soft_roms.v] \
+    [file join $rtl pl_dec.v] [file join $rtl pl_ldpc_core.v] [file join $rtl pl_ldpc_rom.v] [file join $rtl pl_lutram1.v] \
     [file join $rtl pd_arm.v] [file join $rtl pd_detect_top.v]]
 
 synth_design -top pd_detect_top -part $part -mode out_of_context -include_dirs [list $rtl]
@@ -32,8 +34,11 @@ create_clock -name clk -period $period [get_ports clk]
 set_false_path -from [get_ports {input_stage dc_shift* eta_* qual_len* blank_len* arm_holdoff* n_cfo* tone_lin* t_pk*}]
 
 opt_design
-place_design
-route_design
+# the same timing-driven steps as the board build (build_hw.tcl)
+place_design -directive ExtraTimingOpt
+phys_opt_design -directive AggressiveExplore
+route_design -directive AggressiveExplore
+phys_opt_design -directive AggressiveExplore
 
 report_utilization    -file [file join $out utilization.rpt]
 report_timing_summary -file [file join $out timing.rpt]

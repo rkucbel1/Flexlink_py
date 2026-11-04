@@ -15,7 +15,8 @@
 #
 #   PS7 (DDR, Ethernet, UART) --M_AXI_GP0--> smartconnect --> AXI DMA registers
 #                                                         --> pd_0 registers (0x43C00000, 4 KB)
-#   DDR <--S_AXI_HP0-- smartconnect <-- AXI DMA M_AXI_MM2S / M_AXI_S2MM
+#   DDR <--S_AXI_HP0-- AXI4->AXI3 converter <-- AXI DMA M_AXI_MM2S (read)
+#   DDR <--S_AXI_HP1-- AXI4->AXI3 converter <-- AXI DMA M_AXI_S2MM (write)
 #   AXI DMA MM2S --AXIS 32b (samples)--> pd_0 --AXIS 32b (debug records)--> AXI DMA S2MM
 #
 #   pd_0 = RTL/pd_axi.v (module reference): the packet detector with its register interface,
@@ -72,7 +73,7 @@ set_property board_part $board [current_project]
 create_bd_design $bd_name
 
 # --------------------------------------------------------------------------
-# Zynq PS: Zedboard preset (DDR, MIO, Ethernet, UART, USB), plus HP0 slave and FCLK0 100 MHz
+# Zynq PS: Zedboard preset (DDR, MIO, Ethernet, UART, USB), plus HP0 / HP1 slaves and FCLK0 100 MHz
 # --------------------------------------------------------------------------
 set ps7 [create_bd_cell -type ip -vlnv xilinx.com:ip:processing_system7 ps7]
 apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 \
@@ -80,7 +81,9 @@ apply_bd_automation -rule xilinx.com:bd_rule:processing_system7 \
 set_property -dict [list \
     CONFIG.PCW_USE_M_AXI_GP0 {1} \
     CONFIG.PCW_USE_S_AXI_HP0 {1} \
-    CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {64} \
+    CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {32} \
+    CONFIG.PCW_USE_S_AXI_HP1 {1} \
+    CONFIG.PCW_S_AXI_HP1_DATA_WIDTH {32} \
     CONFIG.PCW_EN_CLK0_PORT {1} \
     CONFIG.PCW_EN_RST0_PORT {1} \
     CONFIG.PCW_FPGA0_PERIPHERAL_FREQMHZ {100} \
@@ -137,7 +140,8 @@ set rtl_dir [file normalize [file join $script_dir .. RTL]]
 set rtl_files {}
 foreach f {pd_halfband.v pd_dc_blocker.v pd_lpf.v pd_div16.v pd_detect_core.v pd_cordic.v pd_cfo_cascade.v
            pd_cfo_lane.v pd_tone_rom.v pd_sdp_ram.v pd_tone_check.v pd_timing.v cf_roms.v cf_tdp_ram.v
-           pd_fft2.v cf_chest.v cf_viterbi.v cf_crc10.v cf_rx.v pd_cf.v pl_chest.v pl_roms.v pl_mulseq.v
+           pd_fft2.v cf_chest.v cf_viterbi.v cf_crc10.v cf_rx.v pd_cf.v pl_chest.v pl_roms.v pl_mulseq.v pl_demap.v pl_comb.v pl_soft_roms.v
+           pl_dec.v pl_ldpc_core.v pl_ldpc_rom.v pl_lutram1.v
            pd_arm.v pd_detect_top.v pd_axi.v} {
     lappend rtl_files [file join $rtl_dir $f]
 }
@@ -161,22 +165,27 @@ connect_bd_intf_net [get_bd_intf_pins ps7/M_AXI_GP0]  [get_bd_intf_pins sc_ctrl/
 connect_bd_intf_net [get_bd_intf_pins sc_ctrl/M00_AXI] [get_bd_intf_pins axi_dma_0/S_AXI_LITE]
 connect_bd_intf_net [get_bd_intf_pins sc_ctrl/M01_AXI] [get_bd_intf_pins pd_0/S_AXI]
 
-# DMA masters -> PS HP0 (DDR)
-set sc_mem [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect sc_mem]
-set_property -dict [list CONFIG.NUM_SI {2} CONFIG.NUM_MI {1}] $sc_mem
-connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins sc_mem/S00_AXI]
-connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins sc_mem/S01_AXI]
-connect_bd_intf_net [get_bd_intf_pins sc_mem/M00_AXI]       [get_bd_intf_pins ps7/S_AXI_HP0]
+# DMA masters -> DDR: read (MM2S) on HP0, write (S2MM) on HP1, each through a small AXI4 -> AXI3
+# protocol converter (the HP ports are AXI3, bursts of at most 16 beats; the converter splits the
+# DMA's 64-beat bursts). Two separate ports need no crossbar: this replaced a 2:1 smartconnect
+# (about 2,100 LUT) when the step 12d design no longer fit the device. The converters take their
+# settings (AXI4 in, AXI3 out, read- or write-only, 32 bit) from the connected interfaces.
+set pc_rd [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_protocol_converter pc_rd]
+set pc_wr [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_protocol_converter pc_wr]
+connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] [get_bd_intf_pins pc_rd/S_AXI]
+connect_bd_intf_net [get_bd_intf_pins pc_rd/M_AXI]          [get_bd_intf_pins ps7/S_AXI_HP0]
+connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_S2MM] [get_bd_intf_pins pc_wr/S_AXI]
+connect_bd_intf_net [get_bd_intf_pins pc_wr/M_AXI]          [get_bd_intf_pins ps7/S_AXI_HP1]
 
 # Clocks and resets
 connect_bd_net $clk \
-    [get_bd_pins ps7/M_AXI_GP0_ACLK] [get_bd_pins ps7/S_AXI_HP0_ACLK] \
+    [get_bd_pins ps7/M_AXI_GP0_ACLK] [get_bd_pins ps7/S_AXI_HP0_ACLK] [get_bd_pins ps7/S_AXI_HP1_ACLK] \
     [get_bd_pins axi_dma_0/s_axi_lite_aclk] [get_bd_pins axi_dma_0/m_axi_mm2s_aclk] \
     [get_bd_pins axi_dma_0/m_axi_s2mm_aclk] \
     [get_bd_pins pd_0/aclk] \
-    [get_bd_pins sc_ctrl/aclk] [get_bd_pins sc_mem/aclk]
+    [get_bd_pins sc_ctrl/aclk] [get_bd_pins pc_rd/aclk] [get_bd_pins pc_wr/aclk]
 connect_bd_net $aresetn  [get_bd_pins axi_dma_0/axi_resetn] [get_bd_pins pd_0/aresetn]
-connect_bd_net $icresetn [get_bd_pins sc_ctrl/aresetn] [get_bd_pins sc_mem/aresetn]
+connect_bd_net $icresetn [get_bd_pins sc_ctrl/aresetn] [get_bd_pins pc_rd/aresetn] [get_bd_pins pc_wr/aresetn]
 
 # --------------------------------------------------------------------------
 # Addresses, validate, wrapper
@@ -212,6 +221,14 @@ if {$mode eq "bd"} {
 # --------------------------------------------------------------------------
 # Build and export
 # --------------------------------------------------------------------------
+# timing-driven implementation (the PL is about 90 % full): placement for timing, physical
+# optimisation after placement and after routing
+set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE ExtraTimingOpt [get_runs impl_1]
+set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
+set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
 launch_runs impl_1 -to_step write_bitstream -jobs $jobs
 wait_on_run impl_1
 if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {

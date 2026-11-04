@@ -1,0 +1,15 @@
+HW/build/
+SIM/work/
+__pycache__/
+.Xil/
+*.jou
+*.log
+PC/*.npz
+!PC/ptx_tables.npz
+PC/*_40.bin
+PC/cap*.json
+PC/model_vector*.json
+FW/ptx_server
+FW/ptx_server_stub
+FW/ptx_params_test
+FW/ptx_stub_stream.bin

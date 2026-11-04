@@ -50,6 +50,11 @@ find each other, so they run from any folder.
 - **Simulate:** runs one packet through the whole link (Initialize, Tx chain, Rx chain) and
   shows the control field results, the CRC of every block, bit errors and plots. It can also
   run an SNR sweep (BER, BLER, EVM and goodput against SNR).
+- **Hardware in the loop:** on Set Rx, *Receiver* → *Hardware in the loop: Zedboard FPGA*
+  (and Save) sends each Run's waveform through the FPGA receiver
+  (`HW_Development/Packet_Detector`, bitstream 9.0, firmware build 16) instead of the Python Rx
+  chain, and checks every decoded transport block against the one the Tx sent. One waveform
+  only (Number of Rays 1). Each run is added to `App/HIL/HIL_results.csv`.
 
 **Save** writes the settings to the parameter files; **Run** runs the simulation.
 
@@ -62,6 +67,7 @@ python Tx/Initialize_Tx.py && python Tx/Run_Tx_Chain.py
 python Rx/Initialize_Rx.py && python Rx/Run_Rx_Chain.py --no-model
 python App/Run_SNR_Sweep.py --start 0 --stop 20 --step 2
 python App/Run_File_Transfer.py --file some_file.jpg      # send a file and get it back
+python App/Run_HIL.py                                     # last Tx waveform through the Zedboard FPGA
 ```
 
 Each script prints its options with `--help`.
@@ -70,7 +76,7 @@ Each script prints its options with `--help`.
 
 | Folder | What is in it |
 | --- | --- |
-| `App/` | the app (`Flexlinksimulation.py`), plots, SNR sweep, file transfer |
+| `App/` | the app (`Flexlinksimulation.py`), plots, SNR sweep, file transfer, hardware in the loop (`Run_HIL.py`) |
 | `Tx/` | transmitter chain, `Parameters_Tx_payload.json`, control field parameters |
 | `Rx/` | receiver chain, `Parameters_Rx_payload.json` |
 | `Flexlink_BasicModules/` | building blocks: LDPC and BCC coding, interleaver, scrambler, QAM, OFDM, preamble, channel estimator, channel defects (`Channel_Defects.json`) |

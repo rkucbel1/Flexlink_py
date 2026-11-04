@@ -13,7 +13,10 @@ bitstream 3.0, input stages 1 and 2), the control records (every field exact; fi
 speculative payload FFT (every symbol's grid signature exact; firmware build 13 and bitstream
 6.0, cases with rearm 1; column "payload" = records), the channel-estimate records (packet
 record and every symbol's H signature exact; firmware build 14 and bitstream 7.0, cases with
-rearm 1; column "chest" = records) and, for cases with debug, every debug
+rearm 1; column "chest" = records), the decoder-input records (one signature per code word;
+firmware build 15 and bitstream 8.0, cases with rearm 1; column "lq" = records), the decoded
+transport blocks (bits, CRC result and iterations exact; firmware build 16 and bitstream 9.0,
+cases with rearm 1; column "blocks" = blocks / CRC ok) and, for cases with debug, every debug
 record.
 
 Cases (the RTL simulation's coverage, on the board):
@@ -26,6 +29,9 @@ Cases (the RTL simulation's coverage, on the board):
   stress             synthetic full-scale vector: saturation, den = 0, many triggers;
                      holdoff 1, N_CFO 128 / 4096, tone check off / 24 dB, DC blocker off / short
   pieces             rep3 in uneven RUNs, with windows split across RUNs (truncated events)
+  mods               rep3 with its packets replaced by QPSK / 16QAM / 64QAM / BPSK packets of several
+                     codes, copy counts and pilot patterns (SIM/make_tb_vectors.mods_vector; needs
+                     the simulator project's channel model, as pl_check.py): transport blocks
   noise_k            noise only, 5 x 0.2 s: false-trigger rate (they should all fail the tone check)
 
     python pd_board_regression.py                         # board at 192.168.50.10 (33 cases)
@@ -150,6 +156,17 @@ def cases(quick: bool):
         return iq.astype(np.int16), vector_from_json("rep3", 1)[1]
     yield ("cfmod_s1", "rep3 with an invalid code, a failed CRC and PacketLength 37", cfmod, None, True)
 
+    def mods(name):
+        def build():
+            iq, _ = mk.mods_vector(name)
+            return iq.astype(np.int16), vector_from_json("rep3", 1)[1]
+        return build
+    yield ("mods_s1", "QPSK, 16QAM, 64QAM packets: every payload stage down to the transport blocks",
+           mods("mods"), None, True)
+    yield ("mods2_s1", "BPSK 4 copies, 64QAM, 16QAM rate 5/6: transport blocks", mods("mods2"), None, True)
+    yield ("mods_pieces_s1", "mods in 6 uneven RUNs (decoding across RUN boundaries)", mods("mods"),
+           [50000, 1, 77777, 3, 100000, None], True)
+
     def pieces():
         iq, p = vector_from_json("rep3", 1)
         return iq, p
@@ -190,7 +207,7 @@ def session(target, iq: np.ndarray, p: pr.Params, sizes: list[int], debug: bool,
         else:
             target.call(pr.LOAD_SAMPLES, struct.pack("<I", 0) + pr.iq_to_bytes(blk))
         reply = target.call(pr.RUN, struct.pack("<II", n, pr.RUN_FLAG_DEBUG if debug else 0))
-        evs, done, tms, cfs, pls, chs = pr.parse_run_reply_chest(reply)
+        evs, done, tms, cfs, pls, chs, lqs, tbs = pr.parse_run_reply_tb(reply)
         tms = sorted(tms, key=lambda r: r.t_trig)
         dbg = None
         if debug:
@@ -198,15 +215,24 @@ def session(target, iq: np.ndarray, p: pr.Params, sizes: list[int], debug: bool,
                 dbg = target.get_debug(done // (2 if p.input_stage == 2 else 1))
             else:
                 dbg = target.b.debug.copy()       # the whole capture (GET_DEBUG is limited to 1 MB)
-        out.append((evs, done, dbg, tms, cfs, pls, chs))
+        out.append((evs, done, dbg, tms, cfs, pls, chs, lqs, tbs))
         i += n
     return out
 
 
 def compare(got, exp, tone_tol_q8: int, timing: bool, control: bool = False, payload: bool = False,
-            chest: bool = False) -> list[str]:
+            chest: bool = False, lq: bool = False, tb: bool = False) -> list[str]:
     errs = []
-    for k, ((ge, gd, gdbg, gt, gc, gp, gh), (ee, ed, edbg, et, ec, ep, eh)) in enumerate(zip(got, exp)):
+    for k, ((ge, gd, gdbg, gt, gc, gp, gh, gq, gb), (ee, ed, edbg, et, ec, ep, eh, eq, eb)) in enumerate(zip(got, exp)):
+        if tb and gb != eb:
+            bad = [(g, e) for g, e in zip(gb, eb) if g != e]
+            errs.append(f"RUN {k}: transport blocks differ ({len(gb)} board, {len(eb)} model)"
+                        + (f", first: board t {bad[0][0].t_trig} w {bad[0][0].w} crc {bad[0][0].crc_ok} it "
+                           f"{bad[0][0].iters}, model crc {bad[0][1].crc_ok} it {bad[0][1].iters}" if bad else ""))
+        if lq and gq != eq:
+            bad = [(g, e) for g, e in zip(gq, eq) if g != e]
+            errs.append(f"RUN {k}: decoder-input records differ ({len(gq)} board, {len(eq)} model)"
+                        + (f", first: board {astuple(bad[0][0])} model {astuple(bad[0][1])}" if bad else ""))
         if chest and gh != eh:
             bad = [(g, e) for g, e in zip(gh, eh) if g != e]
             errs.append(f"RUN {k}: channel-estimate records differ ({len(gh)} board, {len(eh)} model)"
@@ -277,6 +303,14 @@ def main(argv=None) -> int:
     control = bool(info.flags & pr.BOARD_CF)
     payload = bool(info.flags & pr.BOARD_PAYLOAD)
     chest = bool(info.flags & pr.BOARD_CHEST)
+    lq = bool(info.flags & pr.BOARD_LQ)
+    tb = bool(info.flags & pr.BOARD_TB)
+    if lq and not tb:
+        print("Note: no LDPC decoder on this board (bitstream before 9.0 or firmware before build 16): "
+              "transport blocks not compared\n")
+    if chest and not lq:
+        print("Note: no payload demapper / combiner on this board (bitstream before 8.0 or firmware before "
+              "build 15): decoder-input records not compared\n")
     if payload and not chest:
         print("Note: no payload channel estimate on this board (bitstream before 7.0 or firmware before "
               "build 14): channel-estimate records not compared\n")
@@ -294,7 +328,7 @@ def main(argv=None) -> int:
               "timing records not compared\n")
     report, n_fail = [], 0
     print(f"{'case':22s} {'samples':>9s} {'RUNs':>4s} {'events':>6s} {'fail':>4s} {'trunc':>5s} {'timing':>11s} "
-          f"{'control':>8s} {'payload':>7s} {'chest':>5s} {'debug':>9s} {'board s':>7s}  result")
+          f"{'control':>8s} {'payload':>7s} {'chest':>5s} {'lq':>4s} {'blocks':>7s} {'debug':>9s} {'board s':>7s}  result")
     for name, desc, build, plan, debug in todo:
         try:
             iq, p = build()
@@ -314,7 +348,7 @@ def main(argv=None) -> int:
             print(f"{name:22s} communication error: {exc}")
             return 2
         exp = session(EmuTarget(), iq, p, sizes, debug, False)
-        errs = compare(got, exp, tol, timing, control, payload, chest)
+        errs = compare(got, exp, tol, timing, control, payload, chest, lq, tb)
         evs = [e for r in got for e in r[0]]
         n_tf = sum(1 for e in evs if e.status & pr.EV_TONE_FAIL)
         n_tr = sum(1 for e in evs if e.status & pr.EV_TRUNCATED)
@@ -329,15 +363,20 @@ def main(argv=None) -> int:
         pl_col = str(len(pls)) if p.input_stage in (1, 2) and p.rearm else "-"
         chs = [c for r in (got if chest else exp) for c in r[6]]
         ch_col = str(len(chs)) if p.input_stage in (1, 2) and p.rearm else "-"
+        lqs = [c for r in (got if lq else exp) for c in r[7]]
+        lq_col = str(len(lqs)) if p.input_stage in (1, 2) and p.rearm else "-"
+        tbl = [c for r in (got if tb else exp) for c in r[8]]
+        tb_col = f"{len(tbl)}/{sum(c.crc_ok for c in tbl)}" if p.input_stage in (1, 2) and p.rearm else "-"
         ok = not errs
         n_fail += not ok
-        print(f"{name:22s} {n:9d} {len(sizes):4d} {len(evs):6d} {n_tf:4d} {n_tr:5d} {tm_col:>11s} {cf_col:>8s} {pl_col:>7s} {ch_col:>5s} "
+        print(f"{name:22s} {n:9d} {len(sizes):4d} {len(evs):6d} {n_tf:4d} {n_tr:5d} {tm_col:>11s} {cf_col:>8s} {pl_col:>7s} {ch_col:>5s} {lq_col:>4s} {tb_col:>7s} "
               f"{(str(n_dbg) if debug else '-'):>9s} {t_board:7.1f}  {'PASS' if ok else 'FAIL'}")
         for e in errs[:5]:
             print(f"    {e}")
         rec = {"case": name, "description": desc, "samples": n, "runs": len(sizes), "events": len(evs),
                "tone_fail": n_tf, "truncated": n_tr, "timing_records": len(tms), "timing_good": n_good,
-               "control_records": len(cfs), "control_crc_ok": n_crc, "payload_records": len(pls), "chest_records": len(chs),
+               "control_records": len(cfs), "control_crc_ok": n_crc, "payload_records": len(pls), "chest_records": len(chs), "lq_records": len(lqs), "transport_blocks": len(tbl),
+               "transport_blocks_crc_ok": sum(c.crc_ok for c in tbl),
                "debug_records": n_dbg, "board_s": round(t_board, 2),
                "result": "PASS" if ok else "FAIL", "errors": errs[:20], "params": p.as_dict()}
         report.append(rec)

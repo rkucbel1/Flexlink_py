@@ -11,7 +11,7 @@
     "CW_Interferer": 1
   },
   "Settings": {
-    "SNR1_dB": -8,
+    "SNR1_dB": 5,
     "SNR2_dB": -12,
     "SNR3_dB": -12,
     "SNR4_dB": -12,

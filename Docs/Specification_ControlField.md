@@ -237,7 +237,8 @@ Decided (Oct 2026): CRC10 as is; the simulator got the FIR as `ControlFieldEqual
 | RTL `RTL/cf_*.v` (FFT, channel estimate, soft values, Viterbi, CRC) | done; bit-true on 11 receiver cases and 400 Viterbi cases (`SIM/run_cf.sh`), fault injection |
 | Out-of-context synthesis `HW/synth_cf.tcl` | done: WNS +0.977 ns at 100 MHz; LUT 3125 (657 as memory), FF 1854, DSP 37, BRAM tiles 15 |
 | xsim (`SIM/run_cf.sh`) | all 14 checks pass (Vivado 2025.2) |
-| Into the detector: `RTL/pd_cf.v` (own 8192-sample buffer, start queue, stall), control FIFO in `pd_axi.v` 4.0, firmware build 11, PC compare (`pd_hw_test.py`, `pd_board_regression.py`) and field decode (`PC/cf_fields.py`) | done in simulation and co-simulation; board build next |
+| Into the detector: `RTL/pd_cf.v` (own 8192-sample buffer, start queue, stall), control FIFO in `pd_axi.v` 4.0, firmware build 11, PC compare (`pd_hw_test.py`, `pd_board_regression.py`) and field decode (`PC/cf_fields.py`) | done; on the board (bitstream 4.0 / 5.0, firmware builds 11, 12), regression all pass |
+| Faster FFT `RTL/pd_fft2.v` (two butterflies per clock, 2640 instead of 5200 clocks per symbol, same results; `SIM/tb_fft2.v`), shared with the speculative payload FFT (`Specification_PayloadInput.md` §5) | bitstream 6.0, firmware build 13: simulation and co-simulation pass; the control record comes ~8000 clocks sooner |
 
 ## 6. Verification plan (as for the detector)
 

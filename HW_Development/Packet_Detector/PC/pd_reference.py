@@ -144,6 +144,9 @@ class Result:
     #                                               only with p.rearm)
     chest: list = field(default_factory=list)     # channel-estimate records (pl_reference.chest_records,
     #                                               PayloadRecord layout; only with p.rearm)
+    lq: list = field(default_factory=list)        # decoder-input records (pl_reference.lq_records,
+    #                                               PayloadRecord layout, sym = code word; p.rearm)
+    tb: list = field(default_factory=list)        # transport blocks (pl_reference.tb_records; p.rearm)
 
 
 # --------------------------------------------------------------------------------------- #
@@ -644,6 +647,8 @@ def detect(iq: np.ndarray, p: Params, debug: bool = False, control: bool = True)
                 res.payload = cf_reference.payload_records(y, events, res.timing, res.control)
                 import pl_reference
                 res.chest = pl_reference.chest_records(y, events, res.timing, res.control)
+                res.lq = pl_reference.lq_records(y, events, res.timing, res.control)
+                res.tb = pl_reference.tb_records(y, events, res.timing, res.control)
     if debug:
         with np.errstate(divide="ignore", invalid="ignore"):
             met = np.where(den > 0, num // np.maximum(den, 1), 0)

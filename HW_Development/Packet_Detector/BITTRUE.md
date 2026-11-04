@@ -212,6 +212,25 @@ table are new.
     there are fewer than two reference rows), and NoOfTxAntenna must be 1. Such packets are
     now rejected and re-armed at once.
 
+15. **Payload demapper and combiner in the PL, and their records** (`pl_reference.combine`,
+    `lq_records`; RTL `pl_demap.v`, `pl_comb.v`, `pl_soft_roms.v`; bitstream 8.0, firmware
+    build 15). Steps 8–11 of change 13 run on the board: LLRs per Data RE (the min over a level
+    set is the level nearest to the parabola's vertex, picked by threshold compares A z < j e:
+    exact), the per-packet scale (m, sh) by a sequential search and division, descrambling,
+    copy sums and the de-interleaved decoder input Lq. Per code word the RUN reply gets one record
+    (sym = code word w; sig_a / sig_b = grid_signature of the N values Lq in code order). A code
+    word is reported once the H of every symbol it uses is out (as change 14), at most NDB_A.
+    The model only gained `combine` (steps 9–11 split out of `decode_soft`, unchanged).
+
+16. **LDPC decoder and CRC in the PL: transport blocks on the board** (`pl_reference.tb_records`;
+    RTL `pl_dec.v` with `pl_ldpc_core.v`; bitstream 9.0, firmware build 16). Steps 12 and 13 of
+    change 13 run on the board, the core of step 12a fed by the combiner of change 15. Per code
+    word of an accepted packet the RUN reply gets the transport block (the first K − 24
+    decoded bits), crc_ok (the CRC24 of the first K bits is 0, the same as comparing with the
+    last 24) and the number of iterations, all exact against the model; the code words reported
+    are those of change 15. `pd_make_vector`-style vectors with other modulations come from
+    `SIM/make_tb_vectors.mods_vector` (rep3's packets replaced by `pl_check` packets).
+
 ## Verification
 
 ### Word-length sweeps (each block against its floating-point version)
