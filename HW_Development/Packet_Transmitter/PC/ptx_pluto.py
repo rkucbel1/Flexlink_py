@@ -57,8 +57,10 @@ sys.path.insert(0, str(PD_PC))
 import ptx_reference as R  # noqa: E402
 
 FS = 40_000_000
-DAC_GPIO_OUT = 0x40BC         # cf-ad9361-dds-core-lpc: DAC GPIO out (bit 4: Flexlink enable)
-DAC_GPIO_IN = 0x40B8          # status (RTL/ptx_pluto.v)
+# axi_ad9361 DAC GPIO registers (0x40BC / 0x40B8 in the core's map). cf-ad9361-dds-core-lpc counts
+# register offsets from the TX (DAC) part, which starts at 0x4000.
+DAC_GPIO_OUT = 0x00BC         # DAC GPIO out (bit 4: Flexlink enable)
+DAC_GPIO_IN = 0x00B8          # status (RTL/ptx_pluto.v)
 PTX_ENABLE = 1 << 4
 
 

@@ -1,0 +1,27 @@
+{
+  "Pluto": {
+    "Address": "192.168.2.1",
+    "Address_comment": "IP address of the Pluto (USB network: 192.168.2.1)",
+    "ServerPort": 5010,
+    "ServerPort_comment": "TCP port of FW/ptx_server on the Pluto",
+    "TxLO_MHz": 2400.0,
+    "TxLO_MHz_comment": "carrier, MHz (AD9363 data sheet 325 to 3800; most Plutos tune 70 to 6000)",
+    "TxGain_dB": -10.0,
+    "TxGain_dB_comment": "Tx attenuation as a gain, -89.75 to 0 dB",
+    "RfBandwidth_MHz": 18.0,
+    "RfBandwidth_MHz_comment": "analog RF bandwidth, MHz (the signal occupies 16.4 MHz)",
+    "Gap": 20000,
+    "Gap_comment": "idle samples after every packet (rounded up to 16, at most 1048560)",
+    "Mode": "Random",
+    "Mode_comment": "Random (continuous random packets) or File",
+    "File": "",
+    "FileRepeat": 1,
+    "FileRepeat_comment": "times the file is sent; 0 = until Stop",
+    "Loopback": 1,
+    "Loopback_comment": "1: one random packet looped TX1 -> RX1 on the same Pluto and decoded",
+    "RxGain_dB": 30.0,
+    "RxGain_dB_comment": "loopback only: manual Rx gain, dB",
+    "CaptureSamples": 1048576,
+    "CaptureSamples_comment": "loopback only: samples captured at 40 Msps"
+  }
+}

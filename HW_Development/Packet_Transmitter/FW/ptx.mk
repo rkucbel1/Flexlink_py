@@ -31,7 +31,7 @@ ptx_server: ptx_server.c ptx_params.c ptx_params.h
 	$(CROSS)gcc $(CFLAGS) --sysroot=$(SYSROOT) -o $@ ptx_server.c ptx_params.c -liio -lpthread -lm
 
 deploy: ptx_server
-	cat ptx_server | ssh root@$(PLUTO) 'cat > /tmp/ptx_server && chmod +x /tmp/ptx_server'
+	cat ptx_server | ssh root@$(PLUTO) 'cat > /tmp/ptx_server.new && chmod +x /tmp/ptx_server.new && mv -f /tmp/ptx_server.new /tmp/ptx_server'
 
 run:
 	ssh root@$(PLUTO) 'killall ptx_server 2>/dev/null; nohup /tmp/ptx_server > /tmp/ptx_server.log 2>&1 &'
