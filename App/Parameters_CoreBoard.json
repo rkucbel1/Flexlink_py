@@ -1,0 +1,26 @@
+{
+  "CoreBoard": {
+    "Frequency_MHz": 2440,
+    "Address": "10.42.0.133",
+    "Address_comment": "IP address of the CoreBoard (DHCP; printed on its UART log and shown on http://<board>/)",
+    "HttpPort": 80,
+    "HttpPort_comment": "HTTP port of the streaming firmware",
+    "Frequency_MHz_comment": "receive carrier, whole MHz, 2150 to 2800 (match TxLO_MHz of the Pluto)",
+    "SampleRate": 40000000,
+    "SampleRate_comment": "40000000 for Flexlink (40 Msps needs Gigabit Ethernet); 4/8/16/20 Msps also exist",
+    "AGC": 0,
+    "AGC_comment": "1: the chip's Wi-Fi AGC; 0: fixed Gain (recommended, the AGC is tuned for Wi-Fi preambles)",
+    "Gain": 40,
+    "Gain_comment": "manual gain: PHY gain-table index (not dB), 0 to gain_max (reported by the board)",
+    "Bandwidth_MHz": 0,
+    "Bandwidth_MHz_comment": "analog filter, 13 to 54 MHz; 0 = follow the sample rate",
+    "DC_Correction": 1,
+    "DC_Correction_comment": "1: the firmware removes the residual DC offset (manual gain only)",
+    "CaptureSeconds": 8.0,
+    "CaptureSeconds_comment": "seconds recorded (start the transmitter in the first second or two)",
+    "UdpPort": 0,
+    "UdpPort_comment": "UDP port on this PC for the samples; 0 = any free port",
+    "SocketBuffer_MB": 256,
+    "SocketBuffer_MB_comment": "UDP receive buffer asked for (Linux caps it at net.core.rmem_max)"
+  }
+}

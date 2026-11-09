@@ -355,7 +355,8 @@ def connect(pl: dict, cfg: R.TxConfig) -> tuple[ptx_client.PtxClient, dict]:
         c = ptx_client.PtxClient(pl["Address"], int(pl["ServerPort"]))
     except OSError as e:
         raise RuntimeError(f"no transmitter server at {pl['Address']}:{pl['ServerPort']} ({e}). Is "
-                           f"ptx_server running on the Pluto (FW: make -f ptx.mk deploy run)?") from e
+                           f"ptx_server running on the Pluto? After a power cycle start it with: "
+                           f"bash HW_Development/Packet_Transmitter/FW/pluto_start.sh") from e
     try:
         rep = c.set_defined(cfg.defined(), cfg.cf_defined(), int(pl["Gap"]), radio=radio_settings(pl))
         diff = ptx_client.check_reply(rep, cfg)

@@ -25,6 +25,26 @@ Rx/Received_Files/
 App/FileTransfer_Workers/
 App/Test_Files_For_Transfer/
 
+# CoreBoard (ESP32-S31) captures and processing outputs, recreated by
+# FlexlinkCaptureWithCoreBoard.py / FlexlinkProcessCoreBoardCapturedWaveform.py.
+# Captures are hundreds of MB (GitHub refuses files over 100 MB); one 8 MB segment is kept
+# as a known-good test signal for the emulator and the processing script.
+App/CoreBoard/*.cs8
+!App/CoreBoard/Segment_newfw_3820ms.cs8
+App/CoreBoard/*.zip
+App/CoreBoard/EmuSource.json
+App/CoreBoard/CoreBoard_Capture.json
+App/CoreBoard/CoreBoard_Packet_Rx.h5
+App/CoreBoard/CoreBoard_Packets.csv
+App/CoreBoard/CoreBoard_Results.txt
+App/CoreBoard/Channel_Defects_Off.json
+App/CoreBoard/All_*.txt
+App/CoreBoard/FileTransfer_State/
+App/CoreBoard/Received_Files/
+
+# Pluto loopback outputs (FlexlinkTxWithPluto.py)
+App/Pluto/
+
 # Editors and operating systems
 .vscode/
 .idea/
