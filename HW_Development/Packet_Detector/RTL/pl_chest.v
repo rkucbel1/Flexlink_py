@@ -41,6 +41,7 @@ module pl_chest (
     input  wire signed [17:0] pg_re,
     input  wire signed [17:0] pg_im,
     input  wire               pl_dec,
+    input  wire               pl_job,      // cf_rx starts the next control field (pd_cf cf_start)
     input  wire               pl_ok,
     input  wire [53:0]        pl_msg,
     input  wire [31:0]        pl_t,
@@ -106,34 +107,73 @@ module pl_chest (
     wire        new_pkt = pg_valid && pg_sym == 7'd0 && pg_col == 10'd0;
     wire [1:0]  q_wi = q_pop ? q_n - 2'd1 : q_n;
 
+    // Decision and first bin can come in either order. Normally symbol 0's bins come first (the
+    // FFT carries on while the control field is decoded), but when the sample input pauses right
+    // after the control field (streaming: the receiver has caught up with the stream) the decision
+    // comes before symbol 0 is complete. Then w_base still points at the previous packet: queuing
+    // it would make the engine run this packet on the previous packet's slots and leave its own
+    // symbols unprocessed - their slots never free, room stays 0, and cf_rx, pd_cf and the sample
+    // input wait for ever (deadlock found with SIM BURST / BURSTGAP on a CoreBoard vector).
+    //   w_cur  the packet whose first bin came is not decided yet (normal order)
+    //   e_ok   decided (good) before its first bin: queued when that bin comes, at that position
+    // A rejection before the first bin drops nothing now (no bins yet; the old code rewound
+    // wr_ptr to the previous packet's base) but marks e_rej: a symbol still in the FFT comes out
+    // afterwards, before cf_rx starts the next control field (pl_job), and is dropped.
+    //   e_rej  rejected before its first bin; until pl_job, a first bin is that packet's: drop
+    reg         w_cur, e_ok, e_rej;
+    reg  [53:0] e_msg;
+    reg  [31:0] e_t;
+    wire        nb      = new_pkt && !e_rej;                   // first bin of a real packet
+    wire        d_cur   = pl_dec && (w_cur || nb);             // decision of the packet in the ring
+    wire        d_early = pl_dec && !w_cur && !nb;             // decision before its first bin
+    wire [7:0]  d_base  = new_pkt ? wr_ptr : w_base;           // that packet's first slot
+    wire        push_c  = d_cur && pl_ok;                      // queue it now
+    wire        push_e  = new_pkt && e_ok;                     // queue the early decision now
+    wire        ghost   = new_pkt && e_rej;                    // bins of a packet rejected early
+    wire        push    = push_c || push_e;
+
     always @(posedge clk) begin
         g_we_q <= 1'b0;
         if (!rst_n) begin
             wr_ptr <= 8'd0; w_base <= 8'd0; w_drop <= 1'b0; w_on <= 1'b0; q_n <= 2'd0; err <= 1'b0;
+            w_cur <= 1'b0; e_ok <= 1'b0; e_rej <= 1'b0;
         end else begin
             // a packet's first bin starts it at the current write position
-            g_we_q <= pg_valid && (new_pkt || (w_on && !w_drop));
+            g_we_q <= pg_valid && ((new_pkt && !ghost) || (w_on && !w_drop && !new_pkt));
             g_waddr_q <= new_pkt ? {wr_ptr[3:0], 10'd0} : g_waddr;
             g_wd_q <= {pg_re, pg_im};
-            if (new_pkt) begin
+            if (pl_job) e_rej <= 1'b0;
+            if (ghost) begin                   // drop: no slot, no descriptor
+                w_base <= wr_ptr; w_drop <= 1'b1; w_on <= 1'b1; w_cur <= 1'b0; e_rej <= 1'b0;
+            end else if (new_pkt) begin
                 w_base <= wr_ptr; w_drop <= 1'b0; w_on <= 1'b1;
+                w_cur <= !e_ok;                // an early decision applies to it at once
+                e_ok <= 1'b0;
             end else if (pg_valid && w_on && !w_drop && pg_col == 10'd840)
                 wr_ptr <= w_slot + 8'd1;
-            if (pl_dec) begin
-                if (pl_ok) begin
-                    if (q_n == 2'd2 && !q_pop) err <= 1'b1;
-                    else begin
-                        q_base[q_wi] <= w_base; q_msg[q_wi] <= pl_msg; q_t[q_wi] <= pl_t;
-                    end
-                end else begin
+            if (d_cur) begin
+                w_cur <= 1'b0;
+                if (!pl_ok) begin
                     w_drop <= 1'b1;
-                    wr_ptr <= w_base;
+                    wr_ptr <= d_base;
                 end
             end
-            if (q_pop && !(pl_dec && pl_ok && q_wi == 2'd0)) begin
+            if (d_early && pl_ok) begin
+                e_ok <= 1'b1; e_msg <= pl_msg; e_t <= pl_t;
+            end
+            if (d_early && !pl_ok) e_rej <= 1'b1;
+            if (push) begin
+                if (q_n == 2'd2 && !q_pop) err <= 1'b1;
+                else begin
+                    q_base[q_wi] <= d_base;
+                    q_msg[q_wi] <= push_e ? e_msg : pl_msg;
+                    q_t[q_wi] <= push_e ? e_t : pl_t;
+                end
+            end
+            if (q_pop && !(push && q_wi == 2'd0)) begin
                 q_base[0] <= q_base[1]; q_msg[0] <= q_msg[1]; q_t[0] <= q_t[1];
             end
-            q_n <= q_n + ((pl_dec && pl_ok && !(q_n == 2'd2 && !q_pop)) ? 2'd1 : 2'd0) - (q_pop ? 2'd1 : 2'd0);
+            q_n <= q_n + ((push && !(q_n == 2'd2 && !q_pop)) ? 2'd1 : 2'd0) - (q_pop ? 2'd1 : 2'd0);
         end
     end
 

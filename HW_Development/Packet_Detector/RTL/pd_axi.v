@@ -2,7 +2,9 @@
 //
 // AXI wrapper of the packet detector for the Zedboard block design (replaces the phase-1
 // loopback FIFO "pl_core"):
-//   S_AXIS  samples from the AXI DMA MM2S (one complex sample per beat, I [15:0], Q [31:16])
+//   S_AXIS  samples from the AXI DMA MM2S (one complex sample per beat, I [15:0], Q [31:16];
+//           with CTRL.PACK8 two 8-bit samples per beat, {Q1, I1, Q0, I0}, unpacked to that
+//           format by pd_unpack8.v)
 //   M_AXIS  debug records to the AXI DMA S2MM, one per detector sample (20 Msps; with input
 //           stage 2 one per input pair): {dbg_bits, dbg_metric}; TLAST on the record of each
 //           input beat that had TLAST, so every S2MM transfer ends with its MM2S transfer
@@ -10,7 +12,8 @@
 //   S_AXI   AXI4-Lite registers: control, status, parameters, event, timing and control FIFOs
 //
 // Register map (byte offsets; RW = read/write, RO = read only):
-//   0x00 ID          RO  0x50440900 ("PD", version 9.0: LDPC decoder, CRC24 and the transport-
+//   0x00 ID          RO  0x50440902 ("PD", version 9.2: CTRL.NOREC; 9.1: CTRL.PACK8, the int8 input unpacker;
+//                        9.0: LDPC decoder, CRC24 and the transport-
 //                        block FIFO; 8.0 had no TB FIFO; 8.0 added the payload demapper and
 //                        combiner, decoder-input records; 7.0 had no LQ records; 7.0 added the payload channel
 //                        estimate and its H records; 6.0 had no CH records, its control-field check accepted
@@ -20,6 +23,12 @@
 //   0x04 CTRL        RW  bit0 RESET (1 = detector held in reset; 1 after power-up)
 //                        bit1 DEBUG (send debug records on M_AXIS; change only when not BUSY)
 //                        bit2 LOOPBACK (S_AXIS -> M_AXIS unchanged, detector not fed)
+//                        bit3 PACK8 (9.1: S_AXIS carries two int8 samples per word, unpacked to
+//                        one 12-bit sample per beat (x16) before the detector and the loopback;
+//                        change only between transfers)
+//                        bit4 NOREC (9.2: payload, channel-estimate and decoder-input records
+//                        are removed from their FIFOs in the PL as they arrive, so the firmware
+//                        need not read them; set it only with those FIFOs empty, after RESET)
 //   0x08 STATUS      RO  bit0 BUSY (samples, CFO or tone results, events or debug records in
 //                        flight), bit1 OPEN (a window still waits for samples), bits 7:4 number
 //                        of open windows, bit8 EV_OVF (event lost; sticky until RESET),
@@ -170,7 +179,7 @@ module pd_axi (
     (* X_INTERFACE_INFO = "xilinx.com:interface:axis:1.0 M_AXIS TREADY" *)
     input  wire        m_axis_tready
 );
-    localparam [31:0] ID = 32'h5044_0900;     // "PD", version 9.0 (9.0: LDPC decoder, 8.0: demapper / combiner, 7.0: channel estimate, 6.0: payload FFT, 5.0: re-arm, 4.0: control field)
+    localparam [31:0] ID = 32'h5044_0902;     // "PD", version 9.2 (9.2: NOREC, 9.1: PACK8 unpacker), 9.0 (9.0: LDPC decoder, 8.0: demapper / combiner, 7.0: channel estimate, 6.0: payload FFT, 5.0: re-arm, 4.0: control field)
     localparam integer CF_DEPTH = 8;             // control records
     localparam integer CF_LIMIT = CF_DEPTH - 2;  // hold the input above this
     localparam integer TM_DEPTH = 32;            // timing records
@@ -181,7 +190,7 @@ module pd_axi (
     localparam integer DBG_LIMIT = (1 << DBG_BITS) - 4;
 
     // ------------------------------------------------------------------ registers
-    reg        ctrl_reset, ctrl_debug, ctrl_loop;
+    reg        ctrl_reset, ctrl_debug, ctrl_loop, ctrl_pack, ctrl_norec;
     reg [15:0] r_eta_hi, r_eta_lo, r_qual, r_ncfo;
     reg [31:0] r_blank, r_hold;
     reg [1:0]  r_stage;
@@ -189,6 +198,16 @@ module pd_axi (
     reg [23:0] r_lin;
     reg [15:0] r_tpk;
     reg        r_rearm;
+
+    // ------------------------------------------------------------------ input unpacker
+    // CTRL.PACK8 (9.1): S_AXIS words of two int8 samples -> one 12-bit sample per beat. With
+    // PACK8 = 0 a wire. Everything below uses the u_* stream.
+    wire [31:0] u_tdata;
+    wire        u_tvalid, u_tlast, u_tready;
+    pd_unpack8 u_unpack (
+        .clk(aclk), .rst_n(aresetn), .en(ctrl_pack),
+        .s_tdata(s_axis_tdata), .s_tvalid(s_axis_tvalid), .s_tlast(s_axis_tlast), .s_tready(s_axis_tready),
+        .m_tdata(u_tdata), .m_tvalid(u_tvalid), .m_tlast(u_tlast), .m_tready(u_tready));
 
     // detector reset: registered, from the bus reset and CTRL.RESET
     reg det_rst_n;
@@ -226,7 +245,7 @@ module pd_axi (
     wire [31:0]  det_tb_word;
     reg          tb_rd_pulse;
     reg         gate;                             // input allowed (registered)
-    wire        det_tvalid = s_axis_tvalid && gate;
+    wire        det_tvalid = u_tvalid && gate;
     wire        accept     = det_tvalid && det_tready;
 
     pd_detect_top u_det (
@@ -235,7 +254,7 @@ module pd_axi (
         .eta_hi_sq(r_eta_hi), .eta_lo_sq(r_eta_lo), .qual_len(r_qual),
         .blank_len(r_blank), .arm_holdoff(r_hold), .n_cfo(r_ncfo), .tone_lin(r_lin), .t_pk(r_tpk),
         .rearm(r_rearm),
-        .s_iq_tvalid(det_tvalid), .s_iq_tdata(s_axis_tdata), .s_iq_tready(det_tready),
+        .s_iq_tvalid(det_tvalid), .s_iq_tdata(u_tdata), .s_iq_tready(det_tready),
         .lpf_valid(), .lpf_i(), .lpf_q(), .trig(), .t_trig(),
         .dbg_valid(det_dbg_valid), .dbg_metric(det_dbg_metric), .dbg_bits(det_dbg_bits),
         .cfo_valid(), .cfo_t(), .cfo_inc(), .ang16(), .ang32(), .ang128(), .ang256(),
@@ -366,7 +385,13 @@ module pd_axi (
     // the FIFO is in pd_cf; PL_DATA reads its head word by word and the 4th word removes it
     reg  [1:0]   pl_w;
     reg          pl_rd_pulse;
-    assign       pl_last = pl_rd_pulse && (pl_w == 2'd3);
+    // 9.2 NOREC: drop the head record, every other clock (the count has settled by then)
+    reg          pl_auto;
+    always @(posedge aclk) begin
+        if (!det_rst_n) pl_auto <= 1'b0;
+        else pl_auto <= ctrl_norec && (det_pl_cnt != 0) && (pl_w == 2'd0) && !pl_auto && !pl_rd_pulse;
+    end
+    assign       pl_last = (pl_rd_pulse && (pl_w == 2'd3)) || pl_auto;
     always @(posedge aclk) begin
         if (!det_rst_n) pl_w <= 2'd0;
         else if (pl_rd_pulse) pl_w <= pl_w + 2'd1;
@@ -377,7 +402,13 @@ module pd_axi (
     // ------------------------------------------------------------------ channel-estimate records
     reg  [1:0]   ch_w;
     reg          ch_rd_pulse;
-    assign       ch_last = ch_rd_pulse && (ch_w == 2'd3);
+    // 9.2 NOREC: drop the head record, every other clock (the count has settled by then)
+    reg          ch_auto;
+    always @(posedge aclk) begin
+        if (!det_rst_n) ch_auto <= 1'b0;
+        else ch_auto <= ctrl_norec && (det_ch_cnt != 0) && (ch_w == 2'd0) && !ch_auto && !ch_rd_pulse;
+    end
+    assign       ch_last = (ch_rd_pulse && (ch_w == 2'd3)) || ch_auto;
     always @(posedge aclk) begin
         if (!det_rst_n) ch_w <= 2'd0;
         else if (ch_rd_pulse) ch_w <= ch_w + 2'd1;
@@ -388,7 +419,13 @@ module pd_axi (
     // ------------------------------------------------------------------ decoder-input records
     reg  [1:0]   lq_w;
     reg          lq_rd_pulse;
-    assign       lq_last = lq_rd_pulse && (lq_w == 2'd3);
+    // 9.2 NOREC: drop the head record, every other clock (the count has settled by then)
+    reg          lq_auto;
+    always @(posedge aclk) begin
+        if (!det_rst_n) lq_auto <= 1'b0;
+        else lq_auto <= ctrl_norec && (det_lq_cnt != 0) && (lq_w == 2'd0) && !lq_auto && !lq_rd_pulse;
+    end
+    assign       lq_last = (lq_rd_pulse && (lq_w == 2'd3)) || lq_auto;
     always @(posedge aclk) begin
         if (!det_rst_n) lq_w <= 2'd0;
         else if (lq_rd_pulse) lq_w <= lq_w + 2'd1;
@@ -426,10 +463,10 @@ module pd_axi (
             dbg_cnt <= dbg_cnt + {{DBG_BITS{1'b0}}, dbg_push} - {{DBG_BITS{1'b0}}, dbg_pop};
             res     <= res + {7'd0, rec_due} - {7'd0, dbg_pop} - {7'd0, dbg_drop};
             if (det_dbg_valid) rec_n <= rec_n + 32'd1;
-            if (rec_due && s_axis_tlast && ctrl_debug) begin
+            if (rec_due && u_tlast && ctrl_debug) begin
                 tl[tl_wr] <= rec_of_beat; tl_wr <= tl_wr + 2'd1;
             end
-            tl_n <= tl_n + {2'd0, rec_due && s_axis_tlast && ctrl_debug} - {2'd0, det_dbg_valid && tl_hit};
+            tl_n <= tl_n + {2'd0, rec_due && u_tlast && ctrl_debug} - {2'd0, det_dbg_valid && tl_hit};
             if (det_dbg_valid && tl_hit) tl_rd <= tl_rd + 2'd1;
         end
     end
@@ -443,10 +480,10 @@ module pd_axi (
     end
 
     // ------------------------------------------------------------------ streams
-    assign s_axis_tready = ctrl_loop ? m_axis_tready : (gate && det_tready);
-    assign m_axis_tvalid = ctrl_loop ? s_axis_tvalid : (dbg_cnt != 0);
-    assign m_axis_tdata  = ctrl_loop ? s_axis_tdata  : dbg_head[31:0];
-    assign m_axis_tlast  = ctrl_loop ? s_axis_tlast  : dbg_head[32];
+    assign u_tready = ctrl_loop ? m_axis_tready : (gate && det_tready);
+    assign m_axis_tvalid = ctrl_loop ? u_tvalid : (dbg_cnt != 0);
+    assign m_axis_tdata  = ctrl_loop ? u_tdata  : dbg_head[31:0];
+    assign m_axis_tlast  = ctrl_loop ? u_tlast  : dbg_head[32];
     assign m_axis_tkeep  = 4'hF;
 
     // ------------------------------------------------------------------ AXI4-Lite
@@ -467,7 +504,7 @@ module pd_axi (
     always @(posedge aclk) begin
         if (!aresetn) begin
             awready_r <= 1'b0; wready_r <= 1'b0; s_axi_bvalid <= 1'b0;
-            ctrl_reset <= 1'b1; ctrl_debug <= 1'b0; ctrl_loop <= 1'b0;
+            ctrl_reset <= 1'b1; ctrl_debug <= 1'b0; ctrl_loop <= 1'b0; ctrl_pack <= 1'b0; ctrl_norec <= 1'b0;
             r_eta_hi <= 16'd8028; r_eta_lo <= 16'd2621; r_qual <= 16'd128; r_ncfo <= 16'd2048;
             r_blank <= 32'd288; r_hold <= 32'd131072; r_stage <= 2'd0; r_shift <= 4'd10;
             r_lin <= 24'd1307615; r_tpk <= 16'd4608; r_rearm <= 1'b1;
@@ -480,7 +517,8 @@ module pd_axi (
                 wready_r  <= 1'b1;
                 case (s_axi_awaddr[7:2])
                     6'h01: begin ctrl_reset <= s_axi_wdata[0]; ctrl_debug <= s_axi_wdata[1];
-                                 ctrl_loop <= s_axi_wdata[2]; end
+                                 ctrl_loop <= s_axi_wdata[2]; ctrl_pack <= s_axi_wdata[3];
+                                 ctrl_norec <= s_axi_wdata[4]; end
                     6'h08: r_eta_hi <= s_axi_wdata[15:0];
                     6'h09: r_eta_lo <= s_axi_wdata[15:0];
                     6'h0A: r_qual   <= s_axi_wdata[15:0];
@@ -516,7 +554,7 @@ module pd_axi (
                 arready_r <= 1'b1;
                 case (s_axi_araddr[7:2])
                     6'h00: s_axi_rdata <= ID;
-                    6'h01: s_axi_rdata <= {29'd0, ctrl_loop, ctrl_debug, ctrl_reset};
+                    6'h01: s_axi_rdata <= {27'd0, ctrl_norec, ctrl_pack, ctrl_loop, ctrl_debug, ctrl_reset};
                     6'h02: s_axi_rdata <= status;
                     6'h03: s_axi_rdata <= samp_cnt;
                     6'h04: s_axi_rdata <= det_open_t;

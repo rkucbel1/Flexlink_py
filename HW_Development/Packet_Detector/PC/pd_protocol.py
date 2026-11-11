@@ -90,10 +90,39 @@ PING, RESET, SET_PARAMS, LOAD_SAMPLES, READ_SAMPLES, RUN, GET_DEBUG = 1, 2, 3, 4
 CMD_NAMES = {PING: "PING", RESET: "RESET", SET_PARAMS: "SET_PARAMS", LOAD_SAMPLES: "LOAD_SAMPLES",
              READ_SAMPLES: "READ_SAMPLES", RUN: "RUN", GET_DEBUG: "GET_DEBUG"}
 
+# CoreBoard UDP stream test (firmware build 17, PC/pd_udp_test.py)
+UDP_START, UDP_STATS, UDP_STOP, GEM_STATS = 14, 15, 16, 17
+CMD_NAMES.update({UDP_START: "UDP_START", UDP_STATS: "UDP_STATS", UDP_STOP: "UDP_STOP", GEM_STATS: "GEM_STATS"})
+# Streaming receiver (firmware build 25, bitstream 9.1, PC/pd_stream_test.py)
+STREAM_START, POLL_RESULTS, STREAM_STOP = 18, 19, 20
+CMD_NAMES.update({STREAM_START: "STREAM_START", POLL_RESULTS: "POLL_RESULTS", STREAM_STOP: "STREAM_STOP"})
+STREAM_KEEP_PL = 0x1                   # STREAM_START flag: also return payload / channel / decoder-input records
+STREAM_LOST_NAMES = {0x1: "events", 0x2: "timing", 0x4: "control", 0x8: "payload", 0x10: "channel estimate",
+                     0x20: "decoder input", 0x40: "transport blocks"}
+HTTP_STATES = {0: "none", 1: "connecting", 2: "sent", 3: "answered", 4: "failed"}
+# GEM_STATS reply (firmware build 18): the Zynq GEM statistics registers 0x100..0x1B0, summed
+# since UDP_START (UG585, gem.* registers)
+GEM_STAT_NAMES = [
+    "octets_tx_lo", "octets_tx_hi", "frames_tx", "broadcast_tx", "multicast_tx", "pause_tx",
+    "tx_64", "tx_65_127", "tx_128_255", "tx_256_511", "tx_512_1023", "tx_1024_1518", "(0x130)",
+    "tx_underruns", "single_collisions", "multi_collisions", "excess_collisions", "late_collisions",
+    "deferred_tx", "carrier_sense_errors", "octets_rx_lo", "octets_rx_hi", "frames_rx",
+    "broadcast_rx", "multicast_rx", "pause_rx", "rx_64", "rx_65_127", "rx_128_255", "rx_256_511",
+    "rx_512_1023", "rx_1024_1518", "(0x180)", "undersize_rx", "oversize_rx", "jabbers_rx",
+    "fcs_errors", "length_field_errors", "symbol_errors", "alignment_errors", "rx_resource_errors",
+    "rx_overruns", "ip_checksum_errors", "tcp_checksum_errors", "udp_checksum_errors"]
+GEM_ERROR_NAMES = {"undersize_rx", "oversize_rx", "jabbers_rx", "fcs_errors", "length_field_errors",
+                   "symbol_errors", "alignment_errors", "rx_resource_errors", "rx_overruns",
+                   "ip_checksum_errors", "tcp_checksum_errors", "udp_checksum_errors"}
+UDP_DEFAULT_PORT = 4000
+
 # Reply status codes
 ST_OK, ST_BAD_CMD, ST_BAD_ARG, ST_NO_SPACE, ST_NO_DEBUG, ST_INTERNAL = 0, 1, 2, 3, 4, 5
 
 RUN_FLAG_DEBUG = 0x1
+RUN_FLAG_PACK8 = 0x4                   # build 24: the sample buffer holds packed int8 samples, two per
+#                                        word ({Q1, I1, Q0, I0}); RUN count in samples (even); the
+#                                        PL unpacks them (bitstream 9.1, pd_unpack8.v)
 RUN_FLAG_PL_LOOPBACK = 0x2             # stream the samples through the PL unchanged into the debug
 #                                        buffer (no detector); GET_DEBUG then returns the samples
 
@@ -117,6 +146,8 @@ CH_PKT = 0x8000                        # PayloadRecord.sym of a channel-estimate
 BOARD_LQ = 0x80                        # bitstream has the demapper and combiner (ID 8.0, firmware
 #                                        build 15): decoder-input records after the channel-estimate
 #                                        records (only with Params.rearm)
+BOARD_PACK8 = 0x200                    # bitstream has the int8 unpacker (ID 9.1, firmware build 24)
+BOARD_NOREC = 0x400                    # bitstream can discard the debug records (ID 9.2, firmware build 31)
 BOARD_TB = 0x100                       # bitstream has the LDPC decoder (ID 9.0, firmware build 16):
 #                                        transport blocks after the decoder-input records (rearm)
 
@@ -226,6 +257,116 @@ class BoardInfo:
     @classmethod
     def unpack(cls, b: bytes) -> "BoardInfo":
         return cls(*cls.FMT.unpack(b[:cls.FMT.size]))
+
+
+@dataclass
+class UdpStats:
+    """UDP_STATS / UDP_STOP reply (firmware build 17): the board's count of the ESR2 stream."""
+    running: int
+    mode: int                          # 0 count; 1..3 convert (cached / non-cacheable / cached + flush)
+    port: int
+    elapsed_ms: int                    # since UDP_START
+    active_ms: int                     # first to last datagram of the stream
+    datagrams: int                     # good ESR2 datagrams
+    bad_size: int
+    bad_magic: int
+    epoch: int
+    epochs: int                        # stream (re)starts seen
+    lost: int                          # missing by sample position (net of late arrivals)
+    late: int                          # arrived after a later one
+    duplicates: int
+    gem_frames: int                    # GEM: frames received (all traffic)
+    gem_no_buffer: int                 # GEM: frames dropped, no receive buffer (software too slow)
+    gem_overrun: int                   # GEM: frames dropped, receive overrun (memory too slow)
+    busy_ms: int                       # time in the UDP receive callback
+    loops: int                         # main-loop iterations since UDP_START (idle indicator)
+    first_pos: int
+    last_pos: int
+    skipped: int = 0                   # build 21: conversions skipped by the overload guard
+    pool_empty: int = 0                # build 22: lwIP driver found the pbuf pool empty (frame lost)
+
+    FMT = struct.Struct("<18IQQ")
+
+    @classmethod
+    def unpack(cls, b: bytes) -> "UdpStats":
+        n = cls.FMT.size
+        extra = [struct.unpack_from("<I", b, n + 4 * i)[0] if len(b) >= n + 4 * (i + 1) else 0 for i in range(2)]
+        return cls(*cls.FMT.unpack(b[:n]), *extra)
+
+
+@dataclass
+class StreamStats:
+    """Head of the POLL_RESULTS / STREAM_STOP reply (firmware build 25); then the records since
+    the last poll in the RUN reply format (parse_run_reply_tb)."""
+    size: int                          # bytes of this block (records follow)
+    running: int
+    elapsed_ms: int                    # since STREAM_START
+    datagrams: int                     # stored in the ring
+    lost: int                          # zero-filled slots (datagrams that never came)
+    late_fixed: int                    # late datagrams put into their slot in time
+    too_late: int                      # late datagrams whose slot had been fed already
+    ring_full: int                     # datagrams dropped: ring full (receiver slower than the stream)
+    resyncs: int                       # stream jumps (big gap, ring full, CoreBoard restart)
+    ring_level: int                    # datagrams waiting for the DMA
+    ring_max: int
+    dma_chunks: int
+    dma_errors: int
+    det_status: int                    # receiver STATUS register (sticky error bits)
+    pool_empty: int                    # lwIP pbuf pool empty in the receive interrupt (frames lost)
+    gem_no_buffer: int
+    gem_overrun: int
+    lost_mask: int                     # record buffers that overflowed since the last poll (STREAM_LOST_NAMES)
+    epoch: int
+    det_samples: int                   # samples the receiver took (40 Msps, 32 bits)
+    fed_samples: int                   # samples the DMA fed (u64)
+    http_state: int                    # HTTP request to the CoreBoard (HTTP_STATES)
+    http_code: int
+    http_err: int
+    bad: int                           # datagrams of wrong size or magic
+    polls: int
+    duplicates: int
+    # build 26: DMA watchdog (a transfer not done after 50 ms is recorded, the DMA reset)
+    stalls: int = 0
+    stall_sr: int = 0                  # MM2S status register at the stall (bit 0 halted, 1 idle, 4..6 errors)
+    stall_status: int = 0              # receiver STATUS at the stall
+    stall_ev: int = 0                  # FIFO levels at the stall: events, timing, control,
+    stall_tm: int = 0                  # payload, channel estimate, decoder input, transport blocks
+    stall_cf: int = 0
+    stall_pl: int = 0
+    stall_ch: int = 0
+    stall_lq: int = 0
+    stall_tb: int = 0
+    stall_samples: int = 0             # receiver sample count at the stall
+    dma_sr: int = 0                    # MM2S status register now
+    gaps: list = None                  # build 27: first zero-filled gaps [(slot, datagrams), ...]
+
+    FMT = struct.Struct("<20IQ6I")     # 112 bytes (build 25)
+    FMT26 = struct.Struct("<12I")      # + 48 bytes (build 26)
+    FMT27 = struct.Struct("<17I")      # + 68 bytes (build 27): n, 8 x (slot, length)
+    FMT30 = struct.Struct("<8I")       # + 32 bytes (build 30): CPU time, see cpu below
+
+    @classmethod
+    def unpack(cls, b: bytes) -> "StreamStats":
+        size = struct.unpack_from("<I", b)[0]
+        n26 = cls.FMT.size + cls.FMT26.size
+        extra = cls.FMT26.unpack_from(b, cls.FMT.size) if size >= n26 else ()
+        st = cls(*cls.FMT.unpack(b[:cls.FMT.size]), *extra)
+        st.gaps = []
+        if size >= n26 + cls.FMT27.size:
+            g = cls.FMT27.unpack_from(b, n26)
+            st.gaps = [(g[1 + 2 * i], g[2 + 2 * i]) for i in range(min(g[0], 8))]
+        st.cpu = None
+        n27 = n26 + cls.FMT27.size
+        if size >= n27 + cls.FMT30.size:
+            st.cpu = dict(zip(("pd_reads", "rx_us", "drain_us", "drain_max_us", "poll_us", "poll_max_us",
+                               "loop_max_us", "drains"), cls.FMT30.unpack_from(b, n27)))
+        return st
+
+
+def parse_poll(reply: bytes):
+    """POLL_RESULTS / STREAM_STOP reply -> (StreamStats, parse_run_reply_tb(records))."""
+    st = StreamStats.unpack(reply)
+    return st, parse_run_reply_tb(reply[st.size:])
 
 
 @dataclass

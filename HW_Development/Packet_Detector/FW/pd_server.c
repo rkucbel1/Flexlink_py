@@ -32,6 +32,18 @@
  *     u32 magic 0x44504C46, u16 cmd, u16 status, u32 seq, u32 length, then payload
  *     PING 1, RESET 2, SET_PARAMS 3, LOAD_SAMPLES 4, READ_SAMPLES 5, RUN 6, GET_DEBUG 7,
  *     MEMTEST 8 (diagnostic: board-local DDR test, no network involved)
+ *     STREAM_START 18 / POLL_RESULTS 19 / STREAM_STOP 20 (build 25): the CoreBoard stream
+ *     through the receiver in real time; see "Streaming receiver" below
+ *     build 35: while streaming, TCP replies paced one segment per 100 us (GEM overruns);
+ *     build 36: the interval set by STREAM_START flags bits 15:8 (25 us units)
+ *     build 31: FIFO levels read once per drain; with bitstream 9.2 CTRL.NOREC while streaming
+ *     (no PL / CH / LQ records, FIFOs drained every 500 us instead of 50 us)
+ *     REG_READ / REG_WRITE 9/10 (build 28): also the DDRC port priorities 0xF8006208..0xF8006224
+ *     GEM_STATS 17 (build 18): the Ethernet controller's whole statistics block, summed since
+ *     UDP_START (frames, size histogram, FCS / symbol / alignment errors, drops)
+ *     UDP_START 14 / UDP_STATS 15 / UDP_STOP 16 (build 17): receive the CoreBoard's ESR2 sample
+ *     stream (UDP, 1376-byte datagrams) and count it; mode 1 also converts the samples into the
+ *     sample buffer (a ring), as the streaming receiver will. See "CoreBoard UDP stream" below.
  *     REG_READ 9 / REG_WRITE 10 (diagnostic: a 32-bit register in the PL range
  *     0x40000000..0x7FFFFFFF, e.g. the AXI DMA or the detector)
  */
@@ -41,6 +53,8 @@
 #include "xparameters.h"
 #include "xil_printf.h"
 #include "xil_cache.h"
+#include "xil_mmu.h"
+#include "xil_exception.h"
 #include "xil_types.h"
 #include "xstatus.h"
 #include "xaxidma.h"
@@ -49,13 +63,14 @@
 
 #include "lwip/err.h"
 #include "lwip/tcp.h"
+#include "lwip/udp.h"
 
 /* ---------------------------------------------------------------------------------- */
 /* Configuration                                                                       */
 /* ---------------------------------------------------------------------------------- */
 #define PD_PORT                 5001
 #define PD_PROTOCOL_VERSION     1u
-#define PD_BUILD                16u              /* bump when the firmware changes */
+#define PD_BUILD                38u              /* bump when the firmware changes */
 
 #define SAMPLE_BUF_ADDR         0x10000000u
 #define DEBUG_BUF_ADDR          0x18000000u
@@ -87,6 +102,8 @@
 #define PD_ID_V7                0x0700u         /* 7.0: payload channel estimate (CH FIFO) */
 #define PD_ID_V8                0x0800u         /* 8.0: payload demapper / combiner (LQ FIFO) */
 #define PD_ID_V9                0x0900u         /* 9.0: LDPC decoder, transport blocks (TB FIFO) */
+#define PD_ID_V91               0x0901u         /* 9.1: CTRL.PACK8, int8 input unpacker (pd_unpack8.v) */
+#define PD_ID_V92               0x0902u         /* 9.2: CTRL.NOREC, payload / channel / decoder-input records discarded in the PL */
 #define R_ID                    0x00u
 #define R_CTRL                  0x04u
 #define R_STATUS                0x08u
@@ -113,6 +130,8 @@
 #define CTRL_RESET              0x1u
 #define CTRL_DEBUG              0x2u
 #define CTRL_LOOPBACK           0x4u
+#define CTRL_PACK8              0x8u            /* 9.1: two int8 samples per DMA word */
+#define CTRL_NOREC              0x10u           /* 9.2: discard PL / CH / LQ records in the PL */
 #define STATUS_BUSY             0x1u
 #define STATUS_OPEN             0x2u
 #define STATUS_EV_OVF           0x100u
@@ -138,12 +157,15 @@
 enum { CMD_PING = 1, CMD_RESET = 2, CMD_SET_PARAMS = 3, CMD_LOAD_SAMPLES = 4,
        CMD_READ_SAMPLES = 5, CMD_RUN = 6, CMD_GET_DEBUG = 7, CMD_MEMTEST = 8,
        CMD_REG_READ = 9, CMD_REG_WRITE = 10, CMD_FPU_TEST = 11,
-       CMD_PATTERN_CHECK = 12, CMD_SEG_LOG = 13 };
+       CMD_PATTERN_CHECK = 12, CMD_SEG_LOG = 13,
+       CMD_UDP_START = 14, CMD_UDP_STATS = 15, CMD_UDP_STOP = 16, CMD_GEM_STATS = 17,
+       CMD_STREAM_START = 18, CMD_POLL_RESULTS = 19, CMD_STREAM_STOP = 20 };
 enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG = 4,
        ST_INTERNAL = 5 };
 
 #define RUN_FLAG_DEBUG          0x1u
 #define RUN_FLAG_PL_LOOPBACK    0x2u
+#define RUN_FLAG_PACK8          0x4u            /* build 24: the buffer holds packed int8 samples */
 #define BOARD_FLAG_EMULATOR     0x1u
 #define BOARD_FLAG_NO_DETECTOR  0x2u
 #define BOARD_FLAG_TIMING       0x4u            /* bitstream has the Preamble B timing (ID 3.0) */
@@ -153,6 +175,8 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define BOARD_FLAG_CHEST        0x40u           /* bitstream has the payload channel estimate (ID 7.0) */
 #define BOARD_FLAG_LQ           0x80u           /* bitstream has the demapper / combiner (ID 8.0) */
 #define BOARD_FLAG_TB           0x100u          /* bitstream has the LDPC decoder (ID 9.0) */
+#define BOARD_FLAG_PACK8        0x200u          /* bitstream has the int8 unpacker (ID 9.1) */
+#define BOARD_FLAG_NOREC        0x400u          /* bitstream can discard the debug records (ID 9.2) */
 #define EV_CFO_VALID            0x1u
 #define EV_TONE_FAIL            0x2u
 #define EV_TRUNCATED            0x4u
@@ -166,9 +190,11 @@ enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG =
 #define MAX_CH                  8192u           /* channel-estimate records per RUN (PL_SIZE each) */
 #define MAX_LQ                  4096u           /* decoder-input records per RUN (PL_SIZE each) */
 #define TB_HDR_SIZE             12u             /* transport block (pd_protocol.TBRecord): header ... */
-#define MAX_TB_BYTES            (192u << 10)    /* ... + 4 bytes per 32 bits; per RUN */
+#define MAX_TB_BYTES            (384u << 10)    /* ... + 4 bytes per 32 bits; per RUN / POLL. build 29:
+                                                 * 192 -> 384 KB, ~0.5 s of the stream's blocks */
 #define MAX_EVENTS              ((MAX_PAYLOAD - 32u - MAX_TM * TM_SIZE - MAX_CF * CF_SIZE - MAX_PL * PL_SIZE \
                                   - MAX_CH * PL_SIZE - MAX_LQ * PL_SIZE - MAX_TB_BYTES - EV_SIZE) / EV_SIZE)
+typedef char max_events_check[(MAX_EVENTS >= 4096u) ? 1 : -1];  /* the buffers fit in MAX_PAYLOAD */
 #define TONE_THRESH_MAX_Q8      (24u * 256u)
 
 /* ---------------------------------------------------------------------------------- */
@@ -203,6 +229,21 @@ static u8        tx_small[256];     /* short replies and error messages */
 static const u8 *tx_data;
 static u32       tx_total;          /* header + payload */
 static u32       tx_off;
+/* build 35: while streaming, replies go out one TCP segment per TX_PACE_COUNTS instead of
+ * as many as the window allows. The Ethernet controller's single DMA serves send and receive;
+ * a burst of back-to-back outgoing frames made it overrun on the 670 Mbit/s incoming stream
+ * (about one lost datagram per 7 KB sent, build 34 test). The results need ~1 MB/s; one
+ * segment per 100 us allows 14 MB/s. */
+static int       tx_paced;
+static u64       tx_t_pace;         /* XTime, declared further down */
+static u64       tx_pace_counts;    /* build 36: set per stream, default 100 us */
+#define TX_PACE_DEFAULT_US      100u
+/* build 37: a token bucket - one segment per interval on average, at most TX_PACE_BURST back
+ * to back when the main loop came late (build 36 sent one segment per main-loop pass at most,
+ * ~550 segments/s whatever the interval, too slow for the results in packet-dense parts) */
+#define TX_PACE_BURST           1u      /* build 38: 3 cost ~100 extra lost datagrams in 30 s;
+                                         * with the check every ~16 datagrams from the receive
+                                         * path one segment at a time still allows ~3,700/s */
 
 static u8  params[PARAMS_SIZE];
 static u32 samples_stored;          /* samples in the sample buffer */
@@ -236,7 +277,8 @@ static u32 rd32(const u8 *p) { u32 v; memcpy(&v, p, 4); return v; }       /* ARM
 static void wr32(u8 *p, u32 v) { memcpy(p, &v, 4); }
 static void wr16(u8 *p, u16 v) { memcpy(p, &v, 2); }
 
-static u32  pd_rd(u32 off)        { return Xil_In32(PD_BASE + off); }
+static u32 pd_reads;                /* build 30: AXI-Lite reads of the receiver (streaming CPU cost) */
+static u32  pd_rd(u32 off)        { pd_reads++; return Xil_In32(PD_BASE + off); }
 static void pd_wr(u32 off, u32 v) { Xil_Out32(PD_BASE + off, v); }
 
 /* ---------------------------------------------------------------------------------- */
@@ -372,7 +414,8 @@ static int dma_init(void)
 /* Read every complete event (8 words) from the detector's event FIFO into ev_out. */
 static void drain_events(void)
 {
-    while (pd_rd(R_EV_LEVEL) >= 8u) {
+    u32 lv;
+    for (lv = pd_rd(R_EV_LEVEL); lv >= 8u; lv -= 8u) {   /* build 31: level read once */
         u32 w[8], i;
         u8 *r;
         u64 num, den;
@@ -405,7 +448,8 @@ static void drain_timing(void)
     if (det_version < PD_ID_V3) {
         return;
     }
-    while (pd_rd(R_TM_LEVEL) >= 8u) {
+    u32 lv;
+    for (lv = pd_rd(R_TM_LEVEL); lv >= 8u; lv -= 8u) {   /* build 31: level read once */
         u32 w[8], i;
         u8 *r;
         for (i = 0; i < 8u; i++) {
@@ -434,7 +478,8 @@ static void drain_control(void)
     if (det_version < PD_ID_V4) {
         return;
     }
-    while (pd_rd(R_CF_LEVEL) >= 8u) {
+    u32 lv;
+    for (lv = pd_rd(R_CF_LEVEL); lv >= 8u; lv -= 8u) {   /* build 31: level read once */
         u32 w[8], i;
         u8 *r;
         for (i = 0; i < 8u; i++) {
@@ -462,7 +507,8 @@ static void drain_payload(void)
     if (det_version < PD_ID_V6) {
         return;
     }
-    while (pd_rd(R_PL_LEVEL) >= 4u) {
+    u32 lv;
+    for (lv = pd_rd(R_PL_LEVEL); lv >= 4u; lv -= 4u) {   /* build 31: level read once */
         u32 w[4], i;
         u8 *r;
         for (i = 0; i < 4u; i++) {
@@ -488,7 +534,8 @@ static void drain_chest(void)
     if (det_version < PD_ID_V7) {
         return;
     }
-    while (pd_rd(R_CH_LEVEL) >= 4u) {
+    u32 lv;
+    for (lv = pd_rd(R_CH_LEVEL); lv >= 4u; lv -= 4u) {   /* build 31: level read once */
         u32 w[4], i;
         u8 *r;
         for (i = 0; i < 4u; i++) {
@@ -514,7 +561,8 @@ static void drain_lq(void)
     if (det_version < PD_ID_V8) {
         return;
     }
-    while (pd_rd(R_LQ_LEVEL) >= 4u) {
+    u32 lv;
+    for (lv = pd_rd(R_LQ_LEVEL); lv >= 4u; lv -= 4u) {   /* build 31: level read once */
         u32 w[4], i;
         u8 *r;
         for (i = 0; i < 4u; i++) {
@@ -541,10 +589,12 @@ static void drain_tb(void)
     if (det_version < PD_ID_V9) {
         return;
     }
-    while (pd_rd(R_TB_LEVEL) >= 2u) {
+    u32 lv = pd_rd(R_TB_LEVEL);                 /* build 31: read once; counts whole records */
+    while (lv >= 2u) {
         u32 t = pd_rd(R_TB_DATA);
         u32 h = pd_rd(R_TB_DATA);
         u32 nb = h & 0x7FFu, nw = (nb + 31u) / 32u, i;
+        lv = (lv >= 2u + nw) ? lv - 2u - nw : 0u;
         int keep = (tb_bytes + TB_HDR_SIZE + 4u * nw <= MAX_TB_BYTES);
         u8 *r = tb_out + tb_bytes;
         if (keep) {
@@ -607,6 +657,36 @@ static void detector_reset(void)
     pd_wr(R_CTRL, 0);
 }
 
+/* Time stamps: the Cortex-A9 global timer (64-bit, CPU clock / 2), read directly. The SDT BSP
+ * (Vitis 2023.2+) has no xtime_l.h any more; this is what its XTime_GetTime did. */
+typedef u64 XTime;
+#define GTIMER_BASE             0xF8F00200u
+#if defined(XPAR_CPU_CORE_CLOCK_FREQ_HZ)
+#define COUNTS_PER_SECOND       (XPAR_CPU_CORE_CLOCK_FREQ_HZ / 2u)
+#elif defined(XPAR_CPU_CORTEXA9_0_CPU_CLK_FREQ_HZ)
+#define COUNTS_PER_SECOND       (XPAR_CPU_CORTEXA9_0_CPU_CLK_FREQ_HZ / 2u)
+#else
+#define COUNTS_PER_SECOND       333333333u      /* Zedboard: 666.67 MHz CPU */
+#endif
+
+static void gtimer_enable(void)                 /* start it if the BSP has not */
+{
+    u32 ctrl = Xil_In32(GTIMER_BASE + 0x08u);
+    if ((ctrl & 1u) == 0u) {
+        Xil_Out32(GTIMER_BASE + 0x08u, (ctrl & ~0xFF00u) | 1u);   /* prescaler 0, enable */
+    }
+}
+
+static void XTime_GetTime(XTime *t)
+{
+    u32 hi, lo;
+    do {
+        hi = Xil_In32(GTIMER_BASE + 0x04u);
+        lo = Xil_In32(GTIMER_BASE + 0x00u);
+    } while (Xil_In32(GTIMER_BASE + 0x04u) != hi);
+    *t = ((u64)hi << 32) | lo;
+}
+
 /*
  * Stream `bytes` from src through the PL, in chunks; with dst != 0 the PL's output stream is
  * written to dst (each MM2S transfer ends with TLAST, which ends the matching S2MM transfer).
@@ -637,10 +717,20 @@ static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, u32 div, int events, 
             dma_reset();
             return -2;
         }
+        XTime t_start, t_now;
+        XTime_GetTime(&t_start);
         while (XAxiDma_Busy(&dma, XAXIDMA_DMA_TO_DEVICE) ||
                (dst && XAxiDma_Busy(&dma, XAXIDMA_DEVICE_TO_DMA))) {
             if (events) {
                 drain_all();
+            }
+            /* build 27: also a 5 s limit (a hung receiver used to block the board for minutes:
+             * 200 M polls with a FIFO drain each) */
+            if ((polls & 0x3FFu) == 0u) {
+                XTime_GetTime(&t_now);
+                if (t_now - t_start > 5u * (XTime)COUNTS_PER_SECOND) {
+                    polls = 1;
+                }
             }
             if (--polls == 0) {
                 sr_tx = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_TX_OFFSET, XAXIDMA_SR_OFFSET);
@@ -680,8 +770,10 @@ static int dma_stream(UINTPTR src, UINTPTR dst, u32 bytes, u32 div, int events, 
  * Detector RUN of `count` samples from the sample buffer. Fills ev_out; returns 0 or an error
  * (message in err).
  */
-static int detector_run(u32 count, int debug, char *err, u32 err_len)
+static int detector_run(u32 count, int debug, int pack, char *err, u32 err_len)
 {
+    /* pack (build 24, bitstream 9.1): the buffer holds count int8 samples, two per word, the
+     * PL unpacks them (CTRL.PACK8); the DMA moves 2 * count bytes instead of 4 * count */
     u32 start, start20, polls, st, n_cfo = rd32(params + 12);
     u32 div = rd32(params + 28) == 2u ? 2u : 1u;    /* input stage 2: 2 input samples per detector sample */
 
@@ -702,8 +794,11 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
     lq_lost = 0;
     start = pd_rd(R_SAMPLES);
     start20 = start / div;
-    pd_wr(R_CTRL, debug ? CTRL_DEBUG : 0u);
-    if (count > 0 && dma_stream(SAMPLE_BUF_ADDR, debug ? DEBUG_BUF_ADDR : 0, 4u * count, div, 1, err, err_len) != 0) {
+    pd_wr(R_CTRL, (debug ? CTRL_DEBUG : 0u) | (pack ? CTRL_PACK8 : 0u));
+    /* dma_stream's div is input bytes per debug byte: 4 * div / 4 normally; packed, the input
+     * is 2 bytes per sample, so 1 with input stage 2 (debug with stage 1 is refused by RUN) */
+    if (count > 0 && dma_stream(SAMPLE_BUF_ADDR, debug ? DEBUG_BUF_ADDR : 0, (pack ? 2u : 4u) * count,
+                                pack ? 1u : div, 1, err, err_len) != 0) {
         pd_wr(R_CTRL, 0);
         return -1;
     }
@@ -815,9 +910,9 @@ static int detector_run(u32 count, int debug, char *err, u32 err_len)
 /* ---------------------------------------------------------------------------------- */
 /* Transmit (replies can be up to 1 MB; sent as lwIP's send buffer allows)             */
 /* ---------------------------------------------------------------------------------- */
-static void tx_pump(struct tcp_pcb *pcb)
+static void tx_send(struct tcp_pcb *pcb, u32 budget)
 {
-    while (tx_off < tx_total) {
+    while (tx_off < tx_total && budget > 0) {
         u32 space = tcp_sndbuf(pcb);
         const u8 *p;
         u32 n;
@@ -839,6 +934,9 @@ static void tx_pump(struct tcp_pcb *pcb)
         if (n > 0xFFFFu) {
             n = 0xFFFFu;
         }
+        if (n > budget) {
+            n = budget;
+        }
         e = tcp_write(pcb, p, (u16)n, TCP_WRITE_FLAG_COPY |
                       (tx_off + n < tx_total ? TCP_WRITE_FLAG_MORE : 0));
         if (e == ERR_MEM) {
@@ -850,8 +948,38 @@ static void tx_pump(struct tcp_pcb *pcb)
             break;
         }
         tx_off += n;
+        budget -= n;
     }
     tcp_output(pcb);
+}
+
+/* build 35/37: paced sending while streaming, from the main loop and the UDP receive path */
+static void tx_pace(void)
+{
+    XTime now;
+    u64 k;
+    if (!tx_paced || client == NULL || tx_off >= tx_total) {
+        return;
+    }
+    XTime_GetTime(&now);
+    if (now - tx_t_pace > (u64)TX_PACE_BURST * tx_pace_counts) {
+        tx_t_pace = now - (u64)TX_PACE_BURST * tx_pace_counts;   /* idle: at most a short burst */
+    }
+    k = (now - tx_t_pace) / tx_pace_counts;     /* segments due */
+    if (k == 0) {
+        return;
+    }
+    tx_t_pace += k * tx_pace_counts;
+    tx_send(client, (u32)k * (u32)TCP_MSS);
+}
+
+static void tx_pump(struct tcp_pcb *pcb)
+{
+    if (tx_paced && pcb == client) {
+        tx_pace();
+    } else {
+        tx_send(pcb, 0xFFFFFFFFu);
+    }
 }
 
 static void reply(struct tcp_pcb *pcb, u16 cmd, u16 status, u32 seq, const u8 *data, u32 len)
@@ -881,6 +1009,945 @@ static void reply_error(struct tcp_pcb *pcb, u16 cmd, u16 status, u32 seq, const
 /* ---------------------------------------------------------------------------------- */
 /* Commands                                                                            */
 /* ---------------------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------------------- */
+/* CoreBoard UDP stream (build 17)                                                     */
+/* ---------------------------------------------------------------------------------- */
+/* The ESP32-S31 CoreBoard (ESP-SDR, or App/FlexlinkCoreBoardEmulator.py on the PC) sends
+ * 1376-byte datagrams: 32-byte header <4sHHIIQQ ("ESR2", version, bits, epoch, rate, sample
+ * position, time_us) + 672 complex int8 samples (I, Q). At 40 Msps that is 59,524 datagrams/s.
+ *
+ * This first step only receives and counts, to see whether the PS keeps up:
+ *   mode 0  check the header, track the sample position (lost / late / duplicate datagrams)
+ * Build 21: modes 1..3 differ in how the ring is written, to measure what each costs:
+ *   mode 1  convert into the cached ring, no cache maintenance (CPU cost of the conversion
+ *           only; a DMA would not see all the data - test only)
+ *   mode 2  convert into the ring mapped non-cacheable
+ *   mode 3  convert into the cached ring and flush each datagram's 2688 bytes
+ *   mode 4  (build 24) copy the raw int8 bytes into the ring mapped non-cacheable, two samples
+ *           per word, for the PL unpacker (bitstream 9.1, CTRL.PACK8): half the bytes of
+ *           mode 2 and no arithmetic
+ * Overload guard (build 23: also for 10 ms after the driver found the pbuf pool empty, as an
+ * overload in the interrupt and callback does not stop the main loop but starves TCP):
+ * when the main loop has not run for 20 ms (the receive path cannot keep up and
+ * would starve TCP), conversions are skipped and counted ("skipped") until it runs again, so
+ * the board keeps answering and the count shows how far short the CPU is.
+ * Build 19/20 notes:
+ *   mode 1  as mode 0, and convert the samples to the detector's format (u32: I << 4 low half,
+ *           Q << 4 high half, 12-bit) into the sample buffer, used as a ring of whole
+ *           datagrams: the CPU work of the later streaming receiver. While mode 1 runs, the
+ *           sample buffer is mapped non-cacheable (build 19), so the AXI DMA sees the samples
+ *           without a cache flush per datagram (84 lines of L1 + L2 maintenance each, too slow
+ *           at 59,524 datagrams/s); UDP_STOP maps it cacheable again.
+ * The receive path is compiled with -O2 (attribute below) although the rest of the firmware
+ * is built with -O0: at -O0 the conversion alone needs more than the whole CPU.
+ * The GEM's own statistics count what never reached lwIP: RXRESERRCNT (no receive buffer:
+ * the software did not hand buffers back in time) and RXORCNT (receive overrun: the GEM could
+ * not write to memory fast enough). They clear when read, so they are summed here. */
+#define ESR2_MAGIC              0x32525345u     /* "ESR2" little-endian */
+#define ESR2_HDR                32u
+#define ESR2_SPP                672u            /* complex samples per datagram */
+#define ESR2_LEN                (ESR2_HDR + 2u * ESR2_SPP)
+#define UDP_DEFAULT_PORT        4000u
+#define UDP_SEEN_WIN            8192u           /* datagrams remembered for late / duplicate */
+#define RING_PKTS               (MAX_SAMPLES / ESR2_SPP)
+#define RING8_PKTS              (BUF_BYTES / (2u * ESR2_SPP))   /* mode 4: 1344 bytes per datagram */
+#define UDP_STATS_SIZE          96u
+#define UDP_OVERLOAD_COUNTS     (COUNTS_PER_SECOND / 50u)   /* 20 ms without a main-loop pass */
+
+#if defined(XPAR_XEMACPS_0_BASEADDR)
+#define GEM_BASE XPAR_XEMACPS_0_BASEADDR
+#elif defined(XPAR_PS7_ETHERNET_0_BASEADDR)
+#define GEM_BASE XPAR_PS7_ETHERNET_0_BASEADDR
+#else
+#define GEM_BASE 0xE000B000u
+#endif
+/* Statistics block 0x100..0x1B0 (45 registers, clear on read; names in PC/pd_udp_test.py) */
+#define GEM_STAT_FIRST          0x100u
+#define GEM_STAT_N              45u
+#define GEM_IDX(off)            (((off) - GEM_STAT_FIRST) / 4u)
+#define GEM_RXCNT               0x158u          /* frames received OK */
+#define GEM_RXRESERRCNT         0x1A0u          /* frames lost: no receive buffer */
+#define GEM_RXORCNT             0x1A4u          /* frames lost: receive overrun */
+
+static struct udp_pcb *udp_pcb_s;
+static u32 udp_mode, udp_port;
+static XTime udp_t_start, udp_t_first, udp_t_last, udp_t_busy, udp_t_print;
+static u32 udp_ok, udp_bad_size, udp_bad_magic, udp_epoch, udp_epochs;
+static u32 udp_lost, udp_late, udp_dup;
+static u32 gem_acc[GEM_STAT_N];                 /* statistics summed since UDP_START */
+static u32 udp_loops, udp_print_ok, udp_print_lost;
+static u64 udp_expect, udp_first_pos, udp_last_pos;
+static int udp_have_first;
+static u32 udp_skipped;                         /* conversions skipped by the overload guard */
+/* Build 22: the lwIP driver's "pbuf pool empty" count in the rx interrupt (xemacpsif_dma.c,
+ * patched by build_firmware.py; weak, so an unpatched BSP still links and reports 0) */
+extern volatile unsigned int pd_rx_alloc_fail __attribute__((weak));
+static u32 udp_alloc0;
+static u32 udp_guard_fails;
+static XTime udp_guard_until;
+
+static u32 rx_alloc_fail(void) { return &pd_rx_alloc_fail ? pd_rx_alloc_fail : 0u; }
+static XTime udp_t_poll;                        /* last main-loop pass (udp_poll) */
+static u32 udp_seen[UDP_SEEN_WIN];              /* datagram number + 1 last stored in this slot */
+static u8  udp_tmp[ESR2_LEN] __attribute__((aligned(8)));
+
+static u32 ms_since(XTime t0, XTime t1) { return (u32)((t1 - t0) / (COUNTS_PER_SECOND / 1000u)); }
+
+static void gem_counters(void)                  /* sum the clear-on-read GEM statistics */
+{
+    u32 i;
+    for (i = 0; i < GEM_STAT_N; i++) {
+        gem_acc[i] += Xil_In32(GEM_BASE + GEM_STAT_FIRST + 4u * i);
+    }
+}
+static u32 gem_rx_frames(void)                  /* rx size histogram 0x168..0x17C, summed */
+{
+    u32 i, n = 0;
+    for (i = GEM_IDX(0x168u); i <= GEM_IDX(0x17Cu); i++) {
+        n += gem_acc[i];
+    }
+    return n;
+}
+#define gem_reserr  gem_acc[GEM_IDX(GEM_RXRESERRCNT)]
+#define gem_overrun gem_acc[GEM_IDX(GEM_RXORCNT)]
+
+static void udp_clear_stats(void)
+{
+    udp_ok = udp_bad_size = udp_bad_magic = udp_epoch = udp_epochs = 0;
+    udp_lost = udp_late = udp_dup = 0;
+    udp_loops = udp_print_ok = udp_print_lost = 0;
+    udp_skipped = 0;
+    udp_alloc0 = udp_guard_fails = rx_alloc_fail();
+    udp_guard_until = 0;
+    udp_t_first = udp_t_last = udp_t_busy = 0;
+    udp_have_first = 0;
+    udp_expect = udp_first_pos = udp_last_pos = 0;
+    memset(udp_seen, 0, sizeof udp_seen);
+    gem_counters();                             /* discard what was counted before */
+    memset(gem_acc, 0, sizeof gem_acc);
+    XTime_GetTime(&udp_t_start);
+    udp_t_print = udp_t_poll = udp_t_start;
+}
+
+#define UDP_HOT __attribute__((optimize("O2")))
+
+static int ring_uncached;                       /* sample buffer mapped non-cacheable */
+
+static void ring_map(int uncached)              /* the sample buffer's 128 x 1 MB sections */
+{
+    u32 a;
+    if (uncached == ring_uncached) {
+        return;
+    }
+    Xil_DCacheFlush();                          /* write back / drop its cached lines first */
+    for (a = SAMPLE_BUF_ADDR; a < SAMPLE_BUF_ADDR + BUF_BYTES; a += 0x100000u) {
+        Xil_SetTlbAttributes(a, uncached ? NORM_NONCACHE : NORM_WB_CACHE);
+    }
+    ring_uncached = uncached;
+}
+
+static UDP_HOT void udp_store(const u8 *iq, u64 dgram, int flush)  /* int8 I/Q -> u32 12-bit, ring */
+{
+    /* Build 23: read in place, one halfword = one sample (I low byte, Q high byte). The UDP
+     * payload is only 2-byte aligned, and the driver has invalidated it, so it comes from DDR:
+     * prefetch two cache lines ahead to overlap the misses with the conversion. */
+    u32 *dst = (u32 *)(UINTPTR)SAMPLE_BUF_ADDR + (u32)(dgram % RING_PKTS) * ESR2_SPP;
+    const u16 *src = (const u16 *)iq;
+    u32 k;
+    for (k = 0; k < ESR2_SPP; k += 4u) {        /* 4 samples = 8 bytes per pass */
+        if ((k & 15u) == 0u) {
+            __builtin_prefetch(src + k + 32u);  /* 64 bytes = 2 lines ahead */
+        }
+        u32 h0 = src[k], h1 = src[k + 1u], h2 = src[k + 2u], h3 = src[k + 3u];
+        dst[k]      = ((u32)((s32)(s8)h0 * 16) & 0xFFFFu) | ((u32)((s32)(s8)(h0 >> 8) * 16) << 16);
+        dst[k + 1u] = ((u32)((s32)(s8)h1 * 16) & 0xFFFFu) | ((u32)((s32)(s8)(h1 >> 8) * 16) << 16);
+        dst[k + 2u] = ((u32)((s32)(s8)h2 * 16) & 0xFFFFu) | ((u32)((s32)(s8)(h2 >> 8) * 16) << 16);
+        dst[k + 3u] = ((u32)((s32)(s8)h3 * 16) & 0xFFFFu) | ((u32)((s32)(s8)(h3 >> 8) * 16) << 16);
+    }
+    if (flush) {
+        Xil_DCacheFlushRange((UINTPTR)dst, ESR2_SPP * 4u);
+    }
+}
+
+static UDP_HOT void udp_store_raw(const u8 *iq, u64 dgram)  /* mode 4: int8 I/Q bytes, ring */
+{
+    u32 *dst = (u32 *)(UINTPTR)SAMPLE_BUF_ADDR + (u32)(dgram % RING8_PKTS) * (ESR2_SPP / 2u);
+    const u16 *src = (const u16 *)iq;           /* 2-byte aligned: halfword loads */
+    u32 k;
+    for (k = 0; k < ESR2_SPP; k += 8u) {        /* 8 samples = 16 bytes = 4 words per pass */
+        if ((k & 15u) == 0u) {
+            __builtin_prefetch(src + k + 32u);
+        }
+        dst[k / 2u]      = (u32)src[k]      | ((u32)src[k + 1u] << 16);
+        dst[k / 2u + 1u] = (u32)src[k + 2u] | ((u32)src[k + 3u] << 16);
+        dst[k / 2u + 2u] = (u32)src[k + 4u] | ((u32)src[k + 5u] << 16);
+        dst[k / 2u + 3u] = (u32)src[k + 6u] | ((u32)src[k + 7u] << 16);
+    }
+}
+
+static u32 rd16x2(const u8 *p)                  /* u32 from a 2-byte aligned address */
+{
+    const u16 *h = (const u16 *)p;
+    return (u32)h[0] | ((u32)h[1] << 16);
+}
+
+static UDP_HOT void stream_rx(const u8 *iq, u64 n, u32 epoch);
+static void stream_poll(void);
+
+static UDP_HOT void udp_rx_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port)
+{
+    XTime t0, t1;
+    const u8 *d;
+    u32 epoch, slot;
+    u64 pos, n;
+    (void)arg; (void)pcb; (void)addr; (void)port;
+
+    XTime_GetTime(&t0);
+    if (p->tot_len != ESR2_LEN) {
+        udp_bad_size++;
+        goto done;
+    }
+    /* The hot path is -O2, where a 4- or 8-byte memcpy becomes a plain LDR / LDRD, a data
+     * abort at an unaligned address when alignment checks are on. The UDP payload is 2-byte
+     * aligned (42 bytes into the frame), so since build 23 everything is read with halfword
+     * loads in place; build 20-22 copied every datagram (a misaligned 1376-byte memcpy, ~9 us).
+     * Only an odd address or a chained pbuf is still copied. */
+    if (p->len >= ESR2_LEN && ((UINTPTR)p->payload & 1u) == 0u) {
+        d = (const u8 *)p->payload;
+    } else {
+        pbuf_copy_partial(p, udp_tmp, ESR2_LEN, 0);
+        d = udp_tmp;
+    }
+    if (rd16x2(d) != ESR2_MAGIC) {
+        udp_bad_magic++;
+        goto done;
+    }
+    epoch = rd16x2(d + 8);
+    pos = (u64)rd16x2(d + 16) | ((u64)rd16x2(d + 20) << 32);
+    if (!udp_have_first || epoch != udp_epoch) {  /* first datagram, or the board restarted */
+        udp_have_first = 1;
+        udp_epoch = epoch;
+        udp_epochs++;
+        udp_expect = pos / ESR2_SPP;
+        udp_first_pos = pos;
+        udp_t_first = t0;
+        memset(udp_seen, 0, sizeof udp_seen);
+    }
+    n = pos / ESR2_SPP;                         /* datagram number in the stream */
+    slot = (u32)(n % UDP_SEEN_WIN);
+    if (n >= udp_expect) {
+        udp_lost += (u32)(n - udp_expect);      /* skipped datagrams (may still arrive late) */
+        udp_expect = n + 1u;
+        udp_last_pos = pos;
+    } else if (udp_expect - n <= UDP_SEEN_WIN && udp_seen[slot] == (u32)n + 1u) {
+        udp_dup++;
+        goto done;
+    } else {                                    /* arrived after a later one: not lost after all */
+        udp_late++;
+        if (udp_lost) {
+            udp_lost--;
+        }
+    }
+    udp_seen[slot] = (u32)n + 1u;
+    udp_ok++;
+    udp_t_last = t0;
+    if (udp_mode == 5u) {
+        stream_rx(d + ESR2_HDR, n, epoch);
+    } else if (udp_mode != 0u) {
+        u32 fails = rx_alloc_fail();
+        if (fails != udp_guard_fails) {         /* the driver ran out of pbufs: back off 10 ms */
+            udp_guard_fails = fails;
+            udp_guard_until = t0 + COUNTS_PER_SECOND / 100u;
+        }
+        if (t0 < udp_guard_until || t0 - udp_t_poll > UDP_OVERLOAD_COUNTS) {
+            udp_skipped++;                      /* overloaded: let the main loop (TCP) run */
+        } else {
+            if (udp_mode == 4u) {
+                udp_store_raw(d + ESR2_HDR, n);
+            } else {
+                udp_store(d + ESR2_HDR, n, udp_mode == 3u);
+            }
+        }
+    }
+done:
+    pbuf_free(p);
+    XTime_GetTime(&t1);
+    udp_t_busy += t1 - t0;
+}
+
+static int udp_start(u32 port, u32 mode)
+{
+    err_t err;
+    if (udp_pcb_s != NULL) {
+        udp_remove(udp_pcb_s);
+        udp_pcb_s = NULL;
+    }
+    udp_pcb_s = udp_new_ip_type(IPADDR_TYPE_ANY);
+    if (udp_pcb_s == NULL) {
+        return -1;
+    }
+    err = udp_bind(udp_pcb_s, IP_ANY_TYPE, (u16_t)port);
+    if (err != ERR_OK) {
+        udp_remove(udp_pcb_s);
+        udp_pcb_s = NULL;
+        return -2;
+    }
+    udp_mode = mode;
+    udp_port = port;
+    ring_map(mode == 2u || mode == 4u || mode == 5u);
+    gtimer_enable();
+    udp_clear_stats();
+    udp_recv(udp_pcb_s, udp_rx_cb, NULL);
+    xil_printf("UDP stream receiver on port %d, mode %d (%s)\r\n", (int)port, (int)mode,
+               mode == 0u ? "count only" : mode == 1u ? "convert, cached ring, no flush" :
+               mode == 2u ? "convert, non-cacheable ring" : mode == 3u ? "convert, cached ring + flush" :
+               mode == 4u ? "raw int8 copy, non-cacheable ring (PL unpacker)" : "streaming receiver");
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------------- */
+/* Streaming receiver (build 25)                                                       */
+/* ---------------------------------------------------------------------------------- */
+/* STREAM_START puts the UDP receiver in mode 5: every ESR2 datagram's raw int8 samples go into
+ * the sample buffer, a ring of RING8_PKTS slots of 1344 bytes (one datagram each, mapped
+ * non-cacheable), at slot k = datagram number - n0. From the main loop (transfer_data) the AXI
+ * DMA feeds the ring to the receiver with CTRL.PACK8 (bitstream 9.1: the PL unpacks two int8
+ * samples per word), in chunks of ST_CHUNK slots, without waiting for it; the result FIFOs are
+ * drained every 50 us into the record buffers, and POLL_RESULTS hands them to the PC.
+ *
+ *   lost datagram    its slot is zero-filled when a later one arrives, so the receiver's sample
+ *                    count stays that of the stream (t_trig * 2 = stream sample at 40 Msps)
+ *   late datagram    written into its slot if the DMA has not read it yet (ST_HOLD slots are
+ *                    held back for that), else counted as too late
+ *   gap > ST_MAX_FILL slots, or no room in the ring for the zeros: resynchronise (the stream
+ *                    jumps; counted), new epoch (CoreBoard restarted): resynchronise too
+ *   ring full        (the receiver slower than the stream for > 1.6 s) datagram dropped, counted
+ *
+ * The CoreBoard sends the stream to whoever sent its HTTP "start": STREAM_START can carry the
+ * board's address and the JSON body, and the Zedboard then posts it itself (and {"op":"stop"}
+ * at STREAM_STOP); without an address the PC starts the stream (e.g. the emulator's
+ * --stream-to). */
+#define ST_SLOT_BYTES           (2u * ESR2_SPP)
+#define ST_SLOTS                RING8_PKTS
+#define ST_CHUNK                64u             /* slots per DMA transfer (~1 ms at 40 Msps) */
+#define ST_HOLD                 4u              /* newest slots held back for late datagrams */
+#define ST_MAX_FILL             1024u           /* largest gap zero-filled (~17 ms) */
+#define ST_IDLE_COUNTS          (COUNTS_PER_SECOND / 500u)    /* 2 ms quiet: flush the tail */
+#define ST_DRAIN_COUNTS         (COUNTS_PER_SECOND / 20000u)  /* drain the FIFOs every 50 us */
+#define ST_DRAIN_NOREC_COUNTS   (COUNTS_PER_SECOND / 2000u)   /* build 31, CTRL.NOREC: every 500 us
+                                     * (the 16-record PL / CH / LQ FIFOs set the 50 us; without them
+                                     * the 2048-word TB FIFO holds ~7 ms of blocks) */
+#define ST_FLAG_KEEP_PL         0x1u            /* also return payload / channel / decoder-input records */
+/* build 36: flags bits 15:8 = P, replies paced one TCP segment per 25 * P us (0: 100 us).
+ * (Builds 32-35 used these bits for a register-read test: the reads did not cost frames.) */
+#define ST_FLAG_PACE_SHIFT      8u
+/* build 34 test: flags bits 7:1 = K, every POLL_RESULTS reply padded with K KB of zeros, to see
+ * whether the board sending costs Ethernet frames (GEM overruns) */
+#define ST_FLAG_PAD_SHIFT       1u              /* build 35: bits 6:1 only (<= 63 KB) */
+#define ST_FLAG_NOPACE          0x80u           /* build 35: send replies unpaced (as before) */
+#define ST_STATS_SIZE           260u            /* build 26: + the DMA watchdog block, 27: + gaps,
+                                                 * 30: + where the CPU time goes */
+#define ST_STALL_COUNTS         (COUNTS_PER_SECOND / 20u)     /* a transfer > 50 ms: stalled */
+#define ST_STOP_COUNTS          (2u * COUNTS_PER_SECOND)      /* STREAM_STOP waits at most 2 s */
+#define ST_LOST_EV 0x1u
+#define ST_LOST_TM 0x2u
+#define ST_LOST_CF 0x4u
+#define ST_LOST_PL 0x8u
+#define ST_LOST_CH 0x10u
+#define ST_LOST_LQ 0x20u
+#define ST_LOST_TB 0x40u
+
+static int   st_on, st_have;
+static int   st_norec;                       /* build 31: CTRL.NOREC set for this stream */
+static u32   st_test_pad;                    /* build 34: bytes of zeros added to each poll reply */
+static u32   st_flags, st_epoch;
+static u64   st_n0, st_wr, st_rd, st_dma_end;
+static u64   st_floor;                          /* first slot of the current numbering (resync) */
+static u32   st_dma_len;
+static XTime st_t_start, st_t_last, st_t_drain;
+static u32   st_ok, st_lost, st_late_fixed, st_late_dropped, st_ring_full, st_resyncs;
+static u32   st_ring_max, st_chunks, st_dma_errors, st_lost_mask, st_polls;
+/* build 26: DMA watchdog - a transfer not done after 50 ms is recorded and the DMA reset */
+static XTime st_dma_t0;
+static u32   st_stalls, st_stall_sr, st_stall_status, st_stall_samples, st_stall_lv[7];
+/* build 27: where the first zero-filled gaps went (slot, length), to match with a hang */
+#define ST_GAPS                 8u
+static u32   st_gap_k[ST_GAPS], st_gap_n[ST_GAPS], st_gaps;
+/* build 30: where the CPU time goes while streaming (global-timer counts) */
+static XTime st_drain_t, st_drain_max, st_poll_t, st_poll_max, st_loop_max, st_busy0;
+static u32   st_reads0, st_drains;
+static u8    poll_out[MAX_PAYLOAD] __attribute__((aligned(64)));  /* POLL / STOP replies (sent
+                                                                     * asynchronously: own buffer) */
+
+/* --- HTTP client for the CoreBoard's /api/rx (one request at a time) --- */
+static struct tcp_pcb *http_pcb;
+static char  http_req[1024];
+static u32   http_req_len;
+static int   http_state;                        /* 0 none, 1 connecting, 2 sent, 3 answered, 4 error */
+static u32   http_code;                         /* HTTP status code of the answer */
+static u32   http_err;
+static char  http_head[16];
+static u32   http_head_n;
+static u32   cb_ip;                             /* CoreBoard address (network order as given) */
+static u16   cb_port;
+
+static int http_close(void)                     /* returns 1 if the pcb had to be aborted */
+{
+    int aborted = 0;
+    if (http_pcb != NULL) {
+        tcp_arg(http_pcb, NULL);
+        tcp_recv(http_pcb, NULL);
+        tcp_err(http_pcb, NULL);
+        if (tcp_close(http_pcb) != ERR_OK) {
+            tcp_abort(http_pcb);
+            aborted = 1;
+        }
+        http_pcb = NULL;
+    }
+    return aborted;
+}
+
+static void http_err_cb(void *arg, err_t err)
+{
+    (void)arg;
+    http_pcb = NULL;                            /* freed by lwIP */
+    http_state = 4;
+    http_err = (u32)(s32)err;
+}
+
+static err_t http_recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
+{
+    (void)arg;
+    if (p == NULL || err != ERR_OK) {           /* the board closed the connection */
+        if (p != NULL) {
+            pbuf_free(p);
+        }
+        if (http_state == 2) {
+            http_state = http_code ? 3 : 4;
+        }
+        return http_close() ? ERR_ABRT : ERR_OK;
+    }
+    if (http_head_n < sizeof http_head - 1u) {  /* "HTTP/1.x 200 ..." */
+        u32 n = pbuf_copy_partial(p, http_head + http_head_n, (u16)(sizeof http_head - 1u - http_head_n), 0);
+        http_head_n += n;
+        http_head[http_head_n] = 0;
+        if (http_head_n >= 12u) {
+            http_code = (u32)(http_head[9] - '0') * 100u + (u32)(http_head[10] - '0') * 10u +
+                        (u32)(http_head[11] - '0');
+        }
+    }
+    tcp_recved(pcb, p->tot_len);
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+static err_t http_connected_cb(void *arg, struct tcp_pcb *pcb, err_t err)
+{
+    (void)arg;
+    if (err != ERR_OK) {
+        http_state = 4;
+        http_err = (u32)(s32)err;
+        return err;
+    }
+    if (tcp_write(pcb, http_req, (u16)http_req_len, TCP_WRITE_FLAG_COPY) != ERR_OK) {
+        http_state = 4;
+        return http_close() ? ERR_ABRT : ERR_OK;
+    }
+    tcp_output(pcb);
+    http_state = 2;
+    return ERR_OK;
+}
+
+static int http_post(const char *json, u32 json_len)
+{
+    ip_addr_t ip;
+    int n;
+    http_close();
+    if (cb_ip == 0u) {
+        return 0;
+    }
+    n = snprintf(http_req, sizeof http_req,
+                 "POST /api/rx HTTP/1.1\r\nHost: %u.%u.%u.%u\r\nContent-Type: application/json\r\n"
+                 "Content-Length: %lu\r\nConnection: close\r\n\r\n",
+                 (unsigned)(cb_ip & 0xFFu), (unsigned)((cb_ip >> 8) & 0xFFu), (unsigned)((cb_ip >> 16) & 0xFFu),
+                 (unsigned)(cb_ip >> 24), (unsigned long)json_len);
+    if (n < 0 || (u32)n + json_len > sizeof http_req) {
+        return -1;
+    }
+    memcpy(http_req + n, json, json_len);
+    http_req_len = (u32)n + json_len;
+    http_state = 1;
+    http_code = 0;
+    http_err = 0;
+    http_head_n = 0;
+    http_pcb = tcp_new_ip_type(IPADDR_TYPE_V4);
+    if (http_pcb == NULL) {
+        http_state = 4;
+        return -2;
+    }
+    tcp_arg(http_pcb, NULL);
+    tcp_err(http_pcb, http_err_cb);
+    tcp_recv(http_pcb, http_recv_cb);
+    IP_ADDR4(&ip, cb_ip & 0xFFu, (cb_ip >> 8) & 0xFFu, (cb_ip >> 16) & 0xFFu, cb_ip >> 24);
+    if (tcp_connect(http_pcb, &ip, cb_port, http_connected_cb) != ERR_OK) {
+        http_state = 4;
+        http_close();
+        return -3;
+    }
+    return 0;
+}
+
+/* --- ring --- */
+static u8 *st_slot(u64 k) { return (u8 *)(UINTPTR)SAMPLE_BUF_ADDR + (u32)(k % ST_SLOTS) * ST_SLOT_BYTES; }
+
+static void st_reset(u32 flags)
+{
+    st_flags = flags;
+    {
+        u32 pu = 25u * ((flags >> ST_FLAG_PACE_SHIFT) & 0xFFu);
+        tx_pace_counts = (u64)(pu ? pu : TX_PACE_DEFAULT_US) * (COUNTS_PER_SECOND / 1000000u);
+    }
+    st_test_pad = 1024u * ((flags >> ST_FLAG_PAD_SHIFT) & 0x3Fu);
+    st_have = 0;
+    st_epoch = 0;
+    st_n0 = st_wr = st_rd = st_dma_end = st_floor = 0;
+    st_dma_len = 0;
+    st_ok = st_lost = st_late_fixed = st_late_dropped = st_ring_full = st_resyncs = 0;
+    st_ring_max = st_chunks = st_dma_errors = st_lost_mask = st_polls = 0;
+    st_stalls = st_stall_sr = st_stall_status = st_stall_samples = 0;
+    memset(st_stall_lv, 0, sizeof st_stall_lv);
+    st_gaps = 0;
+    st_drain_t = st_drain_max = st_poll_t = st_poll_max = st_loop_max = 0;
+    st_drains = 0;
+    st_reads0 = pd_reads;
+    st_busy0 = udp_t_busy;
+    XTime_GetTime(&st_t_start);
+    st_t_last = st_t_drain = st_t_start;
+    ev_n = 0; ev_lost = 0; tm_n = 0; tm_lost = 0; cf_n = 0; cf_lost = 0;
+    pl_n = 0; pl_lost = 0; ch_n = 0; ch_lost = 0; lq_n = 0; lq_lost = 0;
+    tb_n = 0; tb_bytes = 0; tb_lost = 0;
+}
+
+/* one datagram (from udp_rx_cb, mode 5); iq = the 1344 payload bytes, 2-byte aligned */
+static UDP_HOT void stream_rx(const u8 *iq, u64 n, u32 epoch)
+{
+    u64 k, gap, used, freeslots, i;
+    XTime_GetTime(&st_t_last);
+    if (!st_have || epoch != st_epoch) {        /* first datagram, or the CoreBoard restarted */
+        if (st_have) {
+            st_resyncs++;
+        }
+        st_have = 1;
+        st_epoch = epoch;
+        st_n0 = n - st_wr;                      /* continue at the next free slot (modulo 2^64: */
+        st_floor = st_wr;                       /* a restarted board counts from 0 again) */
+    }
+    k = n - st_n0;
+    if ((s64)(k - st_wr) < 0) {                 /* late or duplicate (signed: k may be "below 0") */
+        u64 lo = st_dma_len ? st_dma_end : st_rd;
+        if ((s64)(st_floor - lo) > 0) {
+            lo = st_floor;                      /* nothing from before a resync: other numbering */
+        }
+        if ((s64)(k - lo) >= 0 && st_wr - k < ST_SLOTS) {
+            udp_store_raw(iq, k);               /* still unread: its slot gets the real samples */
+            st_late_fixed++;
+            if (st_lost) {
+                st_lost--;
+            }
+        } else {
+            st_late_dropped++;
+        }
+        return;
+    }
+    gap = k - st_wr;
+    used = st_wr - st_rd;                       /* slots not yet fed (incl. the DMA in flight) */
+    freeslots = ST_SLOTS - used;
+    if (freeslots == 0u) {
+        st_ring_full++;
+        return;
+    }
+    if (gap > ST_MAX_FILL || gap + 1u > freeslots) {  /* resynchronise: the stream jumps */
+        st_resyncs++;
+        st_n0 += gap;
+        k = st_wr;
+        gap = 0;
+        st_floor = st_wr;
+    }
+    for (i = 0; i < gap; i++) {                 /* lost datagrams: zeros */
+        memset(st_slot(st_wr + i), 0, ST_SLOT_BYTES);
+    }
+    if (gap && st_gaps < ST_GAPS) {
+        st_gap_k[st_gaps] = (u32)st_wr;
+        st_gap_n[st_gaps] = (u32)gap;
+        st_gaps++;
+    }
+    st_lost += (u32)gap;
+    udp_store_raw(iq, k);
+    st_wr = k + 1u;
+    st_ok++;
+    if ((st_ok & 15u) == 0u) {
+        stream_poll();                          /* also during long receive bursts */
+    }
+    used = st_wr - st_rd;
+    if (used > st_ring_max) {
+        st_ring_max = (u32)used;
+    }
+}
+
+static void stream_drain(void)
+{
+    XTime t0, t1;
+    XTime_GetTime(&t0);
+    if (st_norec) {                             /* build 31: the PL discards PL / CH / LQ records */
+        drain_events();
+        drain_timing();
+        drain_control();
+        drain_tb();
+    } else {
+        drain_all();
+    }
+
+    XTime_GetTime(&t1);
+    st_drain_t += t1 - t0;
+    if (t1 - t0 > st_drain_max) {
+        st_drain_max = t1 - t0;
+    }
+    st_drains++;
+    if (!(st_flags & ST_FLAG_KEEP_PL)) {        /* drained (the PL must not wait), not kept */
+        pl_n = ch_n = lq_n = 0;
+        pl_lost = ch_lost = lq_lost = 0;
+    }
+}
+
+/* the DMA: finish the transfer in flight, start the next; returns 1 while a transfer runs */
+static int stream_dma(int flush)
+{
+    u64 commit, avail, len, room;
+    if (st_dma_len) {
+        if (XAxiDma_Busy(&dma, XAXIDMA_DMA_TO_DEVICE)) {
+            XTime now;
+            XTime_GetTime(&now);
+            if (now - st_dma_t0 <= ST_STALL_COUNTS) {
+                return 1;
+            }
+            /* stalled: a halted DMA (error) never reports idle, a receiver that holds its input
+             * never lets the transfer finish - keep what tells them apart, reset, go on */
+            st_stalls++;
+            st_stall_sr = XAxiDma_ReadReg(dma.RegBase + XAXIDMA_TX_OFFSET, XAXIDMA_SR_OFFSET);
+            st_stall_status = pd_rd(R_STATUS);
+            st_stall_samples = pd_rd(R_SAMPLES);
+            st_stall_lv[0] = pd_rd(R_EV_LEVEL);
+            st_stall_lv[1] = pd_rd(R_TM_LEVEL);
+            st_stall_lv[2] = pd_rd(R_CF_LEVEL);
+            st_stall_lv[3] = pd_rd(R_PL_LEVEL);
+            st_stall_lv[4] = pd_rd(R_CH_LEVEL);
+            st_stall_lv[5] = pd_rd(R_LQ_LEVEL);
+            st_stall_lv[6] = pd_rd(R_TB_LEVEL);
+            if (st_stalls <= 3u) {
+                xil_printf("STREAM DMA STALL %d: MM2S SR 0x%08x, STATUS 0x%08x, samples %d, levels ev %d tm %d "
+                           "cf %d pl %d ch %d lq %d tb %d\r\n", (int)st_stalls, (unsigned)st_stall_sr,
+                           (unsigned)st_stall_status, (int)st_stall_samples, (int)st_stall_lv[0],
+                           (int)st_stall_lv[1], (int)st_stall_lv[2], (int)st_stall_lv[3], (int)st_stall_lv[4],
+                           (int)st_stall_lv[5], (int)st_stall_lv[6]);
+            }
+            dma_reset();
+        } else if (XAxiDma_ReadReg(dma.RegBase + XAXIDMA_TX_OFFSET, XAXIDMA_SR_OFFSET) & XAXIDMA_ERR_ALL_MASK) {
+            st_dma_errors++;
+            dma_reset();
+        }
+        st_rd = st_dma_end;
+        st_dma_len = 0;
+        st_chunks++;
+    }
+    commit = st_wr > ST_HOLD ? st_wr - ST_HOLD : 0u;
+    if (flush) {
+        commit = st_wr;
+    } else {
+        XTime now;
+        XTime_GetTime(&now);
+        if (now - st_t_last > ST_IDLE_COUNTS) {
+            commit = st_wr;                     /* quiet: feed the tail too */
+            flush = 1;
+        }
+    }
+    if (commit <= st_rd) {
+        return 0;
+    }
+    avail = commit - st_rd;
+    if (avail < ST_CHUNK && !flush) {
+        return 0;
+    }
+    len = avail < ST_CHUNK ? avail : ST_CHUNK;
+    room = ST_SLOTS - st_rd % ST_SLOTS;          /* not across the end of the ring */
+    if (len > room) {
+        len = room;
+    }
+    if (XAxiDma_SimpleTransfer(&dma, (UINTPTR)st_slot(st_rd), (u32)len * ST_SLOT_BYTES,
+                               XAXIDMA_DMA_TO_DEVICE) != XST_SUCCESS) {
+        st_dma_errors++;
+        dma_reset();
+        return 0;
+    }
+    st_dma_len = (u32)len;
+    st_dma_end = st_rd + len;
+    XTime_GetTime(&st_dma_t0);
+    return 1;
+}
+
+static void stream_poll(void)                   /* from transfer_data() */
+{
+    XTime now;
+    if (!st_on) {
+        return;
+    }
+    stream_dma(0);
+    tx_pace();                                  /* build 37: also during long receive bursts */
+    XTime_GetTime(&now);
+    if (now - st_t_drain > (st_norec ? ST_DRAIN_NOREC_COUNTS : ST_DRAIN_COUNTS)) {
+        st_t_drain = now;
+        stream_drain();
+    }
+}
+
+static void stream_stats(u8 *o)
+{
+    XTime now;
+    u32 st = det_ok ? pd_rd(R_STATUS) : 0u;
+    XTime_GetTime(&now);
+    if (udp_pcb_s != NULL) {
+        gem_counters();
+    }
+    st_lost_mask |= (ev_lost ? ST_LOST_EV : 0u) | (tm_lost ? ST_LOST_TM : 0u) | (cf_lost ? ST_LOST_CF : 0u) |
+                    (pl_lost ? ST_LOST_PL : 0u) | (ch_lost ? ST_LOST_CH : 0u) | (lq_lost ? ST_LOST_LQ : 0u) |
+                    (tb_lost ? ST_LOST_TB : 0u);
+    memset(o, 0, ST_STATS_SIZE);
+    wr32(o + 0,  ST_STATS_SIZE);
+    wr32(o + 4,  (u32)st_on);
+    wr32(o + 8,  ms_since(st_t_start, now));
+    wr32(o + 12, st_ok);
+    wr32(o + 16, st_lost);
+    wr32(o + 20, st_late_fixed);
+    wr32(o + 24, st_late_dropped);
+    wr32(o + 28, st_ring_full);
+    wr32(o + 32, st_resyncs);
+    wr32(o + 36, (u32)(st_wr - st_rd));
+    wr32(o + 40, st_ring_max);
+    wr32(o + 44, st_chunks);
+    wr32(o + 48, st_dma_errors);
+    wr32(o + 52, st);
+    wr32(o + 56, rx_alloc_fail() - udp_alloc0);
+    wr32(o + 60, gem_reserr);
+    wr32(o + 64, gem_overrun);
+    wr32(o + 68, st_lost_mask);
+    wr32(o + 72, st_epoch);
+    wr32(o + 76, det_ok ? pd_rd(R_SAMPLES) : 0u);
+    {
+        u64 fed = st_rd * ESR2_SPP;
+        memcpy(o + 80, &fed, 8);
+    }
+    wr32(o + 88, (u32)http_state);
+    wr32(o + 92, http_code);
+    wr32(o + 96, http_err);
+    wr32(o + 100, udp_bad_size + udp_bad_magic);
+    wr32(o + 104, st_polls);
+    wr32(o + 108, udp_dup);
+    wr32(o + 112, st_stalls);
+    wr32(o + 116, st_stall_sr);
+    wr32(o + 120, st_stall_status);
+    {
+        u32 i;
+        for (i = 0; i < 7u; i++) {
+            wr32(o + 124u + 4u * i, st_stall_lv[i]);
+        }
+    }
+    wr32(o + 152, st_stall_samples);
+    wr32(o + 156, dma_ok ? XAxiDma_ReadReg(dma.RegBase + XAXIDMA_TX_OFFSET, XAXIDMA_SR_OFFSET) : 0u);
+    wr32(o + 160, st_gaps);
+    {
+        u32 i;
+        for (i = 0; i < ST_GAPS; i++) {
+            wr32(o + 164u + 8u * i, st_gap_k[i]);
+            wr32(o + 168u + 8u * i, st_gap_n[i]);
+        }
+    }
+    /* build 30 (microseconds unless noted) */
+    wr32(o + 228, pd_reads - st_reads0);
+    wr32(o + 232, (u32)((udp_t_busy - st_busy0) / (COUNTS_PER_SECOND / 1000000u)));
+    wr32(o + 236, (u32)(st_drain_t / (COUNTS_PER_SECOND / 1000000u)));
+    wr32(o + 240, (u32)(st_drain_max / (COUNTS_PER_SECOND / 1000000u)));
+    wr32(o + 244, (u32)(st_poll_t / (COUNTS_PER_SECOND / 1000000u)));
+    wr32(o + 248, (u32)(st_poll_max / (COUNTS_PER_SECOND / 1000000u)));
+    wr32(o + 252, (u32)(st_loop_max / (COUNTS_PER_SECOND / 1000000u)));
+    wr32(o + 256, st_drains);
+}
+
+/* stats + the records collected since the last poll, in the RUN reply format; clears them */
+static u32 stream_pack(void)
+{
+    u32 o, fixed, n_ev, keep = (st_flags & ST_FLAG_KEEP_PL) != 0u;
+    u32 npl = keep ? pl_n : 0u, nch = keep ? ch_n : 0u, nlq = keep ? lq_n : 0u;
+    stream_stats(poll_out);
+    o = ST_STATS_SIZE;
+    fixed = o + 32u + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * (npl + nch + nlq) + tb_bytes;
+    n_ev = ev_n;
+    if (fixed + EV_SIZE * n_ev > MAX_PAYLOAD) {  /* cannot happen with the buffer limits; be safe */
+        n_ev = (MAX_PAYLOAD - fixed) / EV_SIZE;
+        st_lost_mask |= ST_LOST_EV;
+        wr32(poll_out + 68, st_lost_mask);
+    }
+    wr32(poll_out + o, n_ev);
+    wr32(poll_out + o + 4u, 0u);
+    memcpy(poll_out + o + 8u, ev_out + 8u, EV_SIZE * n_ev);
+    o += 8u + EV_SIZE * n_ev;
+    wr32(poll_out + o, tm_n);  memcpy(poll_out + o + 4u, tm_out, TM_SIZE * tm_n);  o += 4u + TM_SIZE * tm_n;
+    wr32(poll_out + o, cf_n);  memcpy(poll_out + o + 4u, cf_out, CF_SIZE * cf_n);  o += 4u + CF_SIZE * cf_n;
+    wr32(poll_out + o, npl);   memcpy(poll_out + o + 4u, pl_out, PL_SIZE * npl);   o += 4u + PL_SIZE * npl;
+    wr32(poll_out + o, nch);   memcpy(poll_out + o + 4u, ch_out, PL_SIZE * nch);   o += 4u + PL_SIZE * nch;
+    wr32(poll_out + o, nlq);   memcpy(poll_out + o + 4u, lq_out, PL_SIZE * nlq);   o += 4u + PL_SIZE * nlq;
+    wr32(poll_out + o, tb_n);  memcpy(poll_out + o + 4u, tb_out, tb_bytes);        o += 4u + tb_bytes;
+    ev_n = 0; ev_lost = 0; tm_n = 0; tm_lost = 0; cf_n = 0; cf_lost = 0;
+    pl_n = 0; pl_lost = 0; ch_n = 0; ch_lost = 0; lq_n = 0; lq_lost = 0;
+    tb_n = 0; tb_bytes = 0; tb_lost = 0;
+    st_lost_mask = 0;
+    st_polls++;
+    if (st_test_pad && o + st_test_pad <= MAX_PAYLOAD) {   /* build 34 test */
+        memset(poll_out + o, 0, st_test_pad);
+        o += st_test_pad;
+    }
+    return o;
+}
+
+/* STREAM_STOP: no more datagrams; feed what is in the ring, let the receiver finish */
+static void stream_stop(void)
+{
+    u32 polls;
+    if (!st_on) {
+        return;
+    }
+    /* stop storing, but keep the UDP port bound (the callback only counts now): with no pcb,
+     * lwIP would answer every datagram still coming from the CoreBoard with an ICMP "port
+     * unreachable". UDP_STOP (or the next STREAM_START / UDP_START) closes it. */
+    udp_mode = 0;
+    {
+        XTime t0, now;
+        XTime_GetTime(&t0);
+        for (polls = 0; stream_dma(1) || st_rd < st_wr; polls++) {
+            if ((polls & 0xFFu) == 0u) {
+                stream_drain();
+                XTime_GetTime(&now);
+                if (now - t0 > ST_STOP_COUNTS) {
+                    xil_printf("STREAM_STOP: ring not fed to the end in 2 s (%d slots left)\r\n",
+                               (int)(st_wr - st_rd));
+                    dma_reset();
+                    st_dma_len = 0;
+                    break;
+                }
+            }
+        }
+    }
+    for (polls = IDLE_TIMEOUT_POLLS; det_ok && (pd_rd(R_STATUS) & STATUS_BUSY) && polls > 0; polls--) {
+        stream_drain();
+    }
+    stream_drain();
+    pd_wr(R_CTRL, 0);
+    ring_map(0);
+    st_on = 0;
+    st_norec = 0;
+    tx_paced = 0;
+    xil_printf("Stream stopped: %d datagrams, %d lost (zero-filled), %d late fixed, %d too late, "
+               "%d ring full, %d resyncs, ring max %d of %d, %d DMA chunks, %d DMA errors\r\n",
+               (int)st_ok, (int)st_lost, (int)st_late_fixed, (int)st_late_dropped, (int)st_ring_full,
+               (int)st_resyncs, (int)st_ring_max, (int)ST_SLOTS, (int)st_chunks, (int)st_dma_errors);
+}
+
+static void udp_stop(void)
+{
+    if (st_on) {
+        stream_stop();
+        return;
+    }
+    if (udp_pcb_s != NULL) {
+        udp_remove(udp_pcb_s);
+        udp_pcb_s = NULL;
+        ring_map(0);
+        gem_counters();
+        xil_printf("UDP stream receiver stopped: %d datagrams, %d lost, %d late, %d duplicate, "
+                   "GEM: %d no-buffer, %d overrun; pool empty %d, skipped %d\r\n", (int)udp_ok, (int)udp_lost,
+                   (int)udp_late, (int)udp_dup, (int)gem_reserr, (int)gem_overrun,
+                   (int)(rx_alloc_fail() - udp_alloc0), (int)udp_skipped);
+    }
+}
+
+static void udp_stats(u8 *o)
+{
+    XTime now;
+    XTime_GetTime(&now);
+    if (udp_pcb_s != NULL) {
+        gem_counters();
+    }
+    wr32(o + 0,  udp_pcb_s != NULL);
+    wr32(o + 4,  udp_mode);
+    wr32(o + 8,  udp_port);
+    wr32(o + 12, ms_since(udp_t_start, now));
+    wr32(o + 16, udp_have_first ? ms_since(udp_t_first, udp_t_last) : 0u);
+    wr32(o + 20, udp_ok);
+    wr32(o + 24, udp_bad_size);
+    wr32(o + 28, udp_bad_magic);
+    wr32(o + 32, udp_epoch);
+    wr32(o + 36, udp_epochs);
+    wr32(o + 40, udp_lost);
+    wr32(o + 44, udp_late);
+    wr32(o + 48, udp_dup);
+    wr32(o + 52, gem_rx_frames());
+    wr32(o + 56, gem_reserr);
+    wr32(o + 60, gem_overrun);
+    wr32(o + 64, (u32)(udp_t_busy / (COUNTS_PER_SECOND / 1000u)));
+    wr32(o + 68, udp_loops);
+    memcpy(o + 72, &udp_first_pos, 8);
+    memcpy(o + 80, &udp_last_pos, 8);
+    wr32(o + 88, udp_skipped);
+    wr32(o + 92, rx_alloc_fail() - udp_alloc0);
+}
+
+static void udp_poll(void)                      /* from transfer_data(): main-loop count, 1 s log */
+{
+    XTime now;
+    if (udp_pcb_s == NULL) {
+        return;
+    }
+    udp_loops++;
+    XTime_GetTime(&now);
+    if (udp_mode == 5u && st_on && now - udp_t_poll > st_loop_max) {
+        st_loop_max = now - udp_t_poll;         /* build 30: longest main-loop pass while streaming */
+    }
+    udp_t_poll = now;
+    tx_pace();                                  /* build 35 */
+    if ((udp_loops & 0x3FFu) != 0u) {
+        return;
+    }
+    if (udp_mode == 5u) {
+        return;                                 /* build 30: no 11 ms UART line while streaming */
+    }
+    XTime_GetTime(&now);
+    if (now - udp_t_print < COUNTS_PER_SECOND) {
+        return;
+    }
+    if (udp_ok != udp_print_ok) {
+        u32 dt = ms_since(udp_t_print, now);
+        u32 rate = (u32)((u64)(udp_ok - udp_print_ok) * 1000u / (dt ? dt : 1u));
+        gem_counters();
+        xil_printf("  UDP %d datagrams/s (%d Mbit/s), lost %d (+%d), late %d, dup %d, skipped %d, pool empty %d, GEM no-buffer %d overrun %d\r\n",
+                   (int)rate, (int)(rate * (ESR2_LEN + 42u) * 8u / 1000000u), (int)udp_lost,
+                   (int)(udp_lost - udp_print_lost), (int)udp_late, (int)udp_dup, (int)udp_skipped,
+                   (int)(rx_alloc_fail() - udp_alloc0),
+                   (int)gem_reserr, (int)gem_overrun);
+    }
+    udp_print_ok = udp_ok;
+    udp_print_lost = udp_lost;
+    udp_t_print = now;
+    XTime_GetTime(&udp_t_poll);                 /* the UART print itself takes ~11 ms */
+}
+
 static void handle_message(struct tcp_pcb *pcb)
 {
     u16 cmd;
@@ -904,11 +1971,16 @@ static void handle_message(struct tcp_pcb *pcb)
                             (det_version >= PD_ID_V6 ? BOARD_FLAG_PAYLOAD : 0u) |
                             (det_version >= PD_ID_V7 ? BOARD_FLAG_CHEST : 0u) |
                             (det_version >= PD_ID_V8 ? BOARD_FLAG_LQ : 0u) |
-                            (det_version >= PD_ID_V9 ? BOARD_FLAG_TB : 0u));
+                            (det_version >= PD_ID_V9 ? BOARD_FLAG_TB : 0u) |
+                            (det_version >= PD_ID_V91 ? BOARD_FLAG_PACK8 : 0u) |
+                            (det_version >= PD_ID_V92 ? BOARD_FLAG_NOREC : 0u));
         reply(pcb, cmd, ST_OK, seq, tx_small, 16);
         return;
 
     case CMD_RESET:
+        if (st_on) {
+            stream_stop();
+        }
         seg_n = 0;
         load_n = 0;
         samples_stored = 0;
@@ -961,6 +2033,10 @@ static void handle_message(struct tcp_pcb *pcb)
 
     case CMD_LOAD_SAMPLES: {
         u32 offset, count;
+        if (st_on) {
+            reply_error(pcb, cmd, ST_BAD_CMD, seq, "streaming: STREAM_STOP first");
+            return;
+        }
         if (len < 4 || (len - 4) % 4 != 0) {
             reply_error(pcb, cmd, ST_BAD_ARG, seq, "LOAD_SAMPLES: payload must be u32 offset + 4-byte samples");
             return;
@@ -1008,16 +2084,48 @@ static void handle_message(struct tcp_pcb *pcb)
 
     case CMD_RUN: {
         u32 count, flags;
+        if (st_on) {
+            reply_error(pcb, cmd, ST_BAD_CMD, seq, "streaming: STREAM_STOP first");
+            return;
+        }
         if (len < 8) {
             reply_error(pcb, cmd, ST_BAD_ARG, seq, "RUN: payload must be u32 count, u32 flags");
             return;
         }
         count = rd32(pl);
         flags = rd32(pl + 4);
+        if (flags & RUN_FLAG_PACK8) {
+            /* build 24: the buffer words hold two int8 samples each; count is in samples */
+            if (det_version < PD_ID_V91) {
+                reply_error(pcb, cmd, ST_BAD_CMD, seq, "RUN PACK8 needs bitstream 9.1 (pd_unpack8)");
+                return;
+            }
+            if (flags & RUN_FLAG_PL_LOOPBACK) {
+                reply_error(pcb, cmd, ST_BAD_ARG, seq, "RUN PACK8: not with the PL loopback");
+                return;
+            }
+            if ((flags & RUN_FLAG_DEBUG) && rd32(params + 28) != 2u) {
+                reply_error(pcb, cmd, ST_BAD_ARG, seq, "RUN PACK8 with debug records needs input_stage 2");
+                return;
+            }
+            if (count == 0) {
+                count = 2u * samples_stored;
+            }
+            if (count & 1u) {
+                reply_error(pcb, cmd, ST_BAD_ARG, seq, "RUN PACK8: count must be even (two samples per word)");
+                return;
+            }
+            if (count / 2u > samples_stored) {
+                snprintf(msg, sizeof(msg), "run %lu packed samples, buffer has %lu words",
+                         (unsigned long)count, (unsigned long)samples_stored);
+                reply_error(pcb, cmd, ST_BAD_ARG, seq, msg);
+                return;
+            }
+        }
         if (count == 0) {
             count = samples_stored;
         }
-        if (count > samples_stored) {
+        if (!(flags & RUN_FLAG_PACK8) && count > samples_stored) {
             snprintf(msg, sizeof(msg), "run %lu samples, buffer has %lu",
                      (unsigned long)count, (unsigned long)samples_stored);
             reply_error(pcb, cmd, ST_BAD_ARG, seq, msg);
@@ -1043,7 +2151,8 @@ static void handle_message(struct tcp_pcb *pcb)
                 detector_reset();
             }
             debug_count = 0;
-            if (detector_run(count, (flags & RUN_FLAG_DEBUG) != 0, msg, sizeof(msg)) != 0) {
+            if (detector_run(count, (flags & RUN_FLAG_DEBUG) != 0, (flags & RUN_FLAG_PACK8) != 0,
+                             msg, sizeof(msg)) != 0) {
                 reply_error(pcb, cmd, ST_INTERNAL, seq, msg);
                 return;
             }
@@ -1136,6 +2245,134 @@ static void handle_message(struct tcp_pcb *pcb)
         return;
     }
 
+    case CMD_UDP_START: {
+        /* build 17: u16 port (0 = 4000), u16 mode (0 count, 1 count + convert). Reply: u32 port */
+        u16 port16 = 0, mode16 = 0;
+        if (len >= 2u) memcpy(&port16, pl, 2);
+        if (len >= 4u) memcpy(&mode16, pl + 2, 2);
+        if (mode16 > 4u) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "UDP_START: mode must be 0 (count), 1..3 (convert) or 4 (raw copy)");
+            return;
+        }
+        if (udp_start(port16 ? port16 : UDP_DEFAULT_PORT, mode16) != 0) {
+            reply_error(pcb, cmd, ST_INTERNAL, seq, "UDP_START: cannot open the UDP port");
+            return;
+        }
+        wr32(tx_small, udp_port);
+        reply(pcb, cmd, ST_OK, seq, tx_small, 4);
+        return;
+    }
+
+    case CMD_UDP_STATS:
+        udp_stats(tx_small);
+        reply(pcb, cmd, ST_OK, seq, tx_small, UDP_STATS_SIZE);
+        return;
+
+    case CMD_STREAM_START: {
+        /* build 25: u16 udp_port (0 = 4000), u16 flags (ST_FLAG_KEEP_PL), u32 CoreBoard IPv4
+         * (bytes a.b.c.d in order; 0 = the PC starts the stream), u16 HTTP port, u16 JSON length,
+         * then the JSON body of the board's "start" (the PC fills in the port). The receiver uses
+         * the parameters of the last SET_PARAMS (input_stage 1 or 2). Reply: u32 udp port. */
+        u16 port16 = 0, fl16 = 0, hp = 80, jl = 0;
+        int r;
+        if (len >= 2u) memcpy(&port16, pl, 2);
+        if (len >= 4u) memcpy(&fl16, pl + 2, 2);
+        cb_ip = len >= 8u ? rd32(pl + 4) : 0u;
+        if (len >= 10u) memcpy(&hp, pl + 8, 2);
+        if (len >= 12u) memcpy(&jl, pl + 10, 2);
+        if (len < 12u + jl) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "STREAM_START: payload shorter than its JSON length");
+            return;
+        }
+        if (!det_ok || det_version < PD_ID_V91 || !dma_ok) {
+            reply_error(pcb, cmd, ST_BAD_CMD, seq, "STREAM_START needs the detector with PACK8 (bitstream 9.1) and the DMA");
+            return;
+        }
+        if (rd32(params + 28) != 1u && rd32(params + 28) != 2u) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "STREAM_START: SET_PARAMS input_stage must be 1 (20 Msps) or 2 (40 Msps)");
+            return;
+        }
+        if (st_on) {
+            stream_stop();
+        }
+        cb_port = hp ? hp : 80u;
+        det_cfg = 1;
+        detector_reset();                       /* parameters of the last SET_PARAMS */
+        st_reset(fl16);
+        if (udp_start(port16 ? port16 : UDP_DEFAULT_PORT, 5u) != 0) {
+            reply_error(pcb, cmd, ST_INTERNAL, seq, "STREAM_START: cannot open the UDP port");
+            return;
+        }
+        st_busy0 = udp_t_busy;                  /* build 32: udp_start clears it (st_reset is before) */
+        st_norec = det_version >= PD_ID_V92 && !(fl16 & ST_FLAG_KEEP_PL);
+        tx_paced = !(fl16 & ST_FLAG_NOPACE);
+        pd_wr(R_CTRL, CTRL_PACK8 | (st_norec ? CTRL_NOREC : 0u));
+        st_on = 1;
+        r = jl ? http_post((const char *)(pl + 12), jl) : 0;
+        if (r != 0) {
+            snprintf(msg, sizeof(msg), "STREAM_START: HTTP request to the CoreBoard failed (%d)", r);
+            stream_stop();
+            reply_error(pcb, cmd, ST_INTERNAL, seq, msg);
+            return;
+        }
+        xil_printf("Streaming: UDP port %d, PACK8%s, input_stage %d, dc_shift %d%s\r\n", (int)udp_port,
+                   st_norec ? " NOREC" : "", (int)rd32(params + 28), (int)rd32(params + 32),
+                   jl ? ", CoreBoard started by HTTP" : "");
+        wr32(tx_small, udp_port);
+        reply(pcb, cmd, ST_OK, seq, tx_small, 4);
+        return;
+    }
+
+    case CMD_POLL_RESULTS: {
+        /* build 25: stats (ST_STATS_SIZE bytes, pd_protocol.StreamStats) + the records since the
+         * last poll in the RUN reply format (pd_protocol.parse_run_reply_tb) */
+        u32 n;
+        XTime t0, t1;
+        XTime_GetTime(&t0);
+        if (st_on) {
+            stream_drain();
+        }
+        n = stream_pack();
+        reply(pcb, cmd, ST_OK, seq, poll_out, n);
+        XTime_GetTime(&t1);                     /* build 30: the poll's CPU time (reply queued) */
+        st_poll_t += t1 - t0;
+        if (t1 - t0 > st_poll_max) {
+            st_poll_max = t1 - t0;
+        }
+        return;
+    }
+
+    case CMD_STREAM_STOP: {
+        /* build 25: u16 JSON length + JSON of the board's "stop" (0 = none); the ring is fed to
+         * the end, then the reply is as POLL_RESULTS (the last records) */
+        u16 jl = 0;
+        u32 n;
+        if (len >= 2u) memcpy(&jl, pl, 2);
+        if (jl && len >= 2u + jl) {
+            http_post((const char *)(pl + 2), jl);
+        }
+        stream_stop();
+        n = stream_pack();
+        reply(pcb, cmd, ST_OK, seq, poll_out, n);
+        return;
+    }
+
+    case CMD_GEM_STATS: {
+        u32 i;
+        gem_counters();
+        for (i = 0; i < GEM_STAT_N; i++) {
+            wr32(tx_small + 4u * i, gem_acc[i]);
+        }
+        reply(pcb, cmd, ST_OK, seq, tx_small, GEM_STAT_N * 4u);
+        return;
+    }
+
+    case CMD_UDP_STOP:
+        udp_stop();
+        udp_stats(tx_small);
+        reply(pcb, cmd, ST_OK, seq, tx_small, UDP_STATS_SIZE);
+        return;
+
     case CMD_REG_READ:
     case CMD_REG_WRITE: {
         u32 a;
@@ -1144,8 +2381,14 @@ static void handle_message(struct tcp_pcb *pcb)
             return;
         }
         a = rd32(pl);
-        if (a < 0x40000000u || a > 0x7FFFFFFCu || (a & 3u)) {
-            reply_error(pcb, cmd, ST_BAD_ARG, seq, "register address must be 4-byte aligned in 0x40000000..0x7FFFFFFF");
+        /* build 28: also the DDR controller's port priorities (UG585 axi_priority_wr_port0..3 at
+         * 0xF8006208..0xF8006214, axi_priority_rd_port0..3 at 0xF8006218..0xF8006224) */
+        /* build 33: also the Ethernet controller's control registers (GEM0 0xE000B000..0xE000B0FC;
+         * not its statistics from 0x100, which clear when read) */
+        if ((a & 3u) || !((a >= 0x40000000u && a <= 0x7FFFFFFCu) || (a >= 0xF8006208u && a <= 0xF8006224u) ||
+                          (a >= 0xE000B000u && a <= 0xE000B0FCu))) {
+            reply_error(pcb, cmd, ST_BAD_ARG, seq, "register address must be 4-byte aligned in 0x40000000..0x7FFFFFFF, "
+                        "0xF8006208..0xF8006224 or 0xE000B000..0xE000B0FC");
             return;
         }
         if (cmd == CMD_REG_WRITE) {
@@ -1277,7 +2520,9 @@ static err_t sent_cb(void *arg, struct tcp_pcb *pcb, u16_t len)
 {
     (void)arg;
     (void)len;
-    tx_pump(pcb);
+    if (!tx_paced) {                    /* build 35: paced sends come from tx_pace() */
+        tx_pump(pcb);
+    }
     return ERR_OK;
 }
 
@@ -1378,6 +2623,36 @@ static err_t accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err)
     return ERR_OK;
 }
 
+
+/* Build 20: report CPU exceptions on the UART instead of the BSP's silent endless loop.
+ * DataAbortAddr / PrefetchAbortAddr / UndefinedExceptionAddr are set by the BSP's vectors. */
+extern u32 DataAbortAddr, PrefetchAbortAddr, UndefinedExceptionAddr;
+
+static void report_exception(void *what)
+{
+    u32 dfsr, dfar, ifsr, ifar;
+    __asm__ volatile("mrc p15, 0, %0, c5, c0, 0" : "=r"(dfsr));
+    __asm__ volatile("mrc p15, 0, %0, c6, c0, 0" : "=r"(dfar));
+    __asm__ volatile("mrc p15, 0, %0, c5, c0, 1" : "=r"(ifsr));
+    __asm__ volatile("mrc p15, 0, %0, c6, c0, 2" : "=r"(ifar));
+    xil_printf("\r\n*** CPU EXCEPTION: %s ***\r\n", (const char *)what);
+    xil_printf("    data abort at PC 0x%08x: DFSR 0x%08x DFAR 0x%08x\r\n",
+               (unsigned int)DataAbortAddr, (unsigned int)dfsr, (unsigned int)dfar);
+    xil_printf("    prefetch abort at 0x%08x: IFSR 0x%08x IFAR 0x%08x; undefined instruction at 0x%08x\r\n",
+               (unsigned int)PrefetchAbortAddr, (unsigned int)ifsr, (unsigned int)ifar,
+               (unsigned int)UndefinedExceptionAddr);
+    xil_printf("    (arm-none-eabi-addr2line -e pd_server.elf <PC> gives the source line)\r\n");
+    for (;;) {
+    }
+}
+
+static void exceptions_init(void)
+{
+    Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_DATA_ABORT_INT, report_exception, (void *)"data abort");
+    Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_PREFETCH_ABORT_INT, report_exception, (void *)"prefetch abort");
+    Xil_ExceptionRegisterHandler(XIL_EXCEPTION_ID_UNDEFINED_INT, report_exception, (void *)"undefined instruction");
+}
+
 /* pd_protocol.Params defaults, until the PC sends SET_PARAMS */
 static void pr_default_params(void)
 {
@@ -1397,6 +2672,8 @@ void print_app_header(void)
     xil_printf("TCP port %d, sample buffer %d samples at 0x%08x\r\n",
                PD_PORT, (int)MAX_SAMPLES, (unsigned int)SAMPLE_BUF_ADDR);
     xil_printf("Phase 2: packet detector in the PL, registers at 0x%08x\r\n", (unsigned int)PD_BASE);
+    xil_printf("CoreBoard UDP stream test (UDP_START / UDP_STATS / UDP_STOP), default UDP port %d\r\n",
+               (int)UDP_DEFAULT_PORT);
 }
 
 int start_application(void)
@@ -1404,6 +2681,7 @@ int start_application(void)
     struct tcp_pcb *pcb;
     err_t err;
 
+    exceptions_init();
     dma_ok = (dma_init() == 0);
     if (!dma_ok) {
         xil_printf("WARNING: DMA unavailable - LOAD/READ work, RUN will fail\r\n");
@@ -1443,5 +2721,7 @@ int start_application(void)
 
 int transfer_data(void)
 {
+    udp_poll();
+    stream_poll();
     return 0;
 }

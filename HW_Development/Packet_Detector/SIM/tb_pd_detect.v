@@ -4,7 +4,10 @@
 // by make_tb_vectors.py (cfg.txt, in.txt, exp_lpf.txt, exp_dbg.txt, exp_trig.txt, exp_cfo.txt,
 // exp_tone.txt) from the current directory (run_sim.sh runs the simulator inside the vector's
 // folder), feeds the samples with random gaps in tvalid (+gap=N: up to N idle clocks between
-// samples, 0 = one sample per clock, +seed=S; +fixgap=1: exactly N, e.g. 4 = 20 Msps), obeys tready, and checks every LPF output sample,
+// samples, 0 = one sample per clock, +seed=S; +fixgap=1: exactly N, e.g. 4 = 20 Msps; +burst=M
+// +burstgap=L: after every M samples also L idle clocks, as the streaming DMA feeds it - the
+// receiver catches up with the stream and waits; +burstoff=O: the first pause after O + M samples),
+// obeys tready, and checks every LPF output sample,
 // every debug record, every trigger, every CFO result (window start, the four lag accumulators,
 // the four CORDIC angles and cfo_inc), every event after the tone check (CFO fields, tone
 // num / den, fail), every control record (exp_cf.txt, in order) and every Preamble B timing
@@ -395,7 +398,7 @@ module tb_pd_detect;
     end
 
     // ------------------------------------------------------------------ stimulus
-    integer i, w, idle, rnd;
+    integer i, w, idle, rnd, burst, burstgap, burstoff, hold;
     reg [15:0] si, sq;
     initial begin
         gap = 3; seed = 1; maxerr = 10; fixgap = 0;
@@ -403,6 +406,10 @@ module tb_pd_detect;
         rc = $value$plusargs("fixgap=%d", fixgap);
         rc = $value$plusargs("seed=%d", seed);
         rc = $value$plusargs("maxerr=%d", maxerr);
+        burst = 0; burstgap = 0; burstoff = 0;
+        rc = $value$plusargs("burst=%d", burst);
+        rc = $value$plusargs("burstgap=%d", burstgap);
+        rc = $value$plusargs("burstoff=%d", burstoff);
 
         f_cfg  = $fopen("cfg.txt", "r");
         f_in   = $fopen("in.txt", "r");
@@ -461,6 +468,7 @@ module tb_pd_detect;
         tone_lin    = cfg_lin[23:0];
         $display("Vector: %0d samples, input_stage %0d, dc_shift %0d, eta_hi_sq %0d, eta_lo_sq %0d, Q %0d, blank %0d, holdoff %0d, N_CFO %0d, %0d trigger(s), %0d CFO result(s); max gap %0d",
                  n_samples, cfg_stage, cfg_shift, cfg_hi, cfg_lo, cfg_q, cfg_blank, cfg_hold, cfg_ncfo, n_trig, n_cfo_ev, gap);
+        if (burst > 0) $display("Bursts: %0d idle clocks after every %0d samples (from sample %0d)", burstgap, burst, burstoff);
 
         repeat (5) @(negedge clk);
         rst_n = 1'b1;
@@ -470,6 +478,7 @@ module tb_pd_detect;
             r = $fscanf(f_in, "%h %h\n", si, sq);
             rnd  = $random(seed);
             idle = fixgap ? gap : (gap > 0) ? ((rnd & 32'h7fffffff) % (gap + 1)) : 0;
+            if (burst > 0 && i > burstoff && (i - burstoff) % burst == 0) idle = idle + burstgap;
             // inputs change on the falling edge only, so the DUT (rising edge) never races them;
             // a sample is taken at the first rising edge with tready = 1
             for (w = 0; w < idle; w = w + 1) begin
@@ -479,7 +488,36 @@ module tb_pd_detect;
             @(negedge clk);
             s_valid = 1'b1;
             s_data  = {sq, si};
-            while (!s_ready) @(negedge clk);
+            // deadlock guard: the input held for 4 M clocks (no block needs that long) -> report
+            // which stall keeps it and stop (a hang would otherwise run forever)
+            hold = 0;
+            while (!s_ready) begin
+                @(negedge clk);
+                hold = hold + 1;
+                if (hold == 4000000) begin
+                    $display("FAIL: DEADLOCK at input sample %0d (time %0t): input held %0d clocks; stall tone %b timing %b cf %b arm %b; busy: lane %b tone %b timing %b cf %b; arm state %0d",
+                             i, $time, hold, dut.stall_tone, dut.stall_tm, dut.stall_cf, dut.stall_arm,
+                             dut.lane_busy, dut.tone_busy, dut.tm_busy, dut.cf_busy, dut.u_arm.st);
+                    $display("       FIFOs: pl %0d ch %0d lq %0d tb %0d words; open windows %0d", pl_cnt, ch_cnt, lq_cnt, tb_cnt, open_n);
+                    // pd_cf: reader / start queue (which half of its stall), payload FIFO pointers
+                    $display("  pd_cf: active %b rx_more %b cf_ready %b ff_n %0d infl %0d avail %b | wp %0d rp %0d age_rp %0d | queue %0d, first %0d, age_q %0d | pl wr %0d cm %0d rd %0d, pl_room %b",
+                             dut.u_cf.active, dut.u_cf.rx_more, dut.u_cf.cf_ready, dut.u_cf.ff_n, dut.u_cf.infl, dut.u_cf.avail,
+                             dut.u_cf.wp, dut.u_cf.rp, dut.u_cf.age_rp, dut.u_cf.q_n, dut.u_cf.q_s[dut.u_cf.q_rd], dut.u_cf.age_q,
+                             dut.u_cf.pl_wr, dut.u_cf.pl_cm, dut.u_cf.pl_rd, dut.u_cf.pl_room);
+                    $display("         busy parts: chest %b (waiting %b) demap %b comb %b dec %b",
+                             dut.u_cf.ch_busy, dut.u_cf.ch_wait, dut.u_cf.dm_busy, dut.u_cf.cb_busy, dut.u_cf.dc_busy);
+                    // cf_rx: front end (F_IDLE 0, F_IN 1, F_DRAIN 2, F_FFT 3, F_FWAIT 4, F_UNLOAD 5, F_JOB 6), back end
+                    $display("  cf_rx: fst %0d bst %0d | isym %0d pos %0d at_pl %b pl_go %b decided %b pidx %0d pl_end %b | job_req %b st_pend %b",
+                             dut.u_cf.u_rx.fst, dut.u_cf.u_rx.bst, dut.u_cf.u_rx.isym, dut.u_cf.u_rx.pos, dut.u_cf.u_rx.at_pl,
+                             dut.u_cf.u_rx.pl_go, dut.u_cf.u_rx.decided, dut.u_cf.u_rx.pidx, dut.u_cf.u_rx.pl_end,
+                             dut.u_cf.u_rx.job_req, dut.u_cf.u_rx.st_pend);
+                    // pl_chest: state (E_* in pl_chest.v), symbol slots, packet queue
+                    $display("  pl_chest: es %0d | slots wr %0d free %0d (room %b) | packet queue %0d | job_req %b",
+                             dut.u_cf.u_ch.es, dut.u_cf.u_ch.wr_ptr, dut.u_cf.u_ch.fr_ptr, dut.u_cf.u_ch.room,
+                             dut.u_cf.u_ch.q_n, dut.u_cf.u_ch.job_req);
+                    $finish;
+                end
+            end
             if (i % 50000 == 49999) $display("  %0d samples in, %0d errors", i + 1, errors);
         end
         @(negedge clk);

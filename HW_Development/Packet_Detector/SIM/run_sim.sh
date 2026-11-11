@@ -17,6 +17,8 @@
 #   NCFO=4096 ./run_sim.sh cfo 1                   # other CFO window length (128..4096)
 #   REARM=0 ./run_sim.sh stress 1                  # fixed holdoff instead of the Rx state machine's re-arm
 #   PLGAP=20000 ./run_sim.sh                       # read payload records slowly (speculative FFT holds)
+#   BURST=43008 BURSTGAP=200000 ./run_sim.sh ../TestVectors/rep3.json 2   # streaming: 2 ms idle every 43008 samples
+#   (BURSTOFF=O shifts the pauses by O samples)
 #   ./run_sim.sh cfmod 1                           # rep3 with modified control fields: every re-arm decision
 #   ./run_sim.sh stress 1 / ./run_sim.sh cfo 1     # synthetic vectors (full scale / CFO sweep)
 #   ./run_sim.sh units                             # CORDIC, cascade, tone-check unit tests
@@ -99,12 +101,13 @@ case "$SIM" in
     # shellcheck disable=SC2086
     xelab --nolog --debug off ${XELAB_OPTS:-} "$TOP" -s "${TOP}_sim"
     xsim "${TOP}_sim" --nolog -R \
-        -testplusarg "gap=$GAP" -testplusarg "seed=$SEED" -testplusarg "fixgap=$FIXGAP" -testplusarg "plgap=${PLGAP:-0}" | tee ../../sim.log
+        -testplusarg "gap=$GAP" -testplusarg "seed=$SEED" -testplusarg "fixgap=$FIXGAP" -testplusarg "plgap=${PLGAP:-0}" \
+        -testplusarg "burst=${BURST:-0}" -testplusarg "burstgap=${BURSTGAP:-0}" -testplusarg "burstoff=${BURSTOFF:-0}" | tee ../../sim.log
     ;;
   verilator)
     verilator --binary --timing -Wno-fatal -DPD_SIM_CHECKS -I../RTL --top-module "$TOP" \
         --Mdir "work/obj_$TOP" -o "$TOP" -j 2 "${RTL[@]}" "$TB" > work/verilator_build.log
-    (cd "$DIR" && "../obj_$TOP/$TOP" "+gap=$GAP" "+seed=$SEED" "+fixgap=$FIXGAP" "+plgap=${PLGAP:-0}") | tee sim.log
+    (cd "$DIR" && "../obj_$TOP/$TOP" "+gap=$GAP" "+seed=$SEED" "+fixgap=$FIXGAP" "+plgap=${PLGAP:-0}" "+burst=${BURST:-0}" "+burstgap=${BURSTGAP:-0}" "+burstoff=${BURSTOFF:-0}") | tee sim.log
     ;;
   *)
     echo "SIM must be xsim or verilator" >&2; exit 2 ;;

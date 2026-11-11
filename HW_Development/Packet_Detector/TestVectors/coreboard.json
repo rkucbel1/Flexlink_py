@@ -1,0 +1,21 @@
+{
+ "format": "int16 I,Q interleaved, little-endian, 12-bit values (CoreBoard int8 x 16), 40 Msps",
+ "files": {
+  "input40": "coreboard_40.bin"
+ },
+ "samples_40": 4000000,
+ "sample_rate": 40000000.0,
+ "source": "EmuSource.cs8 from 2.6 s, 0.1 s (ESP32-S31 CoreBoard capture)",
+ "params": {
+  "eta_hi_sq": 8028,
+  "eta_lo_sq": 2621,
+  "qual_len": 128,
+  "n_cfo": 2048,
+  "blank_len": 288,
+  "tone_thresh": 3328,
+  "arm_holdoff": 95044,
+  "input_stage": 2,
+  "dc_shift": 6
+ },
+ "note": "made by PC/pd_make_coreboard_vector.py; no truth / expected_events (real capture)"
+}

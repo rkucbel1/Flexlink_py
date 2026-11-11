@@ -104,6 +104,7 @@ PHY_WAIT_S = 20
 
 def patch_phy_timeout(platform):
     vec_files = patch_irq_fpu_save()
+    alloc_files = patch_rx_alloc_print()
     files = glob.glob(os.path.join(WS, PLATFORM, "**", "libsrc", "lwip220", "**", "xemacpsif_physpeed.c"),
                       recursive=True)
     if not files:
@@ -141,6 +142,10 @@ def patch_phy_timeout(platform):
         with open(path) as f:
             if f"timeout_counter == {PHY_WAIT_S})" not in f.read():
                 print(f"Warning: the platform build restored the original {path} - timeout NOT patched")
+    for path in alloc_files:
+        with open(path) as f:
+            if ALLOC_COUNTER not in f.read():
+                print(f"Warning: the platform build restored the original {path} - pbuf-alloc print NOT removed")
 
 
 # The standalone BSP's IRQ / FIQ entry (asm_vectors.S) saves the VFP/NEON registers only when
@@ -150,6 +155,40 @@ def patch_phy_timeout(platform):
 # that table (0x404 0x408 / 0x624 0x628) in the copied data: about 0.13 % of the samples were
 # wrong on LOAD and READ (firmware builds 4-8; build 3 probably escaped by its memory layout). Patch the
 # platform's copy so the handlers always save d0-d7, d16-d31, FPSCR and FPEXC.
+# The lwIP Ethernet driver (xemacpsif_dma.c) prints "unable to alloc pbuf in recv_handler" from
+# the receive INTERRUPT each time the pbuf pool is empty. With the CoreBoard stream (60,000
+# frames/s) one overload then never ends: each line blocks ~4 ms on the 115200-baud UART while
+# frames keep arriving, and the board hangs (firmware build 20, mode 1). Replace the print with a
+# counter; pd_server.c (build 22) reports it as rx_alloc_fail in UDP_STATS.
+ALLOC_PRINT = re.compile(r'(?:xil_)?printf\s*\(\s*"unable to alloc pbuf in recv_handler\\r\\n"\s*\)\s*;')
+ALLOC_COUNTER = "pd_rx_alloc_fail++; /* Flexlink: was a printf in the interrupt */"
+ALLOC_DECL = "volatile unsigned int pd_rx_alloc_fail; /* Flexlink: pbuf pool empty in the rx interrupt */\n"
+
+
+def patch_rx_alloc_print():
+    files = glob.glob(os.path.join(WS, PLATFORM, "**", "libsrc", "lwip220", "**", "xemacpsif_dma.c"),
+                      recursive=True)
+    patched = []
+    for path in files:
+        with open(path) as f:
+            text = f.read()
+        new, n = ALLOC_PRINT.subn(ALLOC_COUNTER, text)
+        if n == 0:
+            continue
+        if ALLOC_DECL not in new:                      # define the counter after the last #include
+            last = [m.end() for m in re.finditer(r"^#include[^\n]*\n", new, re.M)]
+            at = last[-1] if last else 0
+            new = new[:at] + ALLOC_DECL + new[at:]
+        with open(path, "w") as f:
+            f.write(new)
+        patched.append(path)
+    if patched:
+        print(f"Removed the rx-interrupt pbuf-alloc print in {len(patched)} file(s) (now a counter)")
+    else:
+        print(f"Warning: the pbuf-alloc print was not found in {len(files)} xemacpsif_dma.c file(s) - not patched")
+    return patched
+
+
 FPU_GUARD = "#if FPU_HARD_FLOAT_ABI_ENABLED"
 FPU_FIXED = "#if 1 /* Flexlink: always save VFP state (was FPU_HARD_FLOAT_ABI_ENABLED) */"
 

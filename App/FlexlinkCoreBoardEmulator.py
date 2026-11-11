@@ -111,8 +111,9 @@ class Source:
 
 # ---------- the streamer ----------
 class Streamer:
-    def __init__(self, src: Source, speed: float, faults: dict, sndbuf_mb: int, seed: int):
+    def __init__(self, src: Source, speed: float, faults: dict, sndbuf_mb: int, seed: int, pace: int = 8):
         self.src, self.speed, self.faults = src, speed, faults
+        self.pace = max(1, pace)                   # datagrams sent back to back, then wait
         self.rng = np.random.default_rng(seed)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf_mb << 20)
@@ -161,6 +162,7 @@ class Streamer:
         hbytes = buf[:, :HDR_LEN]
         mv = memoryview(buf).cast("B")
         sendto = self.sock.sendto
+        pace = self.pace
         t_us0 = int((time.monotonic() - self.boot) * 1e6)
         t0 = time.monotonic()
         k = 0                                      # next datagram of the stream
@@ -194,12 +196,21 @@ class Streamer:
                     if f["duplicate"] > 0:
                         for i in np.flatnonzero(rng.random(BATCH) < f["duplicate"]):
                             dup[i] = True
-                # pacing: datagram k is due at t0 + k * pkt_s
-                lag = time.monotonic() - (t0 + k * pkt_s)
-                if lag < 0:
-                    time.sleep(-lag)
+                # pacing: datagram k is due at t0 + k * pkt_s, checked every self.pace datagrams
+                # (before: once per 128-datagram batch, sent back to back at line rate - 1.5 ms
+                # bursts at ~1.5 x the stream rate, and longer ones whenever this PC fell behind;
+                # the real CoreBoard sends evenly). Short waits spin: sleep() is too coarse.
+                lag = 0.0
                 errors = sent = 0
-                for i in order:
+                for j, i in enumerate(order):
+                    if j % pace == 0:
+                        due = t0 + (k + j) * pkt_s
+                        now = time.monotonic()
+                        lag = max(lag, now - due)
+                        if due - now > 0.0005:
+                            time.sleep(due - now - 0.0003)
+                        while time.monotonic() < due:
+                            pass
                     if not send[i]:
                         continue
                     piece = mv[i * PKT_LEN:(i + 1) * PKT_LEN]
@@ -370,6 +381,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--stream-to", metavar="HOST:PORT", help="no HTTP: stream to HOST:PORT at once")
     ap.add_argument("--seconds", type=float, default=0.0, help="with --stream-to: stop after this many seconds (0 = until Ctrl-C)")
     ap.add_argument("--speed", type=float, default=1.0, help="datagram rate relative to real time (default 1)")
+    ap.add_argument("--pace", type=int, default=8,
+                    help="datagrams sent back to back between pacing checks (default 8, ~135 us at 40 Msps; "
+                         "128 = the old behaviour)")
     ap.add_argument("--drop", type=float, default=0.0, help="probability of losing a datagram")
     ap.add_argument("--drop-burst", type=int, default=1, help="datagrams lost in a row per loss")
     ap.add_argument("--reorder", type=float, default=0.0, help="probability of swapping a datagram with the next")
@@ -384,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
 
     src = Source(a.file, a.rate, a.start_seconds)
     faults = {"drop": a.drop, "drop_burst": a.drop_burst, "reorder": a.reorder, "duplicate": a.duplicate}
-    st = Streamer(src, a.speed, faults, a.sndbuf_mb, a.seed)
+    st = Streamer(src, a.speed, faults, a.sndbuf_mb, a.seed, a.pace)
     rate_note = f"{src.rate / 1e6:g} Msps, {src.n_pkts * SPP / src.rate:.2f} s (looped)"
     fault_note = ", ".join(f"{k} {v:g}" for k, v in faults.items() if v and k != "drop_burst")
     if a.drop and a.drop_burst > 1:

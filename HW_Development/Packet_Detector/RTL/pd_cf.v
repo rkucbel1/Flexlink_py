@@ -268,7 +268,8 @@ module pd_cf #(
     wire [47:0] pk_sn;
     wire        ch_out_room;
     pl_chest u_ch (.clk(clk), .rst_n(rst_n), .pg_valid(pg_valid), .pg_sym(pg_sym), .pg_col(pg_col),
-                   .pg_re(pg_re), .pg_im(pg_im), .pl_dec(pl_dec && pl_en), .pl_ok(pl_ok), .pl_msg(cf_msg), .pl_t(j_t),
+                   .pg_re(pg_re), .pg_im(pg_im), .pl_dec(pl_dec && pl_en), .pl_job(cf_start), .pl_ok(pl_ok),
+                   .pl_msg(cf_msg), .pl_t(j_t),
                    .room(ch_room), .job_req(jb_req), .job_gnt(jb_gnt), .job_we(jb_we), .job_idx(jb_idx),
                    .job_re(jb_re), .job_im(jb_im), .job_start(jb_start), .fft_done(jb_done),
                    .job_oaddr(jb_oaddr), .fft_ore(jb_ore), .fft_oim(jb_oim), .out_room(ch_out_room),
