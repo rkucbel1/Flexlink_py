@@ -127,6 +127,17 @@ module tb_pd_detect;
     integer f_ch, n_ch, ch_seen, ch_wait;
     integer f_lq, n_lq, lq_seen, lq_wait;
     integer f_tb, n_tb, tb_seen, tb_wait, tb_k, tb_nw, tb_ok_n;
+    // latency: input samples taken between a trigger and each of its transport blocks being
+    // complete in the FIFO (pace the input at the real rate, e.g. the default GAP=3 random gaps
+    // = 2.5 clocks per sample = 40 Msps at 100 MHz with input_stage 2)
+    integer    in_idx = 0, lat_n = 0, lat_k, lat_d, lat_last_d = -1, lat_max = 0, lat_last_max = 0;
+    integer    lat_first_min = 2147483647, lat_first_max = 0, lat_pk = 0;
+    reg [31:0] lat_last_t = 32'hFFFFFFFF;
+    reg [31:0] lat_tt [0:1023];
+    integer    lat_ti [0:1023];
+    integer    tb_done_idx;
+    reg [31:0] tb_done_t;
+    always @(posedge clk) if (rst_n && s_valid && s_ready) in_idx <= in_idx + 1;
     reg [31:0] tb_t, tb_hdr;
     reg [31:0] xb_t [0:1023];
     reg [31:0] xb_h [0:1023];                  // {ok, 3'b0, it, w, 3'b0, nbits} as the hardware's header
@@ -189,6 +200,9 @@ module tb_pd_detect;
             dbg_seen = dbg_seen + 1;
         end
         if (rst_n && trig) begin
+            lat_tt[lat_n % 1024] = t_trig;
+            lat_ti[lat_n % 1024] = in_idx;
+            lat_n = lat_n + 1;
             r = $fscanf(f_trig, "%d\n", e_t);
             if (r != 1) begin
                 errors = errors + 1;
@@ -355,7 +369,7 @@ module tb_pd_detect;
         if (tb_wait > 0) tb_wait = tb_wait - 1;
         else if (rst_n && tb_cnt != 12'd0) begin
             tb_pop <= 1'b1; tb_wait = 3 + pl_gap / 64;
-            if (tb_k == 0) tb_t = tb_word;
+            if (tb_k == 0) begin tb_t = tb_word; tb_done_idx = in_idx; end
             else if (tb_k == 1) begin tb_hdr = tb_word; tb_nw = (tb_word[10:0] + 31) / 32; end
             else if (tb_seen < n_tb && tb_word !== xb_d[tb_seen * 50 + tb_k - 2]) begin
                 errors = errors + 1;
@@ -371,9 +385,23 @@ module tb_pd_detect;
                     errors = errors + 1;
                     if (errors <= maxerr) $display("ERROR transport block %0d: t %0d header %h, expected t %0d header %h",
                                                    tb_seen, tb_t, tb_hdr, xb_t[tb_seen], xb_h[tb_seen]);
-                end else
-                    $display("  transport block of t_trig %0d, code word %0d: %0d bits, CRC %0s, %0d iteration(s) (ok)",
-                             tb_t, tb_hdr[23:14], tb_hdr[10:0], tb_hdr[31] ? "ok" : "FAIL", tb_hdr[27:24]);
+                end else begin
+                    lat_d = -1;
+                    for (lat_k = 0; lat_k < 1024 && lat_k < lat_n; lat_k = lat_k + 1)
+                        if (lat_tt[lat_k] == tb_t) lat_d = tb_done_idx - lat_ti[lat_k];
+                    if (tb_t != lat_last_t) begin               // first block of a packet
+                        if (lat_last_d > lat_last_max) lat_last_max = lat_last_d;
+                        if (lat_d >= 0 && lat_d < lat_first_min) lat_first_min = lat_d;
+                        if (lat_d > lat_first_max) lat_first_max = lat_d;
+                        lat_pk = lat_pk + 1;
+                        lat_last_t = tb_t;
+                    end
+                    lat_last_d = lat_d;
+                    if (lat_d > lat_max) lat_max = lat_d;
+                    $display("  transport block of t_trig %0d, code word %0d: %0d bits, CRC %0s, %0d iteration(s) (ok); +%0d input samples after the trigger (%0.1f us)",
+                             tb_t, tb_hdr[23:14], tb_hdr[10:0], tb_hdr[31] ? "ok" : "FAIL", tb_hdr[27:24],
+                             lat_d, lat_d / ((input_stage == 2'd2) ? 40.0 : 20.0));
+                end
                 if (tb_hdr[31]) tb_ok_n = tb_ok_n + 1;
                 tb_seen = tb_seen + 1; tb_k = 0;
             end
@@ -572,6 +600,12 @@ module tb_pd_detect;
             errors = errors + 1; $display("ERROR: %0d channel-estimate records, expected %0d", ch_seen, n_ch);
         end
         $display("  input stalled for %0d clocks (tone check catching up, timing searches)", stalls);
+        if (lat_last_d > lat_last_max) lat_last_max = lat_last_d;
+        if (lat_pk > 0)
+            $display("Latency, trigger to transport block complete (input samples, us at %0d Msps): first block of a packet %0d..%0d (%0.1f..%0.1f us), last block of a packet up to %0d (%0.1f us), %0d packet(s)",
+                     (input_stage == 2'd2) ? 40 : 20, lat_first_min, lat_first_max,
+                     lat_first_min / ((input_stage == 2'd2) ? 40.0 : 20.0), lat_first_max / ((input_stage == 2'd2) ? 40.0 : 20.0),
+                     lat_last_max, lat_last_max / ((input_stage == 2'd2) ? 40.0 : 20.0), lat_pk);
         if (errors == 0)
             $display("PASS: %0d samples, %0d debug records, %0d trigger(s), %0d CFO result(s), %0d event(s) (%0d failing the tone check), %0d timing record(s) (%0d good, %0d busy), %0d control record(s) (%0d CRC ok), %0d payload record(s), %0d channel-estimate record(s), %0d decoder-input record(s), %0d transport block(s) (%0d CRC ok) match the bit-true model",
                      n_samples, dbg_seen, trig_seen, cfo_seen, ev_seen, ev_fails, tm_seen, tm_good, tm_busy_n, cf_seen, cf_ok, pl_seen, ch_seen, lq_seen, tb_seen, tb_ok_n);
