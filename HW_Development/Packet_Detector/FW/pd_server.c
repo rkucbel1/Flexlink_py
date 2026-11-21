@@ -34,6 +34,7 @@
  *     MEMTEST 8 (diagnostic: board-local DDR test, no network involved)
  *     STREAM_START 18 / POLL_RESULTS 19 / STREAM_STOP 20 (build 25): the CoreBoard stream
  *     through the receiver in real time; see "Streaming receiver" below
+ *     build 39: push mode (STREAM_START flag PUSH): STREAM_PUSH messages instead of polls
  *     build 35: while streaming, TCP replies paced one segment per 100 us (GEM overruns);
  *     build 36: the interval set by STREAM_START flags bits 15:8 (25 us units)
  *     build 31: FIFO levels read once per drain; with bitstream 9.2 CTRL.NOREC while streaming
@@ -70,7 +71,7 @@
 /* ---------------------------------------------------------------------------------- */
 #define PD_PORT                 5001
 #define PD_PROTOCOL_VERSION     1u
-#define PD_BUILD                38u              /* bump when the firmware changes */
+#define PD_BUILD                39u              /* bump when the firmware changes */
 
 #define SAMPLE_BUF_ADDR         0x10000000u
 #define DEBUG_BUF_ADDR          0x18000000u
@@ -159,7 +160,8 @@ enum { CMD_PING = 1, CMD_RESET = 2, CMD_SET_PARAMS = 3, CMD_LOAD_SAMPLES = 4,
        CMD_REG_READ = 9, CMD_REG_WRITE = 10, CMD_FPU_TEST = 11,
        CMD_PATTERN_CHECK = 12, CMD_SEG_LOG = 13,
        CMD_UDP_START = 14, CMD_UDP_STATS = 15, CMD_UDP_STOP = 16, CMD_GEM_STATS = 17,
-       CMD_STREAM_START = 18, CMD_POLL_RESULTS = 19, CMD_STREAM_STOP = 20 };
+       CMD_STREAM_START = 18, CMD_POLL_RESULTS = 19, CMD_STREAM_STOP = 20,
+       CMD_STREAM_PUSH = 21 /* build 39: board -> PC only, results pushed while streaming */ };
 enum { ST_OK = 0, ST_BAD_CMD = 1, ST_BAD_ARG = 2, ST_NO_SPACE = 3, ST_NO_DEBUG = 4,
        ST_INTERNAL = 5 };
 
@@ -1343,7 +1345,14 @@ static int udp_start(u32 port, u32 mode)
 #define ST_FLAG_PACE_SHIFT      8u
 /* build 34 test: flags bits 7:1 = K, every POLL_RESULTS reply padded with K KB of zeros, to see
  * whether the board sending costs Ethernet frames (GEM overruns) */
-#define ST_FLAG_PAD_SHIFT       1u              /* build 35: bits 6:1 only (<= 63 KB) */
+/* build 39: bit1 PUSH - the board sends STREAM_PUSH messages (no POLL_RESULTS needed);
+ * bits 6:2 = P, at most one push per 250 * P us while there are new records (0: 1 ms).
+ * (Builds 34-38 used bits 6:1 for a padding test.) */
+#define ST_FLAG_PUSH            0x2u
+#define ST_FLAG_PUSH_SHIFT      2u
+#define ST_PUSH_DEFAULT_US      1000u
+#define ST_PUSH_STATS_COUNTS    (COUNTS_PER_SECOND / 10u)    /* statistics every 100 ms */
+#define PUSH_HDR_SIZE           16u     /* u32 flags (bit0 statistics follow), u32 0, u64 newest slot */
 #define ST_FLAG_NOPACE          0x80u           /* build 35: send replies unpaced (as before) */
 #define ST_STATS_SIZE           260u            /* build 26: + the DMA watchdog block, 27: + gaps,
                                                  * 30: + where the CPU time goes */
@@ -1359,7 +1368,9 @@ static int udp_start(u32 port, u32 mode)
 
 static int   st_on, st_have;
 static int   st_norec;                       /* build 31: CTRL.NOREC set for this stream */
-static u32   st_test_pad;                    /* build 34: bytes of zeros added to each poll reply */
+static int   st_push;                        /* build 39: push results */
+static u64   st_push_counts, st_t_push, st_t_stats;
+static u32   st_pushes;
 static u32   st_flags, st_epoch;
 static u64   st_n0, st_wr, st_rd, st_dma_end;
 static u64   st_floor;                          /* first slot of the current numbering (resync) */
@@ -1507,7 +1518,13 @@ static void st_reset(u32 flags)
         u32 pu = 25u * ((flags >> ST_FLAG_PACE_SHIFT) & 0xFFu);
         tx_pace_counts = (u64)(pu ? pu : TX_PACE_DEFAULT_US) * (COUNTS_PER_SECOND / 1000000u);
     }
-    st_test_pad = 1024u * ((flags >> ST_FLAG_PAD_SHIFT) & 0x3Fu);
+    st_push = (flags & ST_FLAG_PUSH) != 0u;
+    {
+        u32 pu = 250u * ((flags >> ST_FLAG_PUSH_SHIFT) & 0x1Fu);
+        st_push_counts = (u64)(pu ? pu : ST_PUSH_DEFAULT_US) * (COUNTS_PER_SECOND / 1000000u);
+    }
+    st_t_push = st_t_stats = 0;
+    st_pushes = 0;
     st_have = 0;
     st_epoch = 0;
     st_n0 = st_wr = st_rd = st_dma_end = st_floor = 0;
@@ -1694,6 +1711,8 @@ static int stream_dma(int flush)
     return 1;
 }
 
+static void stream_push(void);
+
 static void stream_poll(void)                   /* from transfer_data() */
 {
     XTime now;
@@ -1707,6 +1726,7 @@ static void stream_poll(void)                   /* from transfer_data() */
         st_t_drain = now;
         stream_drain();
     }
+    stream_push();                              /* build 39 */
 }
 
 static void stream_stats(u8 *o)
@@ -1782,18 +1802,30 @@ static void stream_stats(u8 *o)
 }
 
 /* stats + the records collected since the last poll, in the RUN reply format; clears them */
-static u32 stream_pack(void)
+/* The records since the last call into poll_out from base; with stats, the statistics block
+ * first (POLL_RESULTS / STREAM_STOP: base 0, stats 1; build 39 STREAM_PUSH: after its header,
+ * statistics every 100 ms only - overflow flags are kept until they are reported) */
+static u32 stream_pack_at(u32 base, int stats)
 {
     u32 o, fixed, n_ev, keep = (st_flags & ST_FLAG_KEEP_PL) != 0u;
     u32 npl = keep ? pl_n : 0u, nch = keep ? ch_n : 0u, nlq = keep ? lq_n : 0u;
-    stream_stats(poll_out);
-    o = ST_STATS_SIZE;
+    o = base;
+    if (stats) {
+        stream_stats(poll_out + base);
+        o += ST_STATS_SIZE;
+    } else {
+        st_lost_mask |= (ev_lost ? ST_LOST_EV : 0u) | (tm_lost ? ST_LOST_TM : 0u) | (cf_lost ? ST_LOST_CF : 0u) |
+                        (pl_lost ? ST_LOST_PL : 0u) | (ch_lost ? ST_LOST_CH : 0u) | (lq_lost ? ST_LOST_LQ : 0u) |
+                        (tb_lost ? ST_LOST_TB : 0u);
+    }
     fixed = o + 32u + TM_SIZE * tm_n + CF_SIZE * cf_n + PL_SIZE * (npl + nch + nlq) + tb_bytes;
     n_ev = ev_n;
     if (fixed + EV_SIZE * n_ev > MAX_PAYLOAD) {  /* cannot happen with the buffer limits; be safe */
         n_ev = (MAX_PAYLOAD - fixed) / EV_SIZE;
         st_lost_mask |= ST_LOST_EV;
-        wr32(poll_out + 68, st_lost_mask);
+        if (stats) {
+            wr32(poll_out + base + 68, st_lost_mask);
+        }
     }
     wr32(poll_out + o, n_ev);
     wr32(poll_out + o + 4u, 0u);
@@ -1808,13 +1840,46 @@ static u32 stream_pack(void)
     ev_n = 0; ev_lost = 0; tm_n = 0; tm_lost = 0; cf_n = 0; cf_lost = 0;
     pl_n = 0; pl_lost = 0; ch_n = 0; ch_lost = 0; lq_n = 0; lq_lost = 0;
     tb_n = 0; tb_bytes = 0; tb_lost = 0;
-    st_lost_mask = 0;
-    st_polls++;
-    if (st_test_pad && o + st_test_pad <= MAX_PAYLOAD) {   /* build 34 test */
-        memset(poll_out + o, 0, st_test_pad);
-        o += st_test_pad;
+    if (stats) {
+        st_lost_mask = 0;
     }
+    st_polls++;
     return o;
+}
+
+static u32 stream_pack(void)
+{
+    return stream_pack_at(0u, 1);
+}
+
+/* build 39: push mode - from stream_poll(), only with nothing being sent (a command that comes
+ * meanwhile waits in lwIP, see recv_cb) */
+static void stream_push(void)
+{
+    XTime now;
+    u32 n, keep;
+    int stats, have;
+    if (!st_push || !st_on || client == NULL || tx_off < tx_total) {
+        return;
+    }
+    XTime_GetTime(&now);
+    keep = (st_flags & ST_FLAG_KEEP_PL) != 0u;
+    have = ev_n || tm_n || cf_n || tb_n || (keep && (pl_n || ch_n || lq_n));
+    stats = now - st_t_stats >= ST_PUSH_STATS_COUNTS;
+    if (!stats && !(have && now - st_t_push >= st_push_counts)) {
+        return;
+    }
+    st_t_push = now;
+    if (stats) {
+        st_t_stats = now;
+    }
+    wr32(poll_out + 0, stats ? 1u : 0u);
+    wr32(poll_out + 4, 0u);
+    wr32(poll_out + 8, (u32)st_wr);             /* newest datagram slot: "now" in the stream */
+    wr32(poll_out + 12, (u32)(st_wr >> 32));
+    n = stream_pack_at(PUSH_HDR_SIZE, stats);
+    st_pushes++;
+    reply(client, CMD_STREAM_PUSH, ST_OK, st_pushes, poll_out, n);
 }
 
 /* STREAM_STOP: no more datagrams; feed what is in the ring, let the receiver finish */
@@ -1824,6 +1889,7 @@ static void stream_stop(void)
     if (!st_on) {
         return;
     }
+    st_push = 0;                                /* build 39: the STREAM_STOP reply carries the rest */
     /* stop storing, but keep the UDP port bound (the callback only counts now): with no pcb,
      * lwIP would answer every datagram still coming from the CoreBoard with an ICMP "port
      * unreachable". UDP_STOP (or the next STREAM_START / UDP_START) closes it. */
@@ -2547,6 +2613,11 @@ static err_t recv_cb(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     if (err != ERR_OK) {
         pbuf_free(p);
         return err;
+    }
+    if (tx_off < tx_total) {
+        /* build 39: a reply (or a push) is still being queued - lwIP keeps the data and offers
+         * it again (next segment or within 250 ms), so a reply never overwrites another one */
+        return ERR_MEM;
     }
 
     total = p->tot_len;

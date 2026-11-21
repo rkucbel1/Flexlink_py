@@ -97,6 +97,10 @@ CMD_NAMES.update({UDP_START: "UDP_START", UDP_STATS: "UDP_STATS", UDP_STOP: "UDP
 STREAM_START, POLL_RESULTS, STREAM_STOP = 18, 19, 20
 CMD_NAMES.update({STREAM_START: "STREAM_START", POLL_RESULTS: "POLL_RESULTS", STREAM_STOP: "STREAM_STOP"})
 STREAM_KEEP_PL = 0x1                   # STREAM_START flag: also return payload / channel / decoder-input records
+STREAM_PUSH = 21                       # board -> PC only (firmware build 39): results pushed while streaming
+CMD_NAMES[STREAM_PUSH] = "STREAM_PUSH"
+STREAM_FLAG_PUSH = 0x2                 # STREAM_START flag (build 39); bits 6:2 = push interval / 250 us (0: 1 ms)
+PUSH_SLOT_SAMPLES = 336                # receiver samples (20 Msps after the half-band) per datagram slot
 STREAM_LOST_NAMES = {0x1: "events", 0x2: "timing", 0x4: "control", 0x8: "payload", 0x10: "channel estimate",
                      0x20: "decoder input", 0x40: "transport blocks"}
 HTTP_STATES = {0: "none", 1: "connecting", 2: "sent", 3: "answered", 4: "failed"}
@@ -361,6 +365,17 @@ class StreamStats:
             st.cpu = dict(zip(("pd_reads", "rx_us", "drain_us", "drain_max_us", "poll_us", "poll_max_us",
                                "loop_max_us", "drains"), cls.FMT30.unpack_from(b, n27)))
         return st
+
+
+def parse_push(payload: bytes):
+    """STREAM_PUSH (build 39) -> (newest datagram slot, StreamStats or None, records).
+    Header: u32 flags (bit0: statistics follow), u32 0, u64 newest slot; statistics every 100 ms."""
+    flags, _, slot = struct.unpack_from("<IIQ", payload)
+    off, st = 16, None
+    if flags & 1:
+        st = StreamStats.unpack(payload[16:])
+        off += st.size
+    return slot, st, parse_run_reply_tb(payload[off:])
 
 
 def parse_poll(reply: bytes):

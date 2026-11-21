@@ -1,0 +1,26 @@
+{
+  "Video": {
+    "PiAddress": "raspberrypi.local",
+    "PiAddress_comment": "IP address or host name of the Raspberry Pi; 'local' runs the encoder on this PC",
+    "PiUser": "rkucbel3",
+    "PiUser_comment": "user on the Pi; the PC logs in with an SSH key (ssh-copy-id user@pi once)",
+    "PcAddress": "10.42.0.1",
+    "PcAddress_comment": "this PC's address as the Pi sees it (the Pi sends the video there)",
+    "UdpPort": 5600,
+    "UdpPort_comment": "UDP port on this PC for the encoded video (MPEG-TS)",
+    "VideoShare_percent": 85.0,
+    "VideoShare_percent_comment": "share of the transport-block payload rate given to the video, %",
+    "MaxHeight": 540,
+    "MaxHeight_comment": "largest resolution row of the operating table to use (Pi 4: 540)",
+    "MaxQueue_ms": 300,
+    "MaxQueue_ms_comment": "video waiting for the link beyond this is dropped (oldest first)",
+    "Source": "PiFile",
+    "Source_comment": "PiFile (the video file on the Pi, looped) or PiCamera (not implemented yet)",
+    "PiVideoFile": "~/Helheim_orig.mov",
+    "PiVideoFile_comment": "path on the Pi (~/ = the Pi user's home)",
+    "Loopback": 1,
+    "Loopback_comment": "1: no Pluto; the packets are unpacked on this PC and played with ffplay",
+    "LoopbackDrop_percent": 0.0,
+    "LoopbackDrop_percent_comment": "loopback only: share of blocks dropped as failed CRCs, %"
+  }
+}

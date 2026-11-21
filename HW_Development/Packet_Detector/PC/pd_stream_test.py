@@ -124,6 +124,47 @@ DDRC_WR_PRIO = 0xF8006208          # UG585 axi_priority_wr_port0..3, then axi_pr
 DDRC_RD_PRIO = 0xF8006218          # bits 9:0 = aging counter start value, lower = more priority
 
 
+class BlockAges:
+    """Push mode: how old each transport block is when its push leaves the board - the stream
+    position the board had then (its newest datagram) minus the block's trigger, in receiver
+    samples (20 Msps). Includes the packet's own air time up to that block; the simulation
+    gives that part (CoreBoard vector: first block 1.31 ms, last block up to 4.92 ms after the
+    trigger), the rest is the board: ring, FIFO drain, push interval."""
+    def __init__(self):
+        self.first: dict[int, float] = {}       # t_trig -> age (ms) of its first block
+        self.last: dict[int, float] = {}        # t_trig -> age (ms) of its last block
+        self.arrive: list[float] = []
+
+    def add(self, slot, tbs, t_now: float):
+        if slot is None:                        # the STREAM_STOP reply: no stream position
+            return
+        now20 = (slot * pr.PUSH_SLOT_SAMPLES) & 0xFFFFFFFF
+        for t in tbs:
+            d = (now20 - t.t_trig) & 0xFFFFFFFF
+            if d >= 1 << 31:
+                continue
+            ms = d / 20e3
+            self.first.setdefault(t.t_trig, ms)
+            self.last[t.t_trig] = ms
+        if tbs:
+            self.arrive.append(t_now)
+
+    @staticmethod
+    def _q(v: list[float]) -> str:
+        if not v:
+            return "-"
+        v = sorted(v)
+        return (f"median {v[len(v) // 2]:.2f}, 99 % {v[min(len(v) - 1, int(len(v) * 0.99))]:.2f}, "
+                f"max {v[-1]:.2f} ms")
+
+    def text(self) -> str:
+        gaps = [b - a for a, b in zip(self.arrive, self.arrive[1:])]
+        return (f"block age when pushed (after the trigger): first block of a packet {self._q(list(self.first.values()))}; "
+                f"last block {self._q(list(self.last.values()))} (simulation, FPGA alone: 1.31 / up to 4.92 ms)"
+                + (f"\n  pushes with blocks: {len(self.arrive)}, longest gap between them at the PC "
+                   f"{max(gaps) * 1e3:.1f} ms" if gaps else ""))
+
+
 class PollTimes:
     """How long POLL_RESULTS took and how far apart the polls were (the board keeps about 0.5 s
     of transport blocks, build 29; a longer gap loses blocks)."""
@@ -206,8 +247,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pace-us", type=int, default=0, metavar="US",
                     help="board sends one TCP segment of results per US microseconds while streaming "
                          "(build 36; multiple of 25, default 100)")
-    ap.add_argument("--tx-test", type=int, default=0, metavar="KB",
-                    help="test (build 34): the board pads every poll reply with KB kilobytes of zeros (<= 63)")
+    ap.add_argument("--push", action="store_true",
+                    help="the board pushes results as they come (build 39) instead of being polled")
+    ap.add_argument("--push-ms", type=float, default=1.0,
+                    help="with --push: at most one push per this many ms while there are new results (0.25 .. 7.75)")
     ap.add_argument("--no-pace", action="store_true",
                     help="board sends replies in bursts, not one TCP segment per 100 us (build 35 test)")
     ap.add_argument("--no-pin", action="store_true",
@@ -316,23 +359,26 @@ def main(argv: list[str] | None = None) -> int:
             print("Error: --pace-us needs firmware build 36", file=sys.stderr)
             return 2
         pace_units = min(max(round(a.pace_us / 25), 1), 255) if a.pace_us else 0
-        if a.tx_test and info.build < 34:
-            print("Error: --tx-test needs firmware build 34", file=sys.stderr)
+        if a.push and info.build < 39:
+            print("Error: --push needs firmware build 39", file=sys.stderr)
             return 2
-        pad = 1024 * min(a.tx_test, 63)
-        flags = ((pr.STREAM_KEEP_PL if a.keep_pl else 0) | (pace_units << 8) | (min(a.tx_test, 63) << 1)
+        push_units = min(max(round(a.push_ms * 4), 1), 31) if a.push else 0
+        flags = ((pr.STREAM_KEEP_PL if a.keep_pl else 0) | (pace_units << 8)
+                 | ((pr.STREAM_FLAG_PUSH | (push_units << 2)) if a.push else 0)
                  | (0x80 if a.no_pace else 0))
 
         def poll_parse(raw: bytes):
             nonlocal rx_bytes
             rx_bytes += len(raw)
-            return pr.parse_poll(raw[:len(raw) - pad] if pad and len(raw) > pad else raw)
+            return pr.parse_poll(raw)
 
         reply = b.call(pr.STREAM_START, start_payload(a.udp_port, flags,
                                                       src_ip, src_port, body))
         if info.build >= 35:
             print("Results paced: " + ("off (bursts)" if a.no_pace else
-                                       f"one TCP segment per {25 * pace_units if pace_units else 100} us"))
+                                       f"one TCP segment per {25 * pace_units if pace_units else 100} us")
+                  + (f"; pushed by the board, at most every {push_units / 4:g} ms" if a.push
+                     else f"; polled every {a.poll:g} s"))
         print(f"Streaming to the Zedboard's UDP port {struct.unpack('<I', reply[:4])[0]}, receiver at 40 Msps, "
               f"dc_shift {a.dc_shift}\n")
         print("   time  datagrams/s  lost  late  ring max  resync  packets  per s   TB CRC ok    stalls  HTTP")
@@ -342,15 +388,15 @@ def main(argv: list[str] | None = None) -> int:
         t_print, prev_dg, prev_pk, prev_t = t0 + 1.0, 0, 0, t0
         last_stalls = 0
         st = None
-        while time.monotonic() - t0 < a.seconds:
-            time.sleep(a.poll)
-            tp = time.monotonic()
-            st, recs = poll_parse(b.call(pr.POLL_RESULTS))
-            polls.add(tp, time.monotonic())
-            tally.add(recs)
+        ages = BlockAges()
+
+        def show(st):
+            nonlocal t_print, prev_dg, prev_pk, prev_t, last_stalls
             if st.lost_mask:
                 print("  WARNING: record buffers overflowed (" + ", ".join(
-                    v for k, v in pr.STREAM_LOST_NAMES.items() if st.lost_mask & k) + ") - a poll came too late, see polls: in the summary")
+                    v for k, v in pr.STREAM_LOST_NAMES.items() if st.lost_mask & k) + ") - "
+                      + ("the board could not send them in time" if a.push else
+                         "a poll came too late, see polls: in the summary"))
             now = time.monotonic()
             if now >= t_print:
                 dt = now - prev_t
@@ -367,8 +413,47 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  HTTP request to {src_ip}:{src_port} failed (lwIP error {st.http_err - (1 << 32) if st.http_err > 1 << 31 else st.http_err}): "
                           f"is the firewall open for the Zedboard?")
                 prev_dg, prev_pk, prev_t, t_print = st.datagrams, npk, now, now + 1.0
+
+        def on_push(raw: bytes):
+            nonlocal rx_bytes, st
+            rx_bytes += len(raw)
+            slot, st_new, recs = pr.parse_push(raw)
+            tally.add(recs)
+            ages.add(slot, recs[7], time.monotonic())
+            if st_new is not None:
+                st = st_new
+                show(st)
+
         stop_js = json.dumps({"op": "stop"}).encode()
-        st, recs = poll_parse(b.call(pr.STREAM_STOP, struct.pack("<H", len(stop_js)) + stop_js))
+        stop_payload = struct.pack("<H", len(stop_js)) + stop_js
+        if a.push:
+            b.sock.settimeout(5.0)
+            while time.monotonic() - t0 < a.seconds:
+                cmd, status, _, raw = pr.recv_msg(b.sock)
+                if cmd != pr.STREAM_PUSH:
+                    raise pr.ProtocolError(f"unexpected message {pr.CMD_NAMES.get(cmd, cmd)} while streaming")
+                on_push(raw)
+            b.seq += 1
+            pr.send_msg(b.sock, pr.STREAM_STOP, stop_payload, b.seq)
+            while True:                     # pushes already on their way, then the reply
+                cmd, status, seq, raw = pr.recv_msg(b.sock)
+                if cmd == pr.STREAM_PUSH:
+                    on_push(raw)
+                    continue
+                if cmd != pr.STREAM_STOP or seq != b.seq or status != pr.ST_OK:
+                    raise pr.ProtocolError(f"STREAM_STOP reply: cmd {cmd} seq {seq} status {status}")
+                break
+            st, recs = poll_parse(raw)
+            ages.add(None, recs[7], time.monotonic())
+        else:
+            while time.monotonic() - t0 < a.seconds:
+                time.sleep(a.poll)
+                tp = time.monotonic()
+                st, recs = poll_parse(b.call(pr.POLL_RESULTS))
+                polls.add(tp, time.monotonic())
+                tally.add(recs)
+                show(st)
+            st, recs = poll_parse(b.call(pr.STREAM_STOP, stop_payload))
         tally.add(recs)
     except KeyboardInterrupt:
         try:
@@ -416,7 +501,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  ring: max {st.ring_max} datagrams waiting ({st.ring_max * 672 / 40e3:.1f} ms), {st.dma_chunks} DMA chunks, "
           f"{st.dma_errors} DMA errors; fed {st.fed_samples} samples, receiver took {took}; "
           f"lwIP pool empty {st.pool_empty}, GEM no-buffer {st.gem_no_buffer}, overrun {st.gem_overrun}")
-    print("  " + polls.text() + f"; the board sent {rx_bytes / 1e6:.1f} MB of results "
+    if a.push:
+        print("  " + ages.text())
+    print("  " + (f"pushed results" if a.push else polls.text()) + f"; the board sent {rx_bytes / 1e6:.1f} MB of results "
           f"({rx_bytes * 8 / 1e6 / max(secs, 1e-9):.1f} Mbit/s)")
     if emu is not None and emu_line:
         print(f"  emulator: {emu_line}  (lag = how far it fell behind real time; it then sends at line rate)")
