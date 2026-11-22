@@ -280,9 +280,11 @@ class TsResync:
 class TsOutput:
     """Plays whole TS packets with ffplay (low-latency flags) and / or appends them to a file.
 
-    ffplay quits when it finds no decodable stream at the start (e.g. while the link delivers
-    almost nothing) or when its window is closed; it is then started again with the next video,
-    at most every 3 s, so the picture comes back by itself."""
+    ffplay looks only at the first ~32 kB of what it gets to find the streams, and the TS tables
+    (PAT, PMT) come once a second, so a player started mid-stream is fed from the next PAT on
+    (at most ~1 s at the start, no added latency after that). ffplay quits when it finds no
+    decodable stream at the start or when its window is closed; it is then started again with
+    the next video, at most every 3 s, so the picture comes back by itself."""
 
     RESTART_S = 3.0
 
@@ -296,6 +298,7 @@ class TsOutput:
         self.title = title
         self.exe = shutil.which("ffplay") if play else None
         self._last_start = -1e9
+        self._synced = False            # the player has had a PAT
         if save_path is not None:
             from pathlib import Path
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
@@ -312,6 +315,15 @@ class TsOutput:
              "-framedrop", "-probesize", "32768", "-analyzeduration", "0",
              "-window_title", self.title, "-f", "mpegts", "-i", "-"],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, bufsize=0)
+        self._synced = False
+
+    @staticmethod
+    def _from_pat(ts: bytes) -> bytes:
+        """ts from its first PAT packet (PID 0) on; b"" if it has none."""
+        for i in range(0, len(ts) - TS_PACKET + 1, TS_PACKET):
+            if ts[i] == TS_SYNC and ts[i + 1] & 0x1F == 0 and ts[i + 2] == 0:
+                return ts[i:]
+        return b""
 
     def _drop_player(self) -> None:
         p, self.player = self.player, None
@@ -338,6 +350,11 @@ class TsOutput:
                 self.restarts += 1
                 self.note = f"ffplay restarted {self.restarts} time(s)"
             self._start()
+        if not self._synced:
+            ts = self._from_pat(ts)
+            if not ts:
+                return
+            self._synced = True
         try:
             self.player.stdin.write(ts)
         except OSError:                 # BrokenPipeError: ffplay quit; started again later
