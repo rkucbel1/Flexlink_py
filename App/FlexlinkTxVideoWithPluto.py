@@ -16,7 +16,8 @@ blocks or a file:
                  payload rate of the Tx settings and the Gap, times the video share, picks the row of
                  the operating table (resolution, frame rate) and the x264 bit rate. x264 as in the
                  operating table: veryfast, zerolatency, no B-frames, intra refresh every 2 s, CBR with
-                 a 2-frame buffer.
+                 a 2-frame buffer; SPS/PPS repeated with every frame, so a receiver started
+                 after the transmitter still finds the stream's setup (repeat-headers).
   Loopback       no Pluto: the packets are paced at the link's packet rate, unpacked on this PC
                  (optionally with a share of blocks dropped, as failed CRCs) and played with ffplay;
                  the received stream is also saved to App/Video/Loopback_Received.ts. This checks the
@@ -36,7 +37,6 @@ from __future__ import annotations
 
 import json
 import shlex
-import shutil
 import socket
 import subprocess
 import sys
@@ -346,7 +346,7 @@ def encoder_command(vid: dict, plan: dict) -> str:
     args = (f"ffmpeg -hide_banner -loglevel warning -nostdin -re -stream_loop -1 -i {src} -an -sn -dn "
             f"-vf fps={fps},scale={plan['width']}:{plan['height']}:flags=bicubic,format=yuv420p "
             f"-c:v libx264 -preset veryfast -tune zerolatency -b:v {k}k -maxrate {k}k -bufsize {max(1, 2 * k // fps)}k "
-            f"-x264-params bframes=0:rc-lookahead=0:intra-refresh=1:keyint={2 * fps} "
+            f"-x264-params bframes=0:rc-lookahead=0:intra-refresh=1:keyint={2 * fps}:repeat-headers=1 "
             f"-f mpegts -pat_period 1 -sdt_period 1 -muxdelay 0 -flush_packets 1 "
             f"'udp://{dest}:{int(vid['UdpPort'])}?pkt_size=1316'")
     return f"echo $$ > {PID_FILE}; exec {args}"
@@ -458,48 +458,21 @@ class LoopbackSink:
         self.resync = VF.TsResync()
         self.drop = drop_percent / 100.0
         self.rng = np.random.default_rng()
-        VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-        self.file = LOOPBACK_TS.open("wb")
-        self.player = None
-        self.note = ""
-        if play:
-            exe = shutil.which("ffplay")
-            if exe:
-                self.player = subprocess.Popen(
-                    [exe, "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
-                     "-framedrop", "-probesize", "32768", "-analyzeduration", "0",
-                     "-window_title", "Flexlink loopback", "-f", "mpegts", "-i", "-"],
-                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                self.note = "ffplay not found: the stream is only saved to the file"
+        self.out = VF.TsOutput(play=play, save_path=LOOPBACK_TS, title="Flexlink loopback")
 
     def packet(self, tbs: np.ndarray) -> None:
         crc = self.rng.random(tbs.shape[0]) >= self.drop if self.drop > 0 else np.ones(tbs.shape[0], bool)
         for gap, data in self.unpacker.feed(tbs, crc):
-            ts = self.resync.push(data, gap)
-            if ts:
-                self.file.write(ts)
-                if self.player is not None:
-                    try:
-                        self.player.stdin.write(ts)
-                        self.player.stdin.flush()
-                    except (BrokenPipeError, OSError):
-                        self.player = None
-                        self.note = "ffplay window closed: the stream is still saved to the file"
+            self.out.write(self.resync.push(data, gap))
 
     def close(self) -> None:
-        self.file.close()
-        if self.player is not None:
-            try:
-                self.player.stdin.close()
-            except OSError:
-                pass
+        self.out.close()
 
     def stats(self) -> str:
         t = self.unpacker.total
         return (f"loopback: {t.blocks} blocks, {t.crc_fail} dropped, {t.filler} filler, {t.gaps} gaps, "
                 f"{self.resync.ts_packets} TS packets out, {self.resync.resyncs} resyncs"
-                + (f"; {self.note}" if self.note else ""))
+                + (f"; {self.out.note}" if self.out.note else ""))
 
 
 # ---------- The session (worker thread) ----------

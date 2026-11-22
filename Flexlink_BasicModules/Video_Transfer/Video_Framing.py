@@ -278,53 +278,76 @@ class TsResync:
 # Video out: ffplay and / or a file
 # --------------------------------------------------------------------------- #
 class TsOutput:
-    """Plays whole TS packets with ffplay (low-latency flags) and / or appends them to a file."""
+    """Plays whole TS packets with ffplay (low-latency flags) and / or appends them to a file.
+
+    ffplay quits when it finds no decodable stream at the start (e.g. while the link delivers
+    almost nothing) or when its window is closed; it is then started again with the next video,
+    at most every 3 s, so the picture comes back by itself."""
+
+    RESTART_S = 3.0
 
     def __init__(self, play: bool = True, save_path=None, title: str = "Flexlink video"):
         import shutil
-        import subprocess
-        self._sp = subprocess
         self.file = None
         self.player = None
         self.note = ""
         self.bytes = 0
+        self.restarts = 0
+        self.title = title
+        self.exe = shutil.which("ffplay") if play else None
+        self._last_start = -1e9
         if save_path is not None:
             from pathlib import Path
             Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             self.file = open(save_path, "wb")
-        if play:
-            exe = shutil.which("ffplay")
-            if exe:
-                self.player = subprocess.Popen(
-                    [exe, "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
-                     "-framedrop", "-probesize", "32768", "-analyzeduration", "0",
-                     "-window_title", title, "-f", "mpegts", "-i", "-"],
-                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                self.note = "ffplay not found (sudo apt install ffmpeg)"
+        if play and not self.exe:
+            self.note = "ffplay not found (sudo apt install ffmpeg)"
+
+    def _start(self) -> None:
+        import subprocess
+        import time
+        self._last_start = time.monotonic()
+        self.player = subprocess.Popen(
+            [self.exe, "-hide_banner", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
+             "-framedrop", "-probesize", "32768", "-analyzeduration", "0",
+             "-window_title", self.title, "-f", "mpegts", "-i", "-"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, bufsize=0)
+
+    def _drop_player(self) -> None:
+        p, self.player = self.player, None
+        try:
+            p.stdin.close()
+        except OSError:                 # BrokenPipeError: ffplay already gone
+            pass
 
     def write(self, ts: bytes) -> None:
         if not ts:
             return
+        import time
         self.bytes += len(ts)
         if self.file is not None:
             self.file.write(ts)
-        if self.player is not None:
-            try:
-                self.player.stdin.write(ts)
-                self.player.stdin.flush()
-            except (BrokenPipeError, OSError):
-                self.player = None
-                self.note = "ffplay window closed"
+        if self.exe is None:
+            return
+        if self.player is not None and self.player.poll() is not None:
+            self._drop_player()
+        if self.player is None:
+            if time.monotonic() - self._last_start < self.RESTART_S:
+                return
+            if self._last_start > 0:
+                self.restarts += 1
+                self.note = f"ffplay restarted {self.restarts} time(s)"
+            self._start()
+        try:
+            self.player.stdin.write(ts)
+        except OSError:                 # BrokenPipeError: ffplay quit; started again later
+            self._drop_player()
 
     def close(self) -> None:
         if self.file is not None:
             self.file.close()
         if self.player is not None:
-            try:
-                self.player.stdin.close()
-            except OSError:
-                pass
+            self._drop_player()
 
 
 # --------------------------------------------------------------------------- #
