@@ -1,20 +1,19 @@
-"""FlexlinkRxVideoWithZedboard.py -- receives the live video of FlexlinkTxVideoWithPluto.py and plays it (GUI).
+"""FlexlinkRxVideoWithZedboard_FCOMMS3.py -- receives the live video of FlexlinkTxVideoWithPluto.py and plays it (GUI).
 
-The mirror of the transmitter app. The radio side is the CoreBoard and the Zedboard receiver (the
-Pluto transmits; it cannot decode): the CoreBoard streams 40 Msps to the Zedboard, whose FPGA
-receiver decodes the packets and pushes the transport blocks to this PC as they come (firmware
-build 39, bitstream 9.1 or later, as pd_stream_test.py --push):
+The mirror of the transmitter app, with an AD-FMCOMMS3 (AD9361) on the Zedboard's FMC connector as
+the radio. The Zedboard's FPGA receiver decodes the packets and pushes the transport blocks to this
+PC as they come (HW_Development/Packet_Detector_FCOMM: bitstream build_hw_fmcomms3.tcl, firmware
+fmc_pd_server.elf). For the CoreBoard as the radio: FlexlinkRxVideoWithZedboard_CoreBoard.py.
 
-    Pluto  ~~radio~~>  CoreBoard  --UDP samples-->  Zedboard (FPGA receiver)
+    Pluto  ~~radio~~>  FMCOMMS3 --40 Msps--> Zedboard (AD9361 -> DDR ring -> FPGA receiver)
         --TCP: transport blocks, CRC flags-->  this PC  --unpack, MPEG-TS-->  ffplay
 
 The Zedboard needs no Flexlink parameters: it reads modulation, code and repetition from each
 packet's control field. The Transmitter line shows that control field (the transmitter's mode).
 
-  CoreBoard   App/Parameters_CoreBoard.json (shared with FlexlinkCaptureWithCoreBoard.py): its
-              address, carrier (the Pluto's TxLO_MHz), gain
-  Zedboard    App/Parameters_RxVideo.json: the board's address and ports, how often it pushes
-              results, the DC blocker (6 for the CoreBoard)
+  Settings    App/Parameters_FMCOMMS3.json: the Zedboard's address and port, the AD9361's carrier
+              (the Pluto's TxLO_MHz), sample rate, RF bandwidth, gain, how often the board pushes
+              results, the DC blocker (6: without it, spurs near 0 Hz cause false triggers)
   Video       play with ffplay (sudo apt install ffmpeg); optionally also save the received
               stream to App/Video/Received.ts (about 3 GB an hour at 7 Mbit/s: off by default)
 
@@ -25,7 +24,7 @@ dropped and the stream re-aligns, and the decoder recovers with the encoder's in
 Start saves the settings first (as Save does). Start the transmitter app before or after.
 
 Requires: pip install FreeSimpleGUI; ffplay (ffmpeg) for the picture
-Run with: python App/FlexlinkRxVideoWithZedboard.py
+Run with: python App/FlexlinkRxVideoWithZedboard_FCOMMS3.py
 """
 from __future__ import annotations
 
@@ -53,8 +52,11 @@ import FreeSimpleGUI as sg  # noqa: E402
 PD_PC = ROOT / "HW_Development" / "Packet_Detector" / "PC"
 sys.path.insert(0, str(PD_PC))
 import pd_protocol as pr  # noqa: E402
-import pd_stream_test as PS  # noqa: E402  (CoreBoard start body, HTTP status, STREAM_START payload)
 from pd_hw_test import Board  # noqa: E402
+
+FMC_PC = ROOT / "HW_Development" / "Packet_Detector_FCOMM" / "PC"
+sys.path.insert(0, str(FMC_PC))
+import fmc_protocol as fp  # noqa: E402  (RADIO_CONFIG, BOARD_FMCOMMS3)
 
 try:
     import cf_fields  # noqa: E402  (control field -> transmitter mode; needs the simulator project)
@@ -69,39 +71,39 @@ H1, H2 = FS.H1, FS.H2
 ITALIC = ("Helvetica", 9, "italic")
 RESULTS_FONT = FS.RESULTS_FONT
 
-CB_JSON = APP / "Parameters_CoreBoard.json"
-RXV_JSON = APP / "Parameters_RxVideo.json"
+FMC_JSON = APP / "Parameters_FMCOMMS3.json"
 RECEIVED_TS = APP / "Video" / "Received.ts"
 RX_PARAMS = PD_PC.parent / "TestVectors" / "rep3.json"       # detector thresholds, as pd_stream_test.py
+SLOT_SAMPLES_NOTE = "the push header's newest position counts input samples (fmc_pd_server.c)"
 
 # ---------- Settings ----------
-CB_DEFAULTS = {"Address": "10.42.0.133", "HttpPort": 80, "Frequency_MHz": 2440, "SampleRate": 40_000_000,
-               "AGC": 0, "Gain": 40, "Bandwidth_MHz": 0, "DC_Correction": 1}
-CB_FIELDS = {   # gui key: (json key, type, min, max, label)
-    "-CB_ADDR-": ("Address", str, None, None, "CoreBoard Address"),
-    "-CB_HTTP-": ("HttpPort", int, 1, 65535, "HTTP Port"),
-    "-CB_FREQ-": ("Frequency_MHz", int, 2150, 2800, "Carrier (MHz)"),
-    "-CB_GAIN-": ("Gain", int, 0, 127, "Gain (index)"),
-    "-CB_BW-": ("Bandwidth_MHz", int, 0, 54, "Analog filter (MHz)"),
-}
-RXV_DEFAULTS = {"ZedAddress": "10.42.0.101", "ZedPort": pr.DEFAULT_PORT, "ZedUdpPort": pr.UDP_DEFAULT_PORT,
-                "Push_ms": 1.0, "DcShift": 6, "Play": 1, "SaveStream": 0}
-RXV_COMMENTS = {
+FMC_DEFAULTS = {"ZedAddress": "10.42.0.101", "ZedPort": pr.DEFAULT_PORT, "Frequency_MHz": 2420.0,
+                "SampleRate": 40_000_000, "RFBandwidth_MHz": 18.0, "GainMode": "manual", "Gain": 50,
+                "Port": 0, "Push_ms": 1.0, "DcShift": 6, "Play": 1, "SaveStream": 0}
+FMC_COMMENTS = {
     "ZedAddress_comment": "IP address of the Zedboard receiver",
     "ZedPort_comment": "its TCP port for commands and results",
-    "ZedUdpPort_comment": "its UDP port for the CoreBoard's sample stream",
+    "Frequency_MHz_comment": "AD9361 receive carrier, MHz, 70 to 6000 (match TxLO_MHz of the Pluto)",
+    "SampleRate_comment": "40000000 (receiver input stage 2, proven) or 20000000 (input stage 1)",
+    "RFBandwidth_MHz_comment": "AD9361 analog RF bandwidth, MHz (the signal occupies 16.4 MHz)",
+    "GainMode_comment": "manual, fast_attack, slow_attack or hybrid (the AD9361's gain control)",
+    "Gain_comment": "manual gain, dB (-3 to 71); 50 over the air at a few metres",
+    "Port_comment": "AD9361 Rx input: 0 = A balanced (the FMCOMMS3's RX1A SMA)",
     "Push_ms_comment": "the board pushes results at most this often while there are new ones, 0.25 to 7.75 ms",
-    "DcShift_comment": "receiver DC blocker: 6 for the CoreBoard",
+    "DcShift_comment": "receiver DC blocker: 6 (0 gives false triggers from spurs near 0 Hz)",
     "Play_comment": "1: play the received video with ffplay",
     "SaveStream_comment": "1: also save the received stream to App/Video/Received.ts (large)",
 }
-RXV_FIELDS = {
+FMC_FIELDS = {   # gui key: (json key, type, min, max, label)
     "-ZED_ADDR-": ("ZedAddress", str, None, None, "Zedboard Address"),
     "-ZED_PORT-": ("ZedPort", int, 1, 65535, "TCP Port"),
-    "-ZED_UDP-": ("ZedUdpPort", int, 1024, 65535, "UDP Port (samples)"),
     "-ZED_PUSH-": ("Push_ms", float, 0.25, 7.75, "Push interval (ms)"),
     "-ZED_DC-": ("DcShift", int, 0, 15, "DC shift"),
+    "-AD_FREQ-": ("Frequency_MHz", float, 70, 6000, "Carrier (MHz)"),
+    "-AD_BW-": ("RFBandwidth_MHz", float, 0.2, 56, "RF bandwidth (MHz)"),
+    "-AD_GAIN-": ("Gain", int, -3, 71, "Gain (dB)"),
 }
+RATES = {"40 Msps": 40_000_000, "20 Msps": 20_000_000}
 LW = 18
 
 
@@ -111,24 +113,24 @@ def in_row(label, key, default, size=14, extra=None):
     return row + ([sg.Text(extra, font=ITALIC)] if extra else [])
 
 
-cb_frame = sg.Frame("CoreBoard (Parameters_CoreBoard.json)", [
-    in_row("CoreBoard Address", "-CB_ADDR-", CB_DEFAULTS["Address"], size=16),
-    in_row("HTTP Port", "-CB_HTTP-", CB_DEFAULTS["HttpPort"]),
-    in_row("Carrier (MHz)", "-CB_FREQ-", CB_DEFAULTS["Frequency_MHz"], extra="= the Pluto's carrier"),
-    in_row("Gain (index)", "-CB_GAIN-", CB_DEFAULTS["Gain"], extra="not dB"),
-    in_row("Analog filter (MHz)", "-CB_BW-", CB_DEFAULTS["Bandwidth_MHz"], extra="0 = follow the rate"),
-    [sg.Text("", size=(LW, 1)), sg.Checkbox("AGC (not recommended)", key="-CB_AGC-")],
-    [sg.Text("", size=(LW, 1)), sg.Checkbox("DC correction", key="-CB_DC-", default=True)],
-    [sg.Text("40 Msps to the Zedboard", font=ITALIC)],
+ad_frame = sg.Frame("FMCOMMS3 (AD9361)", [
+    in_row("Carrier (MHz)", "-AD_FREQ-", FMC_DEFAULTS["Frequency_MHz"], extra="= the Pluto's carrier"),
+    [sg.Text("Sample rate", size=(LW, 1), justification="right"),
+     sg.Combo(list(RATES), default_value="40 Msps", key="-AD_RATE-", readonly=True, size=12),
+     sg.Text("40: proven path", font=ITALIC)],
+    in_row("RF bandwidth (MHz)", "-AD_BW-", FMC_DEFAULTS["RFBandwidth_MHz"], extra="signal 16.4 MHz"),
+    [sg.Text("Gain control", size=(LW, 1), justification="right"),
+     sg.Combo(list(fp.GAIN_MODES), default_value="manual", key="-AD_MODE-", readonly=True, size=12)],
+    in_row("Gain (dB)", "-AD_GAIN-", FMC_DEFAULTS["Gain"], extra="manual only"),
+    [sg.Text("RX1A", font=ITALIC)],
 ], font=H2, vertical_alignment="top", expand_x=True)
 
-zed_frame = sg.Frame("Zedboard receiver (Parameters_RxVideo.json)", [
-    in_row("Zedboard Address", "-ZED_ADDR-", RXV_DEFAULTS["ZedAddress"], size=16),
-    in_row("TCP Port", "-ZED_PORT-", RXV_DEFAULTS["ZedPort"]),
-    in_row("UDP Port (samples)", "-ZED_UDP-", RXV_DEFAULTS["ZedUdpPort"]),
-    in_row("Push interval (ms)", "-ZED_PUSH-", RXV_DEFAULTS["Push_ms"], extra="0.25 .. 7.75"),
-    in_row("DC shift", "-ZED_DC-", RXV_DEFAULTS["DcShift"], extra="6 for the CoreBoard"),
-    [sg.Button("Check", key="-CHECK-", size=10), sg.Text("Zedboard firmware, CoreBoard status", font=ITALIC)],
+zed_frame = sg.Frame("Zedboard receiver", [
+    in_row("Zedboard Address", "-ZED_ADDR-", FMC_DEFAULTS["ZedAddress"], size=16),
+    in_row("TCP Port", "-ZED_PORT-", FMC_DEFAULTS["ZedPort"]),
+    in_row("Push interval (ms)", "-ZED_PUSH-", FMC_DEFAULTS["Push_ms"], extra="0.25 .. 7.75"),
+    in_row("DC shift", "-ZED_DC-", FMC_DEFAULTS["DcShift"], extra="6"),
+    [sg.Button("Check", key="-CHECK-", size=10), sg.Text("Zedboard firmware, AD9361 status", font=ITALIC)],
 ], font=H2, vertical_alignment="top", expand_x=True)
 
 video_frame = sg.Frame("Video", [
@@ -138,9 +140,9 @@ video_frame = sg.Frame("Video", [
 ], font=H2, vertical_alignment="top", expand_x=True)
 
 layout = [
-    [sg.Text("Flexlink - Video Receiver (CoreBoard + Zedboard)", font=H1, justification="center",
+    [sg.Text("Flexlink - Video Receiver (FMCOMMS3 + Zedboard)", font=H1, justification="center",
              expand_x=True, pad=(0, 15))],
-    [sg.Push(), sg.Column([[cb_frame]], vertical_alignment="top"),
+    [sg.Push(), sg.Column([[ad_frame]], vertical_alignment="top"),
      sg.Column([[zed_frame], [video_frame]], vertical_alignment="top"), sg.Push()],
     [sg.Push(), sg.Text("Transmitter", size=(12, 1), justification="right"),
      sg.Multiline(size=(110, 2), key="-CF-", disabled=True, font=RESULTS_FONT), sg.Push()],
@@ -195,42 +197,41 @@ def parse_fields(values, spec: dict) -> tuple[dict, list[str]]:
     return out, errors
 
 
-def settings_from_values(values) -> tuple[dict, dict, list[str]]:
-    cb, e1 = parse_fields(values, CB_FIELDS)
-    cb["AGC"] = int(bool(values["-CB_AGC-"]))
-    cb["DC_Correction"] = int(bool(values["-CB_DC-"]))
-    rxv, e2 = parse_fields(values, RXV_FIELDS)
-    rxv["Play"] = int(bool(values["-PLAY-"]))
-    rxv["SaveStream"] = int(bool(values["-SAVE_TS-"]))
-    return cb, rxv, e1 + e2
+def settings_from_values(values) -> tuple[dict, list[str]]:
+    s, errors = parse_fields(values, FMC_FIELDS)
+    s["SampleRate"] = RATES.get(values["-AD_RATE-"], 40_000_000)
+    s["GainMode"] = values["-AD_MODE-"] if values["-AD_MODE-"] in fp.GAIN_MODES else "manual"
+    s["Play"] = int(bool(values["-PLAY-"]))
+    s["SaveStream"] = int(bool(values["-SAVE_TS-"]))
+    return s, errors
 
 
 def load_into_window(window) -> None:
-    cb = load_section(CB_JSON, "CoreBoard", CB_DEFAULTS)["CoreBoard"]
-    for gui_key, (key, *_r) in CB_FIELDS.items():
-        window[gui_key].update(str(cb[key]))
-    window["-CB_AGC-"].update(bool(int(cb["AGC"])))
-    window["-CB_DC-"].update(bool(int(cb["DC_Correction"])))
-    rxv = load_section(RXV_JSON, "RxVideo", RXV_DEFAULTS, RXV_COMMENTS)["RxVideo"]
-    for gui_key, (key, *_r) in RXV_FIELDS.items():
-        window[gui_key].update(str(rxv[key]))
-    window["-PLAY-"].update(bool(int(rxv["Play"])))
-    window["-SAVE_TS-"].update(bool(int(rxv["SaveStream"])))
+    s = load_section(FMC_JSON, "FMCOMMS3", FMC_DEFAULTS, FMC_COMMENTS)["FMCOMMS3"]
+    for gui_key, (key, *_r) in FMC_FIELDS.items():
+        window[gui_key].update(str(s[key]))
+    window["-AD_RATE-"].update(next((k for k, v in RATES.items() if v == int(s["SampleRate"])), "40 Msps"))
+    window["-AD_MODE-"].update(s["GainMode"] if s["GainMode"] in fp.GAIN_MODES else "manual")
+    window["-PLAY-"].update(bool(int(s["Play"])))
+    window["-SAVE_TS-"].update(bool(int(s["SaveStream"])))
 
 
-def save_settings(values) -> tuple[dict, dict]:
-    """Writes App/Parameters_CoreBoard.json (the fields shown; the others are kept) and
-    App/Parameters_RxVideo.json. Raises ValueError, nothing written."""
-    cb, rxv, errors = settings_from_values(values)
+def save_settings(values) -> dict:
+    """Writes App/Parameters_FMCOMMS3.json (the fields shown; the others are kept).
+    Raises ValueError, nothing written."""
+    s, errors = settings_from_values(values)
     if errors:
         raise ValueError("\n".join(errors))
-    cbd = load_section(CB_JSON, "CoreBoard", CB_DEFAULTS)
-    cbd["CoreBoard"].update(cb)
-    rvd = load_section(RXV_JSON, "RxVideo", RXV_DEFAULTS, RXV_COMMENTS)
-    rvd["RxVideo"].update(rxv)
-    write_json_atomic(CB_JSON, cbd)
-    write_json_atomic(RXV_JSON, rvd)
-    return cbd["CoreBoard"], rvd["RxVideo"]
+    d = load_section(FMC_JSON, "FMCOMMS3", FMC_DEFAULTS, FMC_COMMENTS)
+    d["FMCOMMS3"].update(s)
+    write_json_atomic(FMC_JSON, d)
+    return d["FMCOMMS3"]
+
+
+def radio_config(s: dict) -> fp.RadioConfig:
+    return fp.RadioConfig(lo_hz=int(round(float(s["Frequency_MHz"]) * 1e6)), rate_hz=int(s["SampleRate"]),
+                          bw_hz=int(round(float(s["RFBandwidth_MHz"]) * 1e6)),
+                          gain_mode=fp.GAIN_MODES[s["GainMode"]], gain_db=int(s["Gain"]), port=int(s["Port"]))
 
 
 # ---------- Fast record parsing (the transport blocks as NumPy bit arrays) ----------
@@ -296,7 +297,9 @@ class VideoRx:
         self.ages: deque[float] = deque(maxlen=2000)       # ms, first block of each packet
         self.window: deque[tuple[float, int, int, int]] = deque(maxlen=16)   # (t, stream bytes, blocks, ok)
 
-    def add(self, slot, cfs, tbs) -> None:
+    def add(self, now20, cfs, tbs) -> None:
+        """now20: the stream position in receiver samples (20 Msps) when the push left the board,
+        or None (the STREAM_STOP reply)."""
         for c in cfs:
             if c.crc_ok and c.message != self.cf_message:
                 self.cf_message = c.message
@@ -304,8 +307,6 @@ class VideoRx:
                                 else f"control field message 0x{c.message:014x}")
         if not tbs:
             return
-        if slot is not None:
-            now20 = (slot * pr.PUSH_SLOT_SAMPLES) & 0xFFFFFFFF
         k = 0
         while k < len(tbs):                         # runs of blocks of the same size
             nb = len(tbs[k][3])
@@ -315,7 +316,7 @@ class VideoRx:
                 if t != self.last_trig:
                     self.packets += 1
                     self.last_trig = t
-                    if slot is not None:
+                    if now20 is not None:
                         d = (now20 - t) & 0xFFFFFFFF
                         if d < 1 << 31:
                             self.ages.append(d / 20e3)
@@ -343,50 +344,47 @@ class VideoRx:
                 f"{u.gaps} gaps, {self.resync.ts_packets} TS packets, {self.resync.resyncs} resyncs, "
                 f"{u.foreign} non-video blocks | block age {age}")
         if st is not None:
-            line += (f"\nCoreBoard stream: {st.datagrams} datagrams, {st.lost} lost (zero-filled), "
-                     f"ring max {st.ring_max}, resyncs {st.resyncs}, HTTP {pr.HTTP_STATES.get(st.http_state, '?')}"
-                     f" {st.http_code or ''}")
-            if st.http_state == 4:
-                line += " - the Zedboard could not reach the CoreBoard's HTTP port"
+            line += (f"\nFMCOMMS3 ring: {st.datagrams} slots written, {st.lost} overflows (samples lost), "
+                     f"{st.ring_full} ring full, ring max {st.ring_max} slots, {st.stalls} stalls")
         if self.out is not None and self.out.note:
             line += f"\nvideo: {self.out.note}"
         return line
 
 
-def detector_params(dc_shift: int) -> pr.Params:
+def detector_params(dc_shift: int, rate: int) -> pr.Params:
     params = pr.Params()
     if RX_PARAMS.is_file():
         meta = json.loads(RX_PARAMS.read_text())
         known = {f.name for f in fields(pr.Params)}
         params = pr.Params(**{k: v for k, v in meta.get("params", {}).items() if k in known})
-    params.input_stage = 2                  # 40 Msps in, half-band on the board
+    params.input_stage = 2 if rate == 40_000_000 else 1   # 40 Msps: half-band on the board
     params.dc_shift = int(dc_shift)
     return params
 
 
-def check(cb: dict, rxv: dict) -> str:
-    out = []
+def board_ok(info) -> str | None:
+    if not info.flags & fp.BOARD_FMCOMMS3:
+        return "not the FMCOMMS3 firmware (load fmc_pd_server.elf)"
+    if info.flags & pr.BOARD_NO_DETECTOR:
+        return "no receiver in the bitstream (the step-4 build_hw_fmcomms3.tcl bitstream is needed)"
+    return None
+
+
+def check(s: dict) -> str:
     try:
-        b = Board(rxv["ZedAddress"], int(rxv["ZedPort"]), 5.0)
+        b = Board(s["ZedAddress"], int(s["ZedPort"]), 5.0)
         info = b.ping()
+        rs = fp.RadioStatus.unpack(b.call(fp.RADIO_CONFIG))
         b.sock.close()
-        ok = info.build >= 39 and info.flags & pr.BOARD_PACK8
-        out.append(f"Zedboard {rxv['ZedAddress']}: firmware build {info.build}"
-                   + (", bitstream 9.2 (NOREC)" if info.flags & pr.BOARD_NOREC else "")
-                   + ("" if ok else " - needs firmware build 39 and bitstream 9.1 or later (push mode)"))
+        bad = board_ok(info)
+        return (f"Zedboard {s['ZedAddress']}: fmc_pd_server build {info.build}, flags 0x{info.flags:X}"
+                + (f" - {bad}" if bad else "") + "\n" + rs.describe())
     except (OSError, pr.ProtocolError) as e:
-        out.append(f"Zedboard {rxv['ZedAddress']}:{rxv['ZedPort']}: no answer ({e})")
-    try:
-        st = PS.http_status(cb["Address"], int(cb["HttpPort"]))
-        out.append(f"CoreBoard {cb['Address']}: {st.get('product', '?')}, Ethernet {st.get('ethernet_mbps')} Mbit/s")
-    except (OSError, ValueError) as e:
-        out.append(f"CoreBoard {cb['Address']}:{cb['HttpPort']}: no answer ({e}) - from this PC; the Zedboard "
-                   f"reaches it on its own")
-    return "\n".join(out)
+        return f"Zedboard {s['ZedAddress']}:{s['ZedPort']}: no answer ({e})"
 
 
 # ---------- The session (worker thread) ----------
-def rx_worker(post, cb: dict, rxv: dict, stop: threading.Event) -> None:
+def rx_worker(post, s: dict, stop: threading.Event) -> None:
     """post(kind, **kw): "started" | "stats" | "cf" | "done"."""
     error = None
     b = out = rx = None
@@ -394,26 +392,27 @@ def rx_worker(post, cb: dict, rxv: dict, stop: threading.Event) -> None:
     st = None
     t0 = time.monotonic()
     try:
-        out = VF.TsOutput(play=bool(rxv["Play"]), save_path=RECEIVED_TS if rxv["SaveStream"] else None,
+        out = VF.TsOutput(play=bool(s["Play"]), save_path=RECEIVED_TS if s["SaveStream"] else None,
                           title="Flexlink received video")
         rx = VideoRx(out)
-        b = Board(rxv["ZedAddress"], int(rxv["ZedPort"]), 10.0)
+        b = Board(s["ZedAddress"], int(s["ZedPort"]), 10.0)
         info = b.ping()
-        if info.build < 39 or not info.flags & pr.BOARD_PACK8:
-            raise RuntimeError(f"the Zedboard has firmware build {info.build}: push mode needs build 39 "
-                               f"and bitstream 9.1 or later")
-        b.call(pr.SET_PARAMS, detector_params(rxv["DcShift"]).pack())
-        body = PS.coreboard_start_json(int(rxv["ZedUdpPort"]))     # from App/Parameters_CoreBoard.json
-        push_units = min(max(round(float(rxv["Push_ms"]) * 4), 1), 31)
+        bad = board_ok(info)
+        if bad:
+            raise RuntimeError(f"Zedboard flags 0x{info.flags:X}: {bad}")
+        rate = int(s["SampleRate"])
+        decim = 2 if rate == 40_000_000 else 1          # input samples per receiver (20 Msps) sample
+        rs = fp.RadioStatus.unpack(b.call(fp.RADIO_CONFIG, radio_config(s).pack()))
+        if not rs.ok:
+            raise RuntimeError("the AD9361 is not set up: " + rs.describe())
+        b.call(pr.SET_PARAMS, detector_params(s["DcShift"], rate).pack())
+        push_units = min(max(round(float(s["Push_ms"]) * 4), 1), 31)
         flags = pr.STREAM_FLAG_PUSH | (push_units << 2)
-        reply = b.call(pr.STREAM_START, PS.start_payload(int(rxv["ZedUdpPort"]), flags, cb["Address"],
-                                                          int(cb["HttpPort"]), body))
+        b.call(pr.STREAM_START, struct.pack("<HHIHH", 0, flags, 0, 0, 0))   # only the flags are used
         streaming = True
-        post("started", text=(f"Zedboard {rxv['ZedAddress']}: firmware build {info.build}, streaming on its UDP port "
-                              f"{struct.unpack('<I', reply[:4])[0]}; CoreBoard {cb['Address']}: "
-                              f"{body['frequency'] / 1e6:g} MHz, {body['rate'] / 1e6:g} Msps, "
-                              + ("AGC" if body["agc"] else f"gain {body.get('gain')}")
-                              + f"; results pushed at most every {push_units / 4:g} ms"))
+        post("started", text=(f"Zedboard {s['ZedAddress']}: fmc_pd_server build {info.build}; " + rs.describe()
+                              + f"\nreceiver input stage {2 if decim == 2 else 1}, dc_shift {s['DcShift']}; "
+                              f"results pushed at most every {push_units / 4:g} ms"))
         b.sock.settimeout(5.0)
         t0 = time.monotonic()
         t_post = 0.0
@@ -424,7 +423,7 @@ def rx_worker(post, cb: dict, rxv: dict, stop: threading.Event) -> None:
                 raise pr.ProtocolError(f"unexpected message {pr.CMD_NAMES.get(cmd, cmd)} while streaming")
             slot, st_new, cfs, tbs = parse_push(raw)
             st = st_new or st
-            rx.add(slot, cfs, tbs)
+            rx.add((slot // decim) & 0xFFFFFFFF, cfs, tbs)
             now = time.monotonic()
             if rx.cf_text != cf_shown:
                 cf_shown = rx.cf_text
@@ -433,15 +432,14 @@ def rx_worker(post, cb: dict, rxv: dict, stop: threading.Event) -> None:
                 t_post = now
                 post("stats", text=rx.stats_line(now - t0, st))
         # STREAM_STOP: the pushes already on their way, then the reply (the last results)
-        stop_js = json.dumps({"op": "stop"}).encode()
         b.seq += 1
-        pr.send_msg(b.sock, pr.STREAM_STOP, struct.pack("<H", len(stop_js)) + stop_js, b.seq)
+        pr.send_msg(b.sock, pr.STREAM_STOP, struct.pack("<H", 0), b.seq)
         while True:
             cmd, status, seq, raw = pr.recv_msg(b.sock)
             if cmd == pr.STREAM_PUSH:
                 slot, st_new, cfs, tbs = parse_push(raw)
                 st = st_new or st
-                rx.add(slot, cfs, tbs)
+                rx.add((slot // decim) & 0xFFFFFFFF, cfs, tbs)
                 continue
             if cmd != pr.STREAM_STOP or seq != b.seq or status != pr.ST_OK:
                 raise pr.ProtocolError(f"STREAM_STOP reply: cmd {cmd} seq {seq} status {status}")
@@ -476,13 +474,13 @@ def set_running(window, running: bool) -> None:
 
 
 def main():
-    window = sg.Window("Flexlink Video Rx", layout, finalize=True, resizable=True)
+    window = sg.Window("Flexlink Video Rx (FMCOMMS3)", layout, finalize=True, resizable=True)
     window.metadata = False
     stop = threading.Event()
     stats_lines = 0
     try:
         load_into_window(window)
-        window["-STATUS-"].update("Loaded Parameters_CoreBoard.json, Parameters_RxVideo.json")
+        window["-STATUS-"].update("Loaded Parameters_FMCOMMS3.json")
     except (OSError, ValueError, KeyError) as e:
         sg.popup_error(f"Could not load the parameter files:\n{e}")
 
@@ -503,17 +501,17 @@ def main():
         if event == "-SAVE-":
             try:
                 save_settings(values)
-                window["-STATUS-"].update("Saved Parameters_CoreBoard.json, Parameters_RxVideo.json.")
+                window["-STATUS-"].update("Saved Parameters_FMCOMMS3.json.")
             except (OSError, ValueError) as e:
                 sg.popup_error(f"Nothing was saved:\n{e}", title="Save failed")
             continue
         if event == "-CHECK-":
-            cb, rxv, errors = settings_from_values(values)
+            s, errors = settings_from_values(values)
             if errors:
                 sg.popup_error("\n".join(errors), title="Settings")
                 continue
             window["-STATUS-"].update("Checking ...")
-            window.start_thread(lambda: window.write_event_value("-CHECKED-", check(cb, rxv)), "-THREAD_END-")
+            window.start_thread(lambda: window.write_event_value("-CHECKED-", check(s)), "-THREAD_END-")
             continue
         if event == "-CHECKED-":
             window["-RX_STATUS-"].update(values[event])
@@ -521,7 +519,7 @@ def main():
             continue
         if event == "-START-":
             try:
-                cb, rxv = save_settings(values)
+                s = save_settings(values)
             except (OSError, ValueError) as e:
                 sg.popup_error(f"Not started, nothing was saved:\n{e}", title="Invalid settings")
                 continue
@@ -530,7 +528,7 @@ def main():
             window["-RX_STATUS-"].update("Starting ...")
             window["-CF-"].update("")
             set_running(window, True)
-            window.start_thread(lambda: rx_worker(post, cb, rxv, stop), "-THREAD_END-")
+            window.start_thread(lambda: rx_worker(post, s, stop), "-THREAD_END-")
             continue
         if event == "-STOP-":
             stop.set()
