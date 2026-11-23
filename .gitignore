@@ -45,6 +45,38 @@ App/CoreBoard/Received_Files/
 # Pluto loopback outputs (FlexlinkTxWithPluto.py)
 App/Pluto/
 
+# FPGA development (HW_Development). Formerly in Packet_Detector/.gitignore and
+# Packet_Transmitter/.gitignore; this is now the only .gitignore of the repository.
+# Vivado / Vitis everywhere
+.Xil/
+*.jou
+
+# Packet_Detector (CoreBoard receiver)
+HW_Development/Packet_Detector/HW/build/
+HW_Development/Packet_Detector/FW/workspace/
+HW_Development/Packet_Detector/FW/debug/
+HW_Development/Packet_Detector/SIM/work/
+HW_Development/Packet_Detector/SIM/cosim/obj/
+HW_Development/Packet_Detector/SIM/cosim/*.o
+HW_Development/Packet_Detector/TestVectors/*_result.json
+HW_Development/Packet_Detector/TestVectors/*_debug.png
+
+# Packet_Detector_FCOMM (FMCOMMS3 receiver), recreated by HW/build_hw_fmcomms3.tcl
+HW_Development/Packet_Detector_FCOMM/HW/build_fmcomms3/
+
+# Packet_Transmitter (Pluto)
+HW_Development/Packet_Transmitter/HW/build/
+HW_Development/Packet_Transmitter/SIM/work/
+HW_Development/Packet_Transmitter/PC/*.npz
+!HW_Development/Packet_Transmitter/PC/ptx_tables.npz
+HW_Development/Packet_Transmitter/PC/*_40.bin
+HW_Development/Packet_Transmitter/PC/cap*.json
+HW_Development/Packet_Transmitter/PC/model_vector*.json
+HW_Development/Packet_Transmitter/FW/ptx_server
+HW_Development/Packet_Transmitter/FW/ptx_server_stub
+HW_Development/Packet_Transmitter/FW/ptx_params_test
+HW_Development/Packet_Transmitter/FW/ptx_stub_stream.bin
+
 # Editors and operating systems
 .vscode/
 .idea/
