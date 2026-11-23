@@ -61,8 +61,13 @@ HW_Development/Packet_Detector/SIM/cosim/*.o
 HW_Development/Packet_Detector/TestVectors/*_result.json
 HW_Development/Packet_Detector/TestVectors/*_debug.png
 
-# Packet_Detector_FCOMM (FMCOMMS3 receiver), recreated by HW/build_hw_fmcomms3.tcl
+# Packet_Detector_FCOMM (FMCOMMS3 receiver), recreated by HW/build_hw_fmcomms3.tcl and FW/build_firmware_fmc.py
 HW_Development/Packet_Detector_FCOMM/HW/build_fmcomms3/
+HW_Development/Packet_Detector_FCOMM/FW/workspace/
+# fmc_capture.py captures (.cs16 + .json) and fmc_to_cs8.py conversions
+HW_Development/Packet_Detector_FCOMM/PC/*.cs16
+HW_Development/Packet_Detector_FCOMM/PC/*.json
+HW_Development/Packet_Detector_FCOMM/PC/cs8/
 
 # Packet_Transmitter (Pluto)
 HW_Development/Packet_Transmitter/HW/build/
