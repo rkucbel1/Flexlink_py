@@ -65,4 +65,27 @@ void fmc_radio_get_status(struct fmc_radio_status *st);
 int fmc_capture(UINTPTR addr, u32 n_samples, u32 timeout_ms, struct fmc_capture_result *res,
                 char *err, u32 err_len);
 
+/* ---------------------------------------------------------------------------------- */
+/* Ring writer for the streaming receiver (fmc_pd_server.c): axi_dmac fills a DDR ring of  */
+/* n_slots slots, transfers of one slot queued FMC_RING_INFLIGHT deep, never into a slot   */
+/* the reader (the AXI DMA to pd_0) has not read yet.                                      */
+/* ---------------------------------------------------------------------------------- */
+#define FMC_RING_INFLIGHT       2u
+
+struct fmc_ring_stat {
+    u64 written;            /* slots completed since fmc_ring_start (the ring's write position) */
+    u32 overflows;          /* polls that found the overflow flag set: samples were lost */
+    u32 ring_full;          /* times a slot could not be queued because the reader was behind */
+    u32 timeouts;           /* fmc_ring_stop: transfers that did not finish */
+};
+
+/* Start: the whole D-cache is flushed first (no dirty line may later overwrite DMA data). */
+int  fmc_ring_start(UINTPTR base, u32 slot_bytes, u32 n_slots, char *err, u32 err_len);
+/* From the main loop: completes finished transfers, queues new ones. rd = the first slot the
+ * reader still needs (slots from rd on are not overwritten). Returns the slots completed now. */
+u32  fmc_ring_poll(u64 rd, struct fmc_ring_stat *st);
+/* Stop queueing, wait for the transfers in flight (at most 50 ms), disable the DMA. */
+void fmc_ring_stop(struct fmc_ring_stat *st);
+int  fmc_ring_active(void);
+
 #endif

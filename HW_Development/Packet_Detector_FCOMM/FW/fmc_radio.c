@@ -59,6 +59,8 @@ extern struct axi_dac_init fmc_tx_dac_init;
  * still accepts data (no overflow) while the end of the capture is checked. 1.6 ms at 40 Msps. */
 static u8 guard_buf[DMAC_GUARD_BYTES] __attribute__((aligned(64)));
 
+int fmc_ring_active(void);
+
 static struct ad9361_rf_phy *phy;
 static AD9361_InitParam init_param;
 static struct fmc_radio_cfg cur;
@@ -302,6 +304,10 @@ int fmc_capture(UINTPTR addr, u32 n_samples, u32 timeout_ms, struct fmc_capture_
     u32 status;
 
     memset(res, 0, sizeof(*res));
+    if (fmc_ring_active()) {
+        snprintf(err, err_len, "capture not possible while streaming (STREAM_STOP first)");
+        return -1;
+    }
     if (!radio_ok) {
         snprintf(err, err_len, "AD9361 not set up (RADIO_CONFIG first)");
         return -1;
@@ -382,4 +388,112 @@ int fmc_capture(UINTPTR addr, u32 n_samples, u32 timeout_ms, struct fmc_capture_
     res->overflow = (status & AD_DMA_OVF) ? 1u : 0u;
     Xil_DCacheInvalidateRange(addr, bytes);
     return 0;
+}
+
+/* ---------------------------------------------------------------------------------- */
+/* Ring writer (see fmc_radio.h). Transfer IDs are checked in order, as in fmc_capture():  */
+/* with at most FMC_RING_INFLIGHT (2) in flight an ID is never reused unseen. The overflow */
+/* flag is cleared when the first transfer has finished (start-up) and then checked at    */
+/* every poll; set again means the DMA had no transfer queued: samples were lost.         */
+/* ---------------------------------------------------------------------------------- */
+static int ring_on;
+static UINTPTR ring_base;
+static u32 ring_slot_bytes, ring_slots;
+static u64 ring_sub, ring_done;
+static u32 ring_ids[FMC_RING_INFLIGHT];
+static int ring_full_now;
+
+int fmc_ring_active(void)
+{
+    return ring_on;
+}
+
+int fmc_ring_start(UINTPTR base, u32 slot_bytes, u32 n_slots, char *err, u32 err_len)
+{
+    if (!radio_ok) {
+        snprintf(err, err_len, "AD9361 not set up (RADIO_CONFIG first)");
+        return -1;
+    }
+    if ((base & 63u) || (slot_bytes & 63u) || slot_bytes == 0u || n_slots < 2u * FMC_RING_INFLIGHT) {
+        snprintf(err, err_len, "ring: base and slot size must be 64-byte aligned, at least %u slots",
+                 (unsigned)(2u * FMC_RING_INFLIGHT));
+        return -1;
+    }
+    Xil_DCacheFlush();
+    ring_base = base;
+    ring_slot_bytes = slot_bytes;
+    ring_slots = n_slots;
+    ring_sub = ring_done = 0;
+    ring_full_now = 0;
+    dma_wr(DMAC_CTRL, 0u);
+    dma_wr(DMAC_CTRL, 1u);
+    dma_wr(DMAC_IRQ_MASK, 3u);
+    dma_wr(DMAC_IRQ_PENDING, 3u);
+    dma_wr(DMAC_FLAGS, 0u);
+    ring_on = 1;
+    return 0;
+}
+
+u32 fmc_ring_poll(u64 rd, struct fmc_ring_stat *st)
+{
+    u32 n = 0;
+    if (!ring_on) {
+        return 0;
+    }
+    for (;;) {
+        if (ring_sub > ring_done &&
+            (dma_rd(DMAC_TRANSFER_DONE) & (1u << ring_ids[ring_done % FMC_RING_INFLIGHT]))) {
+            ring_done++;
+            n++;
+            if (ring_done == 1u) {
+                ad_wr(AD_DMA_STATUS, 7u);       /* start-up overflow cleared */
+            }
+            continue;
+        }
+        if (ring_sub - ring_done < FMC_RING_INFLIGHT && (dma_rd(DMAC_TRANSFER_SUBMIT) & 1u) == 0u) {
+            if (ring_sub - rd >= ring_slots) {  /* the reader still needs that slot */
+                if (!ring_full_now) {
+                    st->ring_full++;
+                    ring_full_now = 1;
+                }
+                break;
+            }
+            ring_full_now = 0;
+            ring_ids[ring_sub % FMC_RING_INFLIGHT] = dma_rd(DMAC_TRANSFER_ID) & 0x1Fu;
+            dma_wr(DMAC_DEST_ADDRESS, (u32)(ring_base + (u32)(ring_sub % ring_slots) * ring_slot_bytes));
+            dma_wr(DMAC_DEST_STRIDE, 0u);
+            dma_wr(DMAC_X_LENGTH, ring_slot_bytes - 1u);
+            dma_wr(DMAC_Y_LENGTH, 0u);
+            dma_wr(DMAC_TRANSFER_SUBMIT, 1u);
+            ring_sub++;
+            continue;
+        }
+        break;
+    }
+    if (ring_done > 0u && (ad_rd(AD_DMA_STATUS) & AD_DMA_OVF)) {
+        st->overflows++;
+        ad_wr(AD_DMA_STATUS, 7u);
+    }
+    st->written = ring_done;
+    return n;
+}
+
+void fmc_ring_stop(struct fmc_ring_stat *st)
+{
+    u64 t_end;
+    if (!ring_on) {
+        return;
+    }
+    t_end = gt_now() + 50000ull * GT_COUNTS_PER_US;
+    while (ring_sub > ring_done && gt_now() < t_end) {
+        if (dma_rd(DMAC_TRANSFER_DONE) & (1u << ring_ids[ring_done % FMC_RING_INFLIGHT])) {
+            ring_done++;
+        }
+    }
+    if (ring_sub > ring_done) {
+        st->timeouts += (u32)(ring_sub - ring_done);
+    }
+    dma_wr(DMAC_CTRL, 0u);
+    st->written = ring_done;
+    ring_on = 0;
 }

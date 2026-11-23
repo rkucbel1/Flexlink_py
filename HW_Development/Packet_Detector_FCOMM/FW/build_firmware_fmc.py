@@ -1,21 +1,25 @@
 """
 build_firmware_fmc.py  (Flexlink_py/HW_Development/Packet_Detector_FCOMM/FW)
 
-Builds the FMCOMMS3 capture firmware (step 3) with the unified Vitis (2025.2) Python API, the
+Builds the FMCOMMS3 firmware with the unified Vitis (2025.2) Python API, the
 same way as ../../Packet_Detector/FW/build_firmware.py (whose platform fixes are copied below
 unchanged: lwIP settings, PHY timeout, VFP save in the IRQ handler, rx-interrupt print, IRQ stack):
   1. platform from ../HW/build_fmcomms3/fmc_zed.xsa (standalone, Cortex-A9 #0) with lwIP
-  2. application from the "lwIP Echo Server" template; echo.c is replaced by fmc_server.c,
-     and fmc_radio.c, fmc_ad9361_param.c, app_config.h are added
+  2. application from the "lwIP Echo Server" template; echo.c is replaced by the server, and
+     fmc_radio.c, fmc_ad9361_param.c, app_config.h are added. Two applications:
+       FMC_APP=receiver (default)  fmc_pd_server.c: the FlexLink receiver pd_0 fed from the
+                                   AD9361 (step 4; needs the step-4 bitstream)
+       FMC_APP=capture             fmc_server.c: AD9361 capture only (step 3; any bitstream)
   3. ADI no-OS (AD9361 driver and the Xilinx platform layer) is compiled from its own checkout,
      through the template's UserConfig.cmake (USER_COMPILE_SOURCES / USER_INCLUDE_DIRECTORIES).
      The no-OS files are found by following the #include lines of our sources: every no-OS header
      that is used brings in the .c file of the same name (no_os_spi.h -> drivers/api/no_os_spi.c).
-  4. build -> workspace/fmc_server/build/fmc_server.elf
+  4. build -> workspace/<app>/build/<app>.elf (fmc_pd_server or fmc_server)
 
     export NOOS_DIR=~/SiskinRF/no-OS        # default: next to Flexlink_py
     cd Flexlink_py/HW_Development/Packet_Detector_FCOMM/FW
-    vitis -s build_firmware_fmc.py
+    vitis -s build_firmware_fmc.py                  # receiver
+    FMC_APP=capture vitis -s build_firmware_fmc.py  # capture server
 
 The workspace folder is deleted and recreated on every run; edit the sources here.
 """
@@ -34,12 +38,15 @@ XSA = os.path.normpath(os.path.join(HERE, "..", "HW", "build_fmcomms3", "fmc_zed
 NOOS = os.path.normpath(os.environ.get("NOOS_DIR", os.path.join(HERE, "..", "..", "..", "..", "no-OS")))
 PLATFORM = "fmc_zed_platform"
 DOMAIN = "standalone_ps7_cortexa9_0"
-APP = "fmc_server"
+FMC_APP = os.environ.get("FMC_APP", "receiver")
+if FMC_APP not in ("receiver", "capture"):
+    sys.exit(f"FMC_APP must be receiver or capture, not {FMC_APP!r}")
+APP = "fmc_pd_server" if FMC_APP == "receiver" else "fmc_server"
 TEMPLATE = "lwip_echo_server"
 LWIP = "lwip220"
 
 # Our sources: the first replaces the template's echo.c
-APP_SOURCES = ["fmc_server.c", "fmc_radio.c", "fmc_ad9361_param.c"]
+APP_SOURCES = [APP + ".c", "fmc_radio.c", "fmc_ad9361_param.c"]
 APP_HEADERS = ["fmc_radio.h", "app_config.h"]
 
 # no-OS: where its headers and sources are looked for (nothing else of no-OS is used)
@@ -393,6 +400,7 @@ def main():
     for f in APP_SOURCES + APP_HEADERS:
         if not os.path.isfile(os.path.join(HERE, f)):
             sys.exit(f"{f} missing in {HERE}")
+    print(f"Application: {APP} ({FMC_APP})")
     sources = noos_sources()
     inc_dirs = [os.path.join(NOOS, d) for d in NOOS_INC_DIRS]
     print(f"no-OS {noos_commit()} at {NOOS}: {len(sources)} source files")
@@ -453,7 +461,7 @@ def main():
             check_irq_fpu_save(elf)
             print(f"Done: {elf}")
         else:
-            sys.exit("Build failed - no fmc_server.elf; see the compiler messages above")
+            sys.exit(f"Build failed - no {APP}.elf; see the compiler messages above")
     finally:
         vitis.dispose()
 
