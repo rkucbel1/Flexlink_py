@@ -1,6 +1,6 @@
 {
   "CoreBoard": {
-    "Frequency_MHz": 2440,
+    "Frequency_MHz": 2420,
     "Address": "10.42.0.133",
     "Address_comment": "IP address of the CoreBoard (DHCP; printed on its UART log and shown on http://<board>/)",
     "HttpPort": 80,

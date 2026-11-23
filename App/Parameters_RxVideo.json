@@ -1,0 +1,18 @@
+{
+  "RxVideo": {
+    "ZedAddress": "10.42.0.101",
+    "ZedAddress_comment": "IP address of the Zedboard receiver",
+    "ZedPort": 5001,
+    "ZedPort_comment": "its TCP port for commands and results",
+    "ZedUdpPort": 4000,
+    "ZedUdpPort_comment": "its UDP port for the CoreBoard's sample stream",
+    "Push_ms": 1.0,
+    "Push_ms_comment": "the board pushes results at most this often while there are new ones, 0.25 to 7.75 ms",
+    "DcShift": 6,
+    "DcShift_comment": "receiver DC blocker: 6 for the CoreBoard",
+    "Play": 1,
+    "Play_comment": "1: play the received video with ffplay",
+    "SaveStream": 0,
+    "SaveStream_comment": "1: also save the received stream to App/Video/Received.ts (large)"
+  }
+}
