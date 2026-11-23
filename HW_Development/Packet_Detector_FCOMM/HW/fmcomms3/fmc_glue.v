@@ -18,6 +18,8 @@
 //  - One Rx channel (1R1T): {Q0, I0} -> one 32-bit word, [15:0] = I, [31:16] = Q, the same
 //    layout as the pd_0 stream word.
 //  - dma_wr_sync = 1 for axi_dmac's fifo_wr_sync, which exists only with SYNC_TRANSFER_START = 1.
+//  - pd_rec_tready = 1 for pd_0's debug-record output (M_AXIS): this variant has no AXI DMA S2MM,
+//    so records (sent only with CTRL.DEBUG or LOOPBACK) are dropped instead of stalling pd_0.
 //  - X_INTERFACE_IGNORE on every port: without it Vivado infers ADI fifo_wr interfaces (one per bit)
 //    from the port names and warns about each one. Plain wires are wanted here.
 
@@ -46,8 +48,11 @@ module fmc_glue (
     (* X_INTERFACE_IGNORE = "true" *) input  wire [15:0] adc_data_i0,
     (* X_INTERFACE_IGNORE = "true" *) input  wire [15:0] adc_data_q0,
     (* X_INTERFACE_IGNORE = "true" *) output wire [31:0] adc_data_iq,
-    (* X_INTERFACE_IGNORE = "true" *) output wire        dma_wr_sync      // axi_dmac fifo_wr_sync: always 1 (free-running capture)
+    (* X_INTERFACE_IGNORE = "true" *) output wire        dma_wr_sync,     // axi_dmac fifo_wr_sync: always 1 (free-running capture)
+    (* X_INTERFACE_IGNORE = "true" *) output wire        pd_rec_tready    // pd_0 m_axis_tready: always 1 (no S2MM, see below)
 );
+
+    assign pd_rec_tready = 1'b1;
 
     assign dma_wr_sync = 1'b1;
 

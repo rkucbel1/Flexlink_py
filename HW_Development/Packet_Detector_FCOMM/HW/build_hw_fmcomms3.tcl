@@ -1,12 +1,15 @@
 # build_hw_fmcomms3.tcl  (Flexlink_py/HW_Development/Packet_Detector_FCOMM/HW)
 #
-# FMCOMMS3 build variant, step 2 of the handover plan: capture only, no pd_0 yet.
-# Creates the Zedboard hardware from scratch, builds the bitstream and exports the .xsa.
+# FMCOMMS3 build variant of the FlexLink receiver (step 4 of the handover plan): the AD9361 on
+# the FMC connector feeds the PL receiver pd_0 through a DDR ring. Creates the Zedboard hardware
+# from scratch, builds the bitstream and exports the .xsa.
+# FMC_NO_PD=1 builds the step-2 design instead: capture only (AD9361 -> DDR), no pd_0.
 # Separate from the CoreBoard build (../../Packet_Detector); this script writes only to build_fmcomms3/.
 #
 #   export ADI_HDL_DIR=~/SiskinRF/hdl          # ADI HDL checkout (main), library IPs built
 #   cd Flexlink_py/HW_Development/Packet_Detector_FCOMM/HW
-#   vivado -mode batch -source build_hw_fmcomms3.tcl                  # full build
+#   vivado -mode batch -source build_hw_fmcomms3.tcl                  # full build (~10 min)
+#   FMC_NO_PD=1 vivado -mode batch -source build_hw_fmcomms3.tcl      # capture only (step 2)
 #   vivado -mode batch -source build_hw_fmcomms3.tcl -tclargs bd      # block design only
 #   vivado -mode batch -source build_hw_fmcomms3.tcl -tclargs synth   # stop after synthesis
 #   vivado build_fmcomms3/fmc_zed/fmc_zed.xpr                         # open the project
@@ -18,16 +21,21 @@
 # Design:
 #
 #   AD9361 --LVDS--> axi_ad9361 (1R1T) --{Q0,I0} 32b on l_clk--> axi_dmac (FIFO -> AXI3 64b)
-#                                                                     --S_AXI_HP2--> DDR
+#                                                                     --S_AXI_HP2--> DDR ring
+#   DDR ring --S_AXI_HP0--> AXI4->AXI3 converter --> AXI DMA MM2S --AXIS 32b--> pd_0
+#                          (pd_0's record output M_AXIS is tied ready: no S2MM in this variant)
 #   PS7 --M_AXI_GP0--> smartconnect --> axi_ad9361 registers (0x79020000, 64 KB)
 #                                   --> axi_dmac registers   (0x7C400000, 4 KB)
+#                                   --> pd_0 registers       (0x43C00000, 4 KB)
+#                                   --> AXI DMA registers    (automatic, 0x40400000)
 #   PS7 SPI0 (EMIO) --> AD9361 SPI          PS7 GPIO (EMIO, 64) --> fmc_glue --> AD9361 control
 #   axi_dmac irq --> PS7 IRQ_F2P
 #
 # Addresses and GPIO bit numbers are the same as in ADI's fmcomms2/zed design, so no-OS's
 # defaults fit. Sample word: [15:0] = I, [31:16] = Q (12 bit, sign-extended), as pd_0 expects.
 # Clocks: FCLK_CLK0 100 MHz (AXI), FCLK_CLK1 200 MHz (IDELAYCTRL reference), l_clk from the
-# AD9361 (sample side of axi_ad9361 and of axi_dmac).
+# AD9361 (sample side of axi_ad9361 and of axi_dmac). pd_0 and the AXI DMA run on FCLK_CLK0, as
+# in the CoreBoard design; their RTL is ../../Packet_Detector/RTL, the same files build_hw.tcl uses.
 
 set script_dir [file dirname [file normalize [info script]]]
 set build_dir  [file join $script_dir build_fmcomms3]
@@ -38,6 +46,16 @@ set board      digilentinc.com:zedboard:part0:1.1
 set jobs       [expr {[info exists ::env(JOBS)] ? $::env(JOBS) : 2}]
 set mode       [expr {[llength $argv] > 0 ? [lindex $argv 0] : "all"}]
 if {[lsearch -exact {all bd synth} $mode] < 0} { error "unknown mode '$mode' (all, bd or synth)" }
+set with_pd    [expr {!([info exists ::env(FMC_NO_PD)] && $::env(FMC_NO_PD) ne "" && $::env(FMC_NO_PD) ne "0")}]
+set pd_dir     [file normalize [file join $script_dir .. .. Packet_Detector]]
+# rx_clk (the AD9361 DATA_CLK, l_clk): ADI's constraint is 4 ns, the 2R2T clock at 61.44 Msps.
+# In 1R1T the clock is 2 x the sample rate: 80 MHz at 40 Msps, at most 122.88 MHz at the AD9361's
+# 61.44 Msps limit (the rate of no-OS's digital interface tune). 8 ns covers every 1R1T rate; the
+# LVDS input timing itself is set by the IDELAY tune at run time, not by this constraint.
+set rx_clk_ns  [expr {[info exists ::env(FMC_RX_CLK_NS)] ? $::env(FMC_RX_CLK_NS) : 8.0}]
+# placement directive for the full design (default as build_hw.tcl); others to try when timing
+# misses by a little: ExtraNetDelay_high, AltSpreadLogic_high, Explore, ExtraPostPlacementOpt
+set place_dir  [expr {[info exists ::env(PLACE_DIRECTIVE)] ? $::env(PLACE_DIRECTIVE) : "ExtraTimingOpt"}]
 
 # ADI HDL checkout: $ADI_HDL_DIR, else ~/SiskinRF/hdl (next to Flexlink_py)
 if {[info exists ::env(ADI_HDL_DIR)]} {
@@ -53,6 +71,7 @@ puts "ADI HDL: $adi"
 
 set notes {}        ;# lines for summary.txt
 proc note {s} { global notes; lappend notes $s; puts "NOTE: $s" }
+note [expr {$with_pd ? "design: AD9361 -> DDR ring -> pd_0 (step 4)" : "design: capture only, no pd_0 (FMC_NO_PD)"}]
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -113,6 +132,11 @@ proc filter_xdc {src dst ports} {
         set refs [regexp -all -inline {get_ports\s+\{?\s*([A-Za-z0-9_]+)} $t]
         set ok [expr {[llength $refs] > 0}]
         foreach {- name} $refs { if {[lsearch -exact $ports $name] < 0} { set ok 0 } }
+        if {$ok && [regexp {^create_clock} $t] && [regexp -- {-name\s+rx_clk\y} $t]} {
+            # see rx_clk_ns at the top
+            regsub -- {-period\s+[0-9.]+} $t "-period $::rx_clk_ns" t
+            set t "$t   ;# period set by build_hw_fmcomms3.tcl (1R1T), ADI: 4 ns"
+        }
         if {$ok} { puts $out $t; incr kept } else { lappend dropped $t }
     }
     close $out
@@ -172,6 +196,10 @@ set_property -dict [list \
     CONFIG.PCW_SPI0_PERIPHERAL_ENABLE {1} \
     CONFIG.PCW_SPI0_SPI0_IO {EMIO} \
 ] $ps7
+if {$with_pd} {
+    # AXI DMA MM2S reads the ring on HP0 (32 bit, as in build_hw.tcl)
+    set_property -dict [list CONFIG.PCW_USE_S_AXI_HP0 {1} CONFIG.PCW_S_AXI_HP0_DATA_WIDTH {32}] $ps7
+}
 # Ethernet PHY pins, as Packet_Detector/HW/build_hw.tcl (MDIO must be on MIO 52..53)
 set_property -dict [list \
     CONFIG.PCW_ENET0_PERIPHERAL_ENABLE {1} \
@@ -290,14 +318,64 @@ connect_bd_net [pin axi_ad9361_adc_dma/fifo_wr_overflow] [pin axi_ad9361/adc_dov
 connect_bd_net [pin axi_ad9361_adc_dma/irq] [pin ps7/IRQ_F2P]
 
 # --------------------------------------------------------------------------
+# pd_0 (the FlexLink receiver) fed by the AXI DMA from the ring, as in build_hw.tcl
+# --------------------------------------------------------------------------
+if {$with_pd} {
+    # RTL file list: taken from build_hw.tcl, so both builds always use the same files
+    set fh [open [file join $pd_dir HW build_hw.tcl]]; set t [read $fh]; close $fh
+    if {![regexp {foreach f \{([^\}]*)\} \{\s*lappend rtl_files} $t -> rtl_names]} {
+        error "RTL file list not found in [file join $pd_dir HW build_hw.tcl]"
+    }
+    set rtl_dir [file join $pd_dir RTL]
+    set rtl_files {}
+    foreach f [string map {"\n" " "} $rtl_names] {
+        set path [file join $rtl_dir $f]
+        if {![file exists $path]} { error "$path not found" }
+        lappend rtl_files $path
+    }
+    add_files -norecurse $rtl_files
+    add_files -norecurse [file join $rtl_dir pl_coef_base.vh]
+    set_property file_type {Verilog Header} [get_files pl_coef_base.vh]
+    set_property include_dirs [list $rtl_dir] [current_fileset]
+    update_compile_order -fileset sources_1
+    note "pd_0: [llength $rtl_files] RTL files from [file join $pd_dir RTL]"
+
+    set dma0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma axi_dma_0]
+    set_property -dict [list \
+        CONFIG.c_include_sg {0} \
+        CONFIG.c_sg_include_stscntrl_strm {0} \
+        CONFIG.c_sg_length_width {26} \
+        CONFIG.c_include_mm2s {1} \
+        CONFIG.c_include_s2mm {0} \
+        CONFIG.c_m_axi_mm2s_data_width {32} \
+        CONFIG.c_m_axis_mm2s_tdata_width {32} \
+        CONFIG.c_mm2s_burst_size {64} \
+        CONFIG.c_addr_width {32} \
+    ] $dma0
+    create_bd_cell -type module -reference pd_axi pd_0
+    connect_bd_intf_net [intf axi_dma_0/M_AXIS_MM2S] [intf pd_0/S_AXIS]
+    # debug records: no S2MM here; always ready, so pd_0 can never stall on them (it sends
+    # records only with CTRL.DEBUG or CTRL.LOOPBACK, which this variant's firmware does not set)
+    connect_bd_net [pin fmc_glue/pd_rec_tready] [pin pd_0/m_axis_tready]
+
+    set pc_rd [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_protocol_converter pc_rd]
+    connect_bd_intf_net [intf axi_dma_0/M_AXI_MM2S] [intf pc_rd/S_AXI]
+    connect_bd_intf_net [intf pc_rd/M_AXI]          [intf ps7/S_AXI_HP0]
+}
+
+# --------------------------------------------------------------------------
 # AXI: GP0 -> registers, DMA -> HP2
 # --------------------------------------------------------------------------
 set sc_ctrl [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect sc_ctrl]
-set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] $sc_ctrl
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI [expr {$with_pd ? 4 : 2}]] $sc_ctrl
 connect_bd_intf_net [intf ps7/M_AXI_GP0]    [intf sc_ctrl/S00_AXI]
 connect_bd_intf_net [intf sc_ctrl/M00_AXI] [intf axi_ad9361/s_axi]
 connect_bd_intf_net [intf sc_ctrl/M01_AXI] [intf axi_ad9361_adc_dma/s_axi]
 connect_bd_intf_net [intf axi_ad9361_adc_dma/m_dest_axi] [intf ps7/S_AXI_HP2]
+if {$with_pd} {
+    connect_bd_intf_net [intf sc_ctrl/M02_AXI] [intf pd_0/S_AXI]
+    connect_bd_intf_net [intf sc_ctrl/M03_AXI] [intf axi_dma_0/S_AXI_LITE]
+}
 
 connect_bd_net $clk \
     [pin ps7/M_AXI_GP0_ACLK] [pin ps7/S_AXI_HP2_ACLK] [pin sc_ctrl/aclk] \
@@ -307,6 +385,12 @@ connect_bd_net $aresetn \
     [pin axi_ad9361/s_axi_aresetn] \
     [pin axi_ad9361_adc_dma/s_axi_aresetn] [pin axi_ad9361_adc_dma/m_dest_axi_aresetn]
 connect_bd_net $icresetn [pin sc_ctrl/aresetn]
+if {$with_pd} {
+    connect_bd_net $clk [pin ps7/S_AXI_HP0_ACLK] [pin pd_0/aclk] [pin pc_rd/aclk] \
+        [pin axi_dma_0/s_axi_lite_aclk] [pin axi_dma_0/m_axi_mm2s_aclk]
+    connect_bd_net $aresetn [pin pd_0/aresetn] [pin axi_dma_0/axi_resetn]
+    connect_bd_net $icresetn [pin pc_rd/aresetn]
+}
 
 # --------------------------------------------------------------------------
 # Addresses (as ADI's design), validate, wrapper
@@ -314,6 +398,9 @@ connect_bd_net $icresetn [pin sc_ctrl/aresetn]
 set space [get_bd_addr_spaces ps7/Data]
 assign_bd_address -offset 0x79020000 -range 64K -target_address_space $space [get_bd_addr_segs axi_ad9361/s_axi/*]
 assign_bd_address -offset 0x7C400000 -range 4K  -target_address_space $space [get_bd_addr_segs axi_ad9361_adc_dma/s_axi/*]
+if {$with_pd} {
+    assign_bd_address -offset 0x43C00000 -range 4K -target_address_space $space [get_bd_addr_segs pd_0/S_AXI/*]
+}
 assign_bd_address
 set segs [get_bd_addr_segs -of_objects $space]
 foreach {want match skip} {0x79020000 *SEG_axi_ad9361_* *adc_dma* 0x7C400000 *SEG_axi_ad9361_adc_dma_* {}} {
@@ -322,6 +409,11 @@ foreach {want match skip} {0x79020000 *SEG_axi_ad9361_* *adc_dma* 0x7C400000 *SE
         if {[string match $match $s] && ($skip eq "" || ![string match $skip $s])} { set got [get_property OFFSET $s] }
     }
     if {$got eq "?" || $got != $want} { error "registers matching $match at $got, expected $want" }
+}
+if {$with_pd} {
+    set got ?
+    foreach s $segs { if {[string match *pd_0* $s]} { set got [get_property OFFSET $s] } }
+    if {$got eq "?" || $got != 0x43C00000} { error "pd_0 registers at $got, the firmware expects 0x43C00000" }
 }
 regenerate_bd_layout
 validate_bd_design
@@ -339,6 +431,11 @@ lassign [filter_xdc $adi_xdc $xdc $ports] kept dropped
 set fh [open [file join $build_dir fmc_pins_dropped.txt] w]
 puts $fh [join $dropped \n]; close $fh
 note "fmc_pins.xdc: $kept lines kept from ADI's system_constr.xdc, [llength $dropped] dropped (fmc_pins_dropped.txt)"
+set fh [open $xdc]; set xt [read $fh]; close $fh
+if {![regexp -line {^create_clock.*-period\s+([0-9.]+)\s.*rx_clk_in_p} $xt -> per]} {
+    error "no create_clock on rx_clk_in_p in $xdc - check ADI's system_constr.xdc"
+}
+note "rx_clk constraint: $per ns"
 add_files -fileset constrs_1 -norecurse $xdc
 
 foreach p {ID MODE_1R1T ADC_INIT_DELAY ADC_DCFILTER_DISABLE ADC_IQCORRECTION_DISABLE DAC_DDS_DISABLE
@@ -401,6 +498,16 @@ if {$mode eq "synth"} {
 # --------------------------------------------------------------------------
 # Implementation and export
 # --------------------------------------------------------------------------
+if {$with_pd} {
+    # timing-driven implementation, as build_hw.tcl (the PL is about 93 % full)
+    set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $place_dir [get_runs impl_1]
+    note "placement directive: $place_dir"
+    set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+    set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
+    set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
+    set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+    set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
+}
 launch_runs impl_1 -to_step write_bitstream -jobs $jobs
 wait_on_run impl_1
 if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {
@@ -410,8 +517,9 @@ if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {
 open_run impl_1
 report_timing_summary -file [file join $build_dir timing_summary.rpt]
 report_clock_interaction -file [file join $build_dir clock_interaction.rpt]
+report_timing -setup -max_paths 40 -nworst 1 -path_type summary -file [file join $build_dir timing_paths.rpt]
 report_utilization -file [file join $build_dir utilization.rpt]
-report_utilization -hierarchical -hierarchical_depth 3 -file [file join $build_dir utilization_hier.rpt]
+report_utilization -hierarchical -hierarchical_depth 4 -file [file join $build_dir utilization_hier.rpt]
 set wns [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -setup]]
 set u [report_utilization -return_string]
 set lut ?; set ff ?; set bram ?; set dsp ?
