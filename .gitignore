@@ -87,3 +87,9 @@ HW_Development/Packet_Transmitter/FW/ptx_stub_stream.bin
 .idea/
 .DS_Store
 Thumbs.db
+
+# Video and Mavlink Related
+App/Mavlink/Loopback_Received.tlog
+App/Video/*.ts
+App/Mavlink/Received.tlog
+

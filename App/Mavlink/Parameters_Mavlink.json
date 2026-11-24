@@ -1,0 +1,26 @@
+{
+  "Mavlink": {
+    "SendMavlink": 1,
+    "SendMavlink_comment": "1: send the MAVLink stream",
+    "SendVideo": 1,
+    "SendVideo_comment": "1: send the video stream (Parameters_Video.json); 0: MAVLink only, no Pi needed",
+    "Source": "File",
+    "Source_comment": "File (a .tlog, looped), UDP (datagrams to UdpPort on this PC) or Serial",
+    "TlogFile": "App/Mavlink/Sim_Telemetry.tlog",
+    "TlogFile_comment": "File source: a .tlog, relative to the project folder or absolute",
+    "UdpPort": 14560,
+    "UdpPort_comment": "UDP source: port on this PC the MAVLink datagrams are sent to (e.g. by mavlink-router)",
+    "SerialPort": "/dev/ttyUSB0",
+    "SerialPort_comment": "Serial source: the flight controller's telemetry port (needs pyserial)",
+    "SerialBaud": 57600,
+    "SerialBaud_comment": "Serial source: baud rate (ArduPilot telemetry ports: 57600 by default)",
+    "MaxBlocksPerPacket": 2,
+    "MaxBlocksPerPacket_comment": "most transport blocks of a packet given to MAVLink (it goes before the video)",
+    "MaxAge_ms": 500,
+    "MaxAge_ms_comment": "MAVLink frames waiting longer than this are dropped",
+    "LoopbackForward": "127.0.0.1:14550",
+    "LoopbackForward_comment": "loopback only: host:port the received frames are sent to (a ground station)",
+    "LoopbackSaveTlog": 1,
+    "LoopbackSaveTlog_comment": "loopback only: 1 saves the received frames to App/Mavlink/Loopback_Received.tlog"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "RxMavlink": {
+    "ShowTelemetry": 1,
+    "ShowTelemetry_comment": "1: open the telemetry window on Start",
+    "ForwardMavlink": 1,
+    "ForwardMavlink_comment": "1: send every received MAVLink frame by UDP to MavlinkTo (a ground station)",
+    "MavlinkTo": "127.0.0.1:14550",
+    "MavlinkTo_comment": "host:port of the ground station; QGroundControl and Mission Planner listen on 14550",
+    "ForwardVideo": 0,
+    "ForwardVideo_comment": "1: send the received MPEG-TS video by UDP to VideoTo",
+    "VideoTo": "127.0.0.1:5600",
+    "VideoTo_comment": "host:port; QGroundControl: Video source MPEG-TS on this port (default 5600)",
+    "SaveTlog": 0,
+    "SaveTlog_comment": "1: save the received MAVLink frames to App/Mavlink/Received.tlog"
+  }
+}
