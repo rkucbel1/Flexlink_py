@@ -5,7 +5,7 @@ Flexlink_py · Rx · as of 23 Oct 2026
 From the received waveform to the decoded transport blocks. Steps 3 to 9 run in order; each reads the file the step before it wrote. `Rx/Run_Rx_Chain.py` runs them all, for one antenna or several (see *Multiple antennas and diversity combining*).
 
 ```
-Parameters_Rx_payload.json ──► 2 Initialize_Rx.py ──► Construct_Grid/Resource_Grid_Rx.h5  (+ Calculated_Rx)
+Parameters_Rx_payload.json ──► 2 Initialize_Rx.py ──► Rx/Resource_Grid_Rx.h5  (+ Calculated_Rx)
 
 Waveform_Payload_Tx.h5                    no Mode set in Channel_Defects.json   (Rx/, else Tx/)
 Waveform_Payload_DefectsModeled_Tx.h5     any Mode set to 1 (Tx/Defect_Model.py) (Rx/, else Tx/)
@@ -44,7 +44,7 @@ Bitstream_TransportBlks_Rx_Combined.h5
 
 | Step | Script | Values used |
 | --- | --- | --- |
-| 2 | Initialize_Rx.py | All of Defined_Rx. Writes Calculated_Rx and Construct_Grid/Resource_Grid_Rx.h5 (File_Rx.ResourceGrid_Rx). Run it after every change to Defined_Rx. |
+| 2 | Initialize_Rx.py | All of Defined_Rx. Writes Calculated_Rx and Rx/Resource_Grid_Rx.h5 (File_Rx.ResourceGrid_Rx). Run it after every change to Defined_Rx. |
 | 3 | Decimate_Payload_Rx.py | Mode from Flexlink_BasicModules/Channel_Defects/Channel_Defects.json. No Mode set: File_Rx.Waveform_Payload_Rx. Any Mode set: File_Rx.Waveform_Payload_DefectsModeled_Rx and NumberOfAntennas. Output File_Rx.Waveform_Payload_Dec_Rx. The input sample rate (20 or 40 MHz) comes from the waveform file's SampleRate attribute. |
 | 4 | Packet_Detector.py | Use_Preamble, File_Rx.Waveform_Payload_Dec_Rx (row N with --ray N), File_Rx.Waveform_Payload_Packet_Rx. Detector settings (SA_Len, thresholds) come from Flexlink_BasicModules/Preamble/Receive_Packet_Detector.json, the local Preamble B from Flexlink_BasicModules/Preamble/Preamble.h5. |
 | 4a | Process_Control_Field_Rx.py | Use_ControlField, FFT_StartTime, EqualizerMode, EqualizerMaxDoppler; writes RefSymbolSpacing, RefSignalSpacing, PacketLength, Mod, NumberOfTxAntennas, EncoderBlockSize, EncoderCodeRate, Repetition, ClientFlag and C_init_Dat (the payload scrambler id, ControlField C_init) when the control field differs (then runs Initialize_Rx.py, except when only C_init_Dat changed), checks NDB_A against Calculated_Rx.AvailableDataBlocks. The control field format comes from Tx/ControlSignals/Parameters_Control_Field.json (fixed by design). Output File_Rx.ControlField_Rx. |

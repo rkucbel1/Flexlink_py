@@ -31,7 +31,7 @@ Start saves the settings first (as Save does): those of the video app and
 App/Mavlink/Parameters_Mavlink.json.
 
 Requires: as FlexlinkTxVideoWithPluto.py; pyserial for the serial source only.
-Run with: python App/FlexlinkTxMavlinkWithPluto.py
+Run with: python App/Tx_Pluto/FlexlinkTxMavlinkWithPluto.py
 """
 from __future__ import annotations
 

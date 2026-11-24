@@ -20,14 +20,14 @@ blocks against the ones the Tx sent.
        Bitstream_TransportBlks_Tx.h5) against the one the board decoded, and the control-field
        message against Tx/ControlSignals.
 
-Writes App/HIL/: HIL_result.json (this run), HIL_results.csv (one row per run, appended),
+Writes App/Simulation/HIL/: HIL_result.json (this run), HIL_results.csv (one row per run, appended),
 HIL_vector* (the samples sent).
 
 Usage
-    python App/Run_HIL.py                                  # settings from App/Parameters_HIL.json
-    python App/Run_HIL.py --host 127.0.0.1                 # pd_board_emulator.py instead of the board
-    python App/Run_HIL.py --input-rate 40
-    python App/Run_HIL.py --check-model                    # also compare with the bit-true model (slow)
+    python App/Simulation/Run_HIL.py                                  # settings from App/Simulation/Parameters_HIL.json
+    python App/Simulation/Run_HIL.py --host 127.0.0.1                 # pd_board_emulator.py instead of the board
+    python App/Simulation/Run_HIL.py --input-rate 40
+    python App/Simulation/Run_HIL.py --check-model                    # also compare with the bit-true model (slow)
 
 Exit status: 0 every transport block received and equal to the Tx, 1 a block missing, failed or
 different, 2 no packet detected or the packet was aborted (tone check, timing), 4 control field
@@ -47,14 +47,17 @@ from pathlib import Path
 
 import numpy as np
 
-APP = Path(__file__).resolve().parent
-ROOT = APP.parent
-TX = ROOT / "Tx"
-RX = ROOT / "Rx"
-PD_PC = ROOT / "HW_Development" / "Packet_Detector" / "PC"
-HIL_DIR = APP / "HIL"
-HIL_PARAMS = APP / "Parameters_HIL.json"
-DEFECTS_FILE = ROOT / "Flexlink_BasicModules" / "Channel_Defects" / "Channel_Defects.json"
+for _p in Path(__file__).resolve().parents:      # put the project root (flexlink_paths.py) on sys.path
+    if (_p / "flexlink_paths.py").is_file():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+from flexlink_paths import APP, APP_SIMULATION, CHANNEL_DEFECTS, PACKET_DETECTOR_PC, ROOT, RX, TX  # noqa: E402
+
+PD_PC = PACKET_DETECTOR_PC
+HIL_DIR = APP_SIMULATION / "HIL"
+HIL_PARAMS = APP_SIMULATION / "Parameters_HIL.json"
+DEFECTS_FILE = CHANNEL_DEFECTS / "Channel_Defects.json"
 TX_PARAMS = TX / "Parameters_Tx_payload.json"
 RX_PARAMS = RX / "Parameters_Rx_payload.json"
 TX_BLOCKS = TX / "Generate_RandomPacketOfData" / "Bitstream_TransportBlks_Tx.h5"

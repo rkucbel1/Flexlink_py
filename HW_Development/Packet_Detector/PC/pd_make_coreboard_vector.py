@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pd_make_coreboard_vector.py -- a CoreBoard capture as an RTL test vector (input stage 2).
 
-Writes TestVectors/<name>.json + <name>_40.bin: the int8 I/Q of a capture (App/CoreBoard/*.cs8,
+Writes TestVectors/<name>.json + <name>_40.bin: the int8 I/Q of a capture (App/Rx_CoreBoard/Captures/*.cs8,
 40 Msps) as 12-bit samples (x 16, exactly what pd_unpack8.v gives the receiver), with the
 detector parameters of TestVectors/rep3.json, dc_shift 6 and input stage 2. SIM/run_sim.sh then
 runs the RTL on it against the bit-true model, e.g. with the streaming DMA's pauses:
@@ -28,7 +28,7 @@ TV = HERE.parent / "TestVectors"
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="CoreBoard capture -> RTL test vector (input stage 2)")
-    ap.add_argument("--file", type=Path, default=ROOT / "App" / "CoreBoard" / "EmuSource.cs8")
+    ap.add_argument("--file", type=Path, default=ROOT / "App" / "Rx_CoreBoard" / "Captures" / "EmuSource.cs8")
     ap.add_argument("--start-seconds", type=float, default=2.6)
     ap.add_argument("--seconds", type=float, default=0.1)
     ap.add_argument("--dc-shift", type=int, default=6)

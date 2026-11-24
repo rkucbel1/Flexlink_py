@@ -11,7 +11,7 @@ Rx/Parameters_Rx_payload.json        Defined_Rx: Mod, Port, PacketLength, RefSig
                                      RefSymbolSpacing, EqualizerMode, EqualizerMaxDoppler.
 Rx/<File_Rx.Grid_Payload_Rx>         'data' (PacketLength, 841) complex, written by
                                      Demodulate_Waveform_Rx.py.
-Construct_Grid/<File_Rx.ResourceGrid_Rx>
+Rx/<File_Rx.ResourceGrid_Rx>
                                      'signal_types' (PacketLength, 841): 10=Ref_P0,
                                      20=Ref_P1, 30=DC, 40=Data. Written by Initialize_Rx.py.
 ReferenceSignals/Ref_P<Port>_<RefSignalSpacing>_<bits>.h5
@@ -91,7 +91,7 @@ for _parent in Path(__file__).resolve().parents:
     if (_parent / "flexlink_paths.py").is_file():
         sys.path.insert(0, str(_parent))
         break
-from flexlink_paths import ROOT, BASIC_MODULES, CONSTRUCT_GRID, MAX_RAYS, ray_file_name  # noqa: E402
+from flexlink_paths import ROOT, BASIC_MODULES, MAX_RAYS, ray_file_name  # noqa: E402
 
 try:
     from flexlink_paths import REFERENCE_SIGNALS  # noqa: E402
@@ -108,7 +108,7 @@ DEFINED_SECTION = "Defined_Rx"
 FILE_SECTION = "File_Rx"
 
 GRID_KEY = "Grid_Payload_Rx"            # File_Rx/<key> = input grid (Rx/)
-RESOURCE_GRID_KEY = "ResourceGrid_Rx"   # File_Rx/<key> = signal types (Construct_Grid/)
+RESOURCE_GRID_KEY = "ResourceGrid_Rx"   # File_Rx/<key> = signal types (Rx/)
 OUTPUT_KEY = "Grid_Equalized_Rx"        # File_Rx/<key> = output (Rx/)
 DEFAULT_OUTPUT = "Grid_Equalized_Rx.h5"
 ESTIMATOR_SCRIPT = "Channel_Estimator.py"
@@ -308,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--params", type=Path, default=PARAMS_FILE)
     ap.add_argument("--grid", type=Path, help=f"payload grid .h5 (default: Rx/<File_Rx.{GRID_KEY}>)")
     ap.add_argument("--resource-grid", type=Path,
-                    help=f"resource grid .h5 (default: Construct_Grid/<File_Rx.{RESOURCE_GRID_KEY}>)")
+                    help=f"resource grid .h5 (default: Rx/<File_Rx.{RESOURCE_GRID_KEY}>)")
     ap.add_argument("--ref-dir", type=Path, help="folder with Ref_Pz_X_Y.h5 (default: ReferenceSignals/)")
     ap.add_argument("--out", type=Path, help=f"output .h5 (default: Rx/<File_Rx.{OUTPUT_KEY}>)")
     ap.add_argument("--mode", help=f"override Defined_Rx/EqualizerMode ({', '.join(MODES)})")
@@ -335,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         spacing = check_spacing(get_value(params, DEFINED_SECTION, "RefSignalSpacing"))
 
         grid_path = a.grid or RX_DIR / ray_file_name(file_name(params, GRID_KEY), a.ray)
-        rg_path = a.resource_grid or CONSTRUCT_GRID / file_name(params, RESOURCE_GRID_KEY)
+        rg_path = a.resource_grid or RX_DIR / file_name(params, RESOURCE_GRID_KEY)
         if a.out is None and OUTPUT_KEY not in params.get(FILE_SECTION, {}):
             print(f"Warning: {FILE_SECTION}/{OUTPUT_KEY} not set - writing {DEFAULT_OUTPUT}")
         out_path = a.out or RX_DIR / ray_file_name(file_name(params, OUTPUT_KEY, DEFAULT_OUTPUT), a.ray)

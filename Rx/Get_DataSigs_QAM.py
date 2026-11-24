@@ -15,7 +15,7 @@ Rx/<File_Rx.Grid_Equalized_Rx>       'data' (PacketLength, 841) complex and 'noi
                                      Equalize_Payload_Grid.py (default input).
 Rx/<File_Rx.Grid_Payload_Rx>         the unequalized grid from Demodulate_Waveform_Rx.py,
                                      used instead with --unequalized (testing only).
-Construct_Grid/<File_Rx.ResourceGrid_Rx>
+Rx/<File_Rx.ResourceGrid_Rx>
                                      'signal_types' (PacketLength, 841): 10=Ref_P0,
                                      20=Ref_P1, 30=DC, 40=Data (codes read from the
                                      file's attrs). Written by Initialize_Rx.py.
@@ -62,7 +62,7 @@ for _parent in Path(__file__).resolve().parents:
     if (_parent / "flexlink_paths.py").is_file():
         sys.path.insert(0, str(_parent))
         break
-from flexlink_paths import CONSTRUCT_GRID, MAX_RAYS  # noqa: E402
+from flexlink_paths import MAX_RAYS  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from Rx_Antennas import antennas_in_run, target_label, target_name  # noqa: E402
 
@@ -74,7 +74,7 @@ FILE_SECTION = "File_Rx"
 
 GRID_KEY = "Grid_Equalized_Rx"          # File_Rx/<key> = input grid (Rx/), from Equalize_Payload_Grid.py
 UNEQUALIZED_GRID_KEY = "Grid_Payload_Rx"  # File_Rx/<key> = grid from Demodulate_Waveform_Rx.py (--unequalized)
-RESOURCE_GRID_KEY = "ResourceGrid_Rx"   # File_Rx/<key> = signal types (Construct_Grid/)
+RESOURCE_GRID_KEY = "ResourceGrid_Rx"   # File_Rx/<key> = signal types (Rx/)
 OUTPUT_KEY = "Sequence_DataSigs_QAM"    # File_Rx/<key> = output (Rx/)
 DATASET = "data"
 NOISE_DATASET = "noise_var"
@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--unequalized", action="store_true",
                     help=f"read Rx/<File_Rx.{UNEQUALIZED_GRID_KEY}> instead (skip the equalizer, testing)")
     ap.add_argument("--resource-grid", type=Path,
-                    help=f"resource grid .h5 (default: Construct_Grid/<File_Rx.{RESOURCE_GRID_KEY}>)")
+                    help=f"resource grid .h5 (default: Rx/<File_Rx.{RESOURCE_GRID_KEY}>)")
     ap.add_argument("--out", type=Path, help=f"output .h5 (default: Rx/<File_Rx.{OUTPUT_KEY}>)")
     ap.add_argument("--ray", type=int, choices=range(1, MAX_RAYS + 1), metavar="N",
                     help="antenna (ray) 1-4: read and write its _RayN files. Default: the _Combined "
@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError(f"--unequalized: this run has {n_ant} antennas and unequalized grids are "
                              "not combined - add --ray N")
         grid_path = a.grid or RX_DIR / target_name(file_name(params, grid_key), a.ray, n_ant)
-        rg_path = a.resource_grid or CONSTRUCT_GRID / file_name(params, RESOURCE_GRID_KEY)
+        rg_path = a.resource_grid or RX_DIR / file_name(params, RESOURCE_GRID_KEY)
         out_path = a.out or RX_DIR / target_name(file_name(params, OUTPUT_KEY), a.ray, n_ant)
         print(f"Input: {target_label(a.ray, n_ant)}")
 

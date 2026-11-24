@@ -23,13 +23,13 @@ settings) with the second stream:
                      transmitter app, 5600 is taken by the Pi's video: use another port there.
   Save MAVLink       the received frames to App/Mavlink/Received.tlog (opens in QGC's Log Replay)
 
-Settings: those of the video receiver (App/Parameters_CoreBoard.json, App/Parameters_RxVideo.json)
+Settings: those of the video receiver (App/Rx_CoreBoard/Parameters_CoreBoard.json, App/Rx_CoreBoard/Parameters_RxVideo.json)
 and App/Mavlink/Parameters_RxMavlink.json (shared with the FMCOMMS3 app). Start saves them first
 (as Save does). The MAVLink part is App/Mavlink/Rx_Mavlink.py, also used by
 FlexlinkRxMavlinkWithZedboard_FCOMMS3.py.
 
 Requires: as FlexlinkRxVideoWithZedboard_CoreBoard.py
-Run with: python App/FlexlinkRxMavlinkWithZedboard_CoreBoard.py
+Run with: python App/Rx_CoreBoard/FlexlinkRxMavlinkWithZedboard_CoreBoard.py
 """
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ zed_frame = sg.Frame("Zedboard receiver (Parameters_RxVideo.json)", [
 video_frame = sg.Frame("Video", [
     [sg.Checkbox("Play with ffplay", key="-PLAY-", default=True)],
     [sg.Checkbox("Save the received stream", key="-SAVE_TS-")],
-    [sg.Text(f"   to App/Video/{RX.RECEIVED_TS.name} (about 3 GB an hour at 7 Mbit/s)", font=ITALIC)],
+    [sg.Text(f"   to App/Rx_CoreBoard/Video/{RX.RECEIVED_TS.name} (about 3 GB an hour at 7 Mbit/s)", font=ITALIC)],
 ], font=H2, vertical_alignment="top", expand_x=True)
 
 gcs_frame = RM.gcs_frame(sg, H2, ITALIC)
@@ -140,7 +140,7 @@ def rx_worker(post, cb: dict, rxv: dict, rxm: dict, stop: threading.Event) -> No
             raise RuntimeError(f"the Zedboard has firmware build {info.build}: push mode needs build 39 "
                                f"and bitstream 9.1 or later")
         b.call(pr.SET_PARAMS, RX.detector_params(rxv["DcShift"]).pack())
-        body = PS.coreboard_start_json(int(rxv["ZedUdpPort"]))     # from App/Parameters_CoreBoard.json
+        body = PS.coreboard_start_json(int(rxv["ZedUdpPort"]))     # from App/Rx_CoreBoard/Parameters_CoreBoard.json
         push_units = min(max(round(float(rxv["Push_ms"]) * 4), 1), 31)
         flags = pr.STREAM_FLAG_PUSH | (push_units << 2)
         reply = b.call(pr.STREAM_START, PS.start_payload(int(rxv["ZedUdpPort"]), flags, cb["Address"],

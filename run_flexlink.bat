@@ -19,7 +19,7 @@ if not exist ".venv\Scripts\python.exe" (
     ".venv\Scripts\python.exe" -m pip install -e . || goto :failed
 )
 
-".venv\Scripts\python.exe" App\Flexlinksimulation.py %*
+".venv\Scripts\python.exe" App\Simulation\Flexlinksimulation.py %*
 exit /b %errorlevel%
 
 :failed

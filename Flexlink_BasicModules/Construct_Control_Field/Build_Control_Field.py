@@ -16,7 +16,7 @@ Steps (each script reads the file the one before it wrote, all in Tx/ControlSign
     5  Create_ControlField_Waveform.py  OFDM waveform -> Waveform_Control_Tx.h5
 
 Every step's output is written to Tx/ControlSignals/Build_Control_Field.log (the
-Simulate tab of App/Flexlinksimulation.py shows it under Control Field Results).
+Simulate tab of App/Simulation/Flexlinksimulation.py shows it under Control Field Results).
 
 Usage:
     python Flexlink_BasicModules/Construct_Control_Field/Build_Control_Field.py

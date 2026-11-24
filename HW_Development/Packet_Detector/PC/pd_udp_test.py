@@ -55,7 +55,7 @@ import pd_protocol as P  # noqa: E402
 
 ROOT = HERE.parents[2]                                   # Flexlink_py
 EMULATOR = ROOT / "App" / "FlexlinkCoreBoardEmulator.py"
-DEFAULT_FILE = ROOT / "App" / "CoreBoard" / "Segment_newfw_3820ms.cs8"
+DEFAULT_FILE = ROOT / "App" / "Rx_CoreBoard" / "Captures" / "Segment_newfw_3820ms.cs8"
 MODE_NAMES = {0: "count only", 1: "convert, cached ring, no flush", 2: "convert, non-cacheable ring",
               3: "convert, cached ring + flush", 4: "raw int8 copy for the PL unpacker"}
 DGRAM_BYTES = 1376

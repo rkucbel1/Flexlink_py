@@ -33,7 +33,7 @@ Counting
           / duration of the whole packet, preamble included (Flexlink_Plots.data_rate)
     Goodput: data rate * (1 - BLER)
 
-Output: App/Sweeps/Sweep_<date>_<time>/  (or --out-dir)
+Output: App/Simulation/Sweeps/Sweep_<date>_<time>/  (or --out-dir)
     results.csv     one row per SNR point, written after every point
     settings.json   sweep arguments, seed, and copies of the three parameter files
     Channel_Defects_sweep.json   the copy used for the current point
@@ -49,9 +49,9 @@ Create a file named STOP in the sweep folder to stop after the current packet
 
 Usage
 -----
-    python App/Run_SNR_Sweep.py                                  # 0..20 dB in 2 dB steps
-    python App/Run_SNR_Sweep.py --start -4 --stop 10 --step 1 --max-packets 200
-    python App/Run_SNR_Sweep.py --seed 7                         # repeatable sweep
+    python App/Simulation/Run_SNR_Sweep.py                                  # 0..20 dB in 2 dB steps
+    python App/Simulation/Run_SNR_Sweep.py --start -4 --stop 10 --step 1 --max-packets 200
+    python App/Simulation/Run_SNR_Sweep.py --seed 7                         # repeatable sweep
 
 Exit status: 0 finished (or stopped), 3 a Tx step or the initialization failed.
 """
@@ -69,18 +69,18 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-APP = Path(__file__).resolve().parent
-sys.path.insert(0, str(APP))
-try:
-    from flexlink_paths import CHANNEL_DEFECTS, ROOT, RX, TX
-except ImportError:
-    sys.path.insert(0, str(APP.parent))
-    from flexlink_paths import CHANNEL_DEFECTS, ROOT, RX, TX
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # Flexlink_Plots, next to this script
+for _p in Path(__file__).resolve().parents:      # put the project root (flexlink_paths.py) on sys.path
+    if (_p / "flexlink_paths.py").is_file():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+from flexlink_paths import APP, APP_SIMULATION, CHANNEL_DEFECTS, ROOT, RX, TX  # noqa: E402
 
 DEFECTS_FILE = CHANNEL_DEFECTS / "Channel_Defects.json"
 TX_PARAMS = TX / "Parameters_Tx_payload.json"
 RX_PARAMS = RX / "Parameters_Rx_payload.json"
-SWEEPS = APP / "Sweeps"
+SWEEPS = APP_SIMULATION / "Sweeps"
 MAX_RAYS = 4
 
 COLUMNS = ["snr_db", "packets", "missed", "blocks", "block_errors", "bler", "packet_errors",
@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-early-stop", action="store_true",
                     help="keep going after a point with no block errors")
     ap.add_argument("--seed", type=int, help="base random seed (default: random, saved in settings.json)")
-    ap.add_argument("--out-dir", type=Path, help="sweep folder (default: App/Sweeps/Sweep_<date>_<time>)")
+    ap.add_argument("--out-dir", type=Path, help="sweep folder (default: App/Simulation/Sweeps/Sweep_<date>_<time>)")
     a = ap.parse_args(argv)
     if a.step <= 0 or a.stop < a.start or a.max_packets < 1 or a.target_errors < 1:
         ap.error("need step > 0, stop >= start, max-packets >= 1, target-errors >= 1")

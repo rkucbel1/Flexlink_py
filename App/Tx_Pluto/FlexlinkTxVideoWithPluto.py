@@ -1,13 +1,13 @@
 """FlexlinkTxVideoWithPluto.py -- live video over the Flexlink transmitter on an ADALM-Pluto (GUI).
 
 The same transmitter and Pluto settings as FlexlinkTxWithPluto.py (Tx/Parameters_Tx_payload.json,
-App/Parameters_Pluto.json); the transport blocks carry a live H.264 video stream instead of random
+App/Tx_Pluto/Parameters_Pluto.json); the transport blocks carry a live H.264 video stream instead of random
 blocks or a file:
 
     Raspberry Pi 4 (ffmpeg + x264, started over SSH)
         --MPEG-TS over UDP-->  this PC  --transport blocks-->  Pluto (FW/ptx_server, PL transmitter)
 
-  Raspberry Pi   where the encoder runs and where the PC sends the video to (App/Parameters_Video.json).
+  Raspberry Pi   where the encoder runs and where the PC sends the video to (App/Tx_Pluto/Parameters_Video.json).
                  The PC starts and stops ffmpeg on the Pi over SSH, so the Pi needs a key login once:
                  ssh-copy-id <user>@<Pi address>. Pi Address "local" runs the encoder on this PC
                  instead (ffmpeg with libx264 needed), for tests without the Pi.
@@ -20,7 +20,7 @@ blocks or a file:
                  after the transmitter still finds the stream's setup (repeat-headers).
   Loopback       no Pluto: the packets are paced at the link's packet rate, unpacked on this PC
                  (optionally with a share of blocks dropped, as failed CRCs) and played with ffplay;
-                 the received stream is also saved to App/Video/Loopback_Received.ts. This checks the
+                 the received stream is also saved to App/Tx_Pluto/Loopback/Loopback_Received.ts. This checks the
                  encoder, the framing and the decoder's recovery without the radio.
 
 Every packet is filled with what the encoder has delivered when the packet is due (block format:
@@ -31,7 +31,7 @@ oldest video is dropped once the queue holds more than "Max queue" milliseconds.
 Start saves the settings first (as Save does).
 
 Requires: pip install FreeSimpleGUI; on the Pi: sudo apt install ffmpeg; for loopback: ffplay (ffmpeg)
-Run with: python App/FlexlinkTxVideoWithPluto.py
+Run with: python App/Tx_Pluto/FlexlinkTxVideoWithPluto.py
 """
 from __future__ import annotations
 
@@ -53,15 +53,14 @@ import FlexlinkTxWithPluto as TXP  # noqa: E402  (Tx and Pluto settings, connect
 
 FS, R, ptx_client = TXP.FS, TXP.R, TXP.ptx_client
 sg = TXP.sg
-from flexlink_paths import APP, BASIC_MODULES  # noqa: E402
+from flexlink_paths import APP, APP_TX_PLUTO, BASIC_MODULES  # noqa: E402
 
 sys.path.insert(0, str(BASIC_MODULES / "Video_Transfer"))
 import Video_Framing as VF  # noqa: E402
 
 H1, H2, ITALIC, RESULTS_FONT = TXP.H1, TXP.H2, TXP.ITALIC, TXP.RESULTS_FONT
-VIDEO_JSON = APP / "Parameters_Video.json"
-VIDEO_DIR = APP / "Video"
-LOOPBACK_TS = VIDEO_DIR / "Loopback_Received.ts"
+VIDEO_JSON = APP_TX_PLUTO / "Parameters_Video.json"
+LOOPBACK_TS = APP_TX_PLUTO / "Loopback" / "Loopback_Received.ts"   # with the Pluto loopback files
 FS_PLUTO = TXP.FS_PLUTO                         # 40 Msps
 TS_OVERHEAD = 1.05                              # MPEG-TS headers on top of the x264 rate
 PID_FILE = "/tmp/flexlink_venc.pid"             # on the Pi: the encoder's process id
@@ -72,7 +71,7 @@ LADDER = [(64, 384, 216, 15), (150, 512, 288, 30), (700, 768, 432, 30), (1800, 9
           (3500, 1280, 720, 30), (7000, 1920, 1080, 30)]
 MAX_HEIGHTS = [216, 288, 432, 540, 720, 1080]
 
-# ---------- Video settings (App/Parameters_Video.json) ----------
+# ---------- Video settings (App/Tx_Pluto/Parameters_Video.json) ----------
 VIDEO_FIELDS = {
     "-PI_ADDR-": ("PiAddress", str, None, None, "Pi Address"),
     "-PI_USER-": ("PiUser", str, None, None, "Pi User"),
@@ -248,8 +247,8 @@ def load_into_window(window) -> None:
 
 def save_settings(values) -> str:
     """Parameters_Tx_payload.json (and the shared keys of Parameters_Rx_payload.json, as
-    FlexlinkTxWithPluto does), App/Parameters_Pluto.json (the radio fields only) and
-    App/Parameters_Video.json. Raises ValueError, nothing written."""
+    FlexlinkTxWithPluto does), App/Tx_Pluto/Parameters_Pluto.json (the radio fields only) and
+    App/Tx_Pluto/Parameters_Video.json. Raises ValueError, nothing written."""
     tx, errors = TXP.tx_from_values(values)
     pl, e2 = pluto_from_values(values)
     vid, e3 = video_from_values(values)

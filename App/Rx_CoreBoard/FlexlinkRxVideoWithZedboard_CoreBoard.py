@@ -12,12 +12,12 @@ build 39, bitstream 9.1 or later, as pd_stream_test.py --push):
 The Zedboard needs no Flexlink parameters: it reads modulation, code and repetition from each
 packet's control field. The Transmitter line shows that control field (the transmitter's mode).
 
-  CoreBoard   App/Parameters_CoreBoard.json (shared with FlexlinkCaptureWithCoreBoard.py): its
+  CoreBoard   App/Rx_CoreBoard/Parameters_CoreBoard.json (shared with FlexlinkCaptureWithCoreBoard.py): its
               address, carrier (the Pluto's TxLO_MHz), gain
-  Zedboard    App/Parameters_RxVideo.json: the board's address and ports, how often it pushes
+  Zedboard    App/Rx_CoreBoard/Parameters_RxVideo.json: the board's address and ports, how often it pushes
               results, the DC blocker (6 for the CoreBoard)
   Video       play with ffplay (sudo apt install ffmpeg); optionally also save the received
-              stream to App/Video/Received.ts (about 3 GB an hour at 7 Mbit/s: off by default)
+              stream to App/Rx_CoreBoard/Video/Received.ts (about 3 GB an hour at 7 Mbit/s: off by default)
 
 The blocks are put back together as in Flexlink_BasicModules/Video_Transfer/Video_Framing.py: a
 block whose CRC failed, or a block missing from the count, is a gap; the broken TS packet is
@@ -26,7 +26,7 @@ dropped and the stream re-aligns, and the decoder recovers with the encoder's in
 Start saves the settings first (as Save does). Start the transmitter app before or after.
 
 Requires: pip install FreeSimpleGUI; ffplay (ffmpeg) for the picture
-Run with: python App/FlexlinkRxVideoWithZedboard_CoreBoard.py
+Run with: python App/Rx_CoreBoard/FlexlinkRxVideoWithZedboard_CoreBoard.py
 """
 from __future__ import annotations
 
@@ -44,14 +44,19 @@ from pathlib import Path
 
 import numpy as np
 
-APP_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(APP_DIR))
+for _p in Path(__file__).resolve().parents:      # put the project root (flexlink_paths.py) on sys.path
+    if (_p / "flexlink_paths.py").is_file():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+from flexlink_paths import (APP, APP_SIMULATION, APP_RX_COREBOARD, BASIC_MODULES, ROOT,  # noqa: E402
+                            PACKET_DETECTOR_PC)
+sys.path.insert(0, str(APP_SIMULATION))
 import Flexlinksimulation as FS  # noqa: E402  (fonts, theme)
-from flexlink_paths import APP, BASIC_MODULES, ROOT  # noqa: E402
 
 import FreeSimpleGUI as sg  # noqa: E402
 
-PD_PC = ROOT / "HW_Development" / "Packet_Detector" / "PC"
+PD_PC = PACKET_DETECTOR_PC
 sys.path.insert(0, str(PD_PC))
 import pd_protocol as pr  # noqa: E402
 import pd_stream_test as PS  # noqa: E402  (CoreBoard start body, HTTP status, STREAM_START payload)
@@ -70,9 +75,9 @@ H1, H2 = FS.H1, FS.H2
 ITALIC = ("Helvetica", 9, "italic")
 RESULTS_FONT = FS.RESULTS_FONT
 
-CB_JSON = APP / "Parameters_CoreBoard.json"
-RXV_JSON = APP / "Parameters_RxVideo.json"
-RECEIVED_TS = APP / "Video" / "Received.ts"
+CB_JSON = APP_RX_COREBOARD / "Parameters_CoreBoard.json"
+RXV_JSON = APP_RX_COREBOARD / "Parameters_RxVideo.json"
+RECEIVED_TS = APP_RX_COREBOARD / "Video" / "Received.ts"
 RX_PARAMS = PD_PC.parent / "TestVectors" / "rep3.json"       # detector thresholds, as pd_stream_test.py
 
 # ---------- Settings ----------
@@ -94,7 +99,7 @@ RXV_COMMENTS = {
     "Push_ms_comment": "the board pushes results at most this often while there are new ones, 0.25 to 7.75 ms",
     "DcShift_comment": "receiver DC blocker: 6 for the CoreBoard",
     "Play_comment": "1: play the received video with ffplay",
-    "SaveStream_comment": "1: also save the received stream to App/Video/Received.ts (large)",
+    "SaveStream_comment": "1: also save the received stream to App/Rx_CoreBoard/Video/Received.ts (large)",
 }
 RXV_FIELDS = {
     "-ZED_ADDR-": ("ZedAddress", str, None, None, "Zedboard Address"),
@@ -135,7 +140,7 @@ zed_frame = sg.Frame("Zedboard receiver (Parameters_RxVideo.json)", [
 video_frame = sg.Frame("Video", [
     [sg.Checkbox("Play with ffplay", key="-PLAY-", default=True)],
     [sg.Checkbox("Save the received stream", key="-SAVE_TS-")],
-    [sg.Text(f"   to App/Video/{RECEIVED_TS.name} (about 3 GB an hour at 7 Mbit/s)", font=ITALIC)],
+    [sg.Text(f"   to App/Rx_CoreBoard/Video/{RECEIVED_TS.name} (about 3 GB an hour at 7 Mbit/s)", font=ITALIC)],
 ], font=H2, vertical_alignment="top", expand_x=True)
 
 layout = [
@@ -220,8 +225,8 @@ def load_into_window(window) -> None:
 
 
 def save_settings(values) -> tuple[dict, dict]:
-    """Writes App/Parameters_CoreBoard.json (the fields shown; the others are kept) and
-    App/Parameters_RxVideo.json. Raises ValueError, nothing written."""
+    """Writes App/Rx_CoreBoard/Parameters_CoreBoard.json (the fields shown; the others are kept) and
+    App/Rx_CoreBoard/Parameters_RxVideo.json. Raises ValueError, nothing written."""
     cb, rxv, errors = settings_from_values(values)
     if errors:
         raise ValueError("\n".join(errors))
@@ -404,7 +409,7 @@ def rx_worker(post, cb: dict, rxv: dict, stop: threading.Event) -> None:
             raise RuntimeError(f"the Zedboard has firmware build {info.build}: push mode needs build 39 "
                                f"and bitstream 9.1 or later")
         b.call(pr.SET_PARAMS, detector_params(rxv["DcShift"]).pack())
-        body = PS.coreboard_start_json(int(rxv["ZedUdpPort"]))     # from App/Parameters_CoreBoard.json
+        body = PS.coreboard_start_json(int(rxv["ZedUdpPort"]))     # from App/Rx_CoreBoard/Parameters_CoreBoard.json
         push_units = min(max(round(float(rxv["Push_ms"]) * 4), 1), 31)
         flags = pr.STREAM_FLAG_PUSH | (push_units << 2)
         reply = b.call(pr.STREAM_START, PS.start_payload(int(rxv["ZedUdpPort"]), flags, cb["Address"],

@@ -26,4 +26,4 @@ if ! .venv/bin/python -c "import tkinter" >/dev/null 2>&1; then
     exit 1
 fi
 
-exec .venv/bin/python App/Flexlinksimulation.py "$@"
+exec .venv/bin/python App/Simulation/Flexlinksimulation.py "$@"

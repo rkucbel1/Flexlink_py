@@ -4,7 +4,7 @@ Reads and writes the project's JSON parameter files (located via flexlink_paths)
     Flexlink_BasicModules/Channel_Defects/Channel_Defects.json   -> "Set Defects" tab
     Tx/Parameters_Tx_payload.json                                 -> "Set Tx" tab
     Rx/Parameters_Rx_payload.json                                 -> "Set Rx" tab
-    App/Parameters_HIL.json                                       -> "Set Rx" tab, Receiver frame
+    App/Simulation/Parameters_HIL.json                                       -> "Set Rx" tab, Receiver frame
 
 Only the keys shown in the GUI are changed on Save; every other key and all the
 *_comment entries are kept as they are.
@@ -16,12 +16,12 @@ field construction (Tx/ControlSignals/Build_Control_Field.log, written by Initia
 and its decoding in the Rx chain in "Control Field Results". Each chain's full output is
 kept in Tx/Run_Tx_Chain.log and Rx/Run_Rx_Chain.log.
 
-With "Hardware in the loop" saved on the Set Rx tab, Run replaces the Rx steps by App/Run_HIL.py:
+With "Hardware in the loop" saved on the Set Rx tab, Run replaces the Rx steps by App/Simulation/Run_HIL.py:
 the waveform goes through the Zedboard FPGA receiver, and the decoded transport blocks are
-checked against the ones the Tx sent (App/HIL/HIL_result.json, App/HIL/HIL_results.csv).
+checked against the ones the Tx sent (App/Simulation/HIL/HIL_result.json, App/Simulation/HIL/HIL_results.csv).
 
 Requires: pip install FreeSimpleGUI
-Run with: python App/Flexlinksimulation.py
+Run with: python App/Simulation/Flexlinksimulation.py
 """
 import json
 import math
@@ -35,11 +35,12 @@ from pathlib import Path
 
 import FreeSimpleGUI as sg
 
-try:
-    from flexlink_paths import APP, CHANNEL_DEFECTS, ROOT, RX, TX
-except ImportError:  # not installed in the venv: fall back to the project root
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from flexlink_paths import APP, CHANNEL_DEFECTS, ROOT, RX, TX
+for _p in Path(__file__).resolve().parents:      # put the project root (flexlink_paths.py) on sys.path
+    if (_p / "flexlink_paths.py").is_file():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+from flexlink_paths import APP, APP_SIMULATION, CHANNEL_DEFECTS, ROOT, RX, TX  # noqa: E402
 
 sg.theme("SystemDefault")
 
@@ -274,8 +275,8 @@ def rx_combo(label, key, options, default):
                      background_color="white", text_color="black")]
 
 
-# Receiver path: the Python Rx chain or hardware in the loop (App/Run_HIL.py, Zedboard FPGA).
-# Radio key -> HIL/RxPath in App/Parameters_HIL.json.
+# Receiver path: the Python Rx chain or hardware in the loop (App/Simulation/Run_HIL.py, Zedboard FPGA).
+# Radio key -> HIL/RxPath in App/Simulation/Parameters_HIL.json.
 RX_PATHS = {
     "-RX_PATH_SIM-": "Simulation",
     "-RX_PATH_HIL-": "HIL",
@@ -451,11 +452,11 @@ RX_STATUS = {0: "every CRC passed", 1: "a block failed", 2: "no packet detected 
 # Hardware in the loop: the Tx steps, then Run_HIL instead of the Rx chain.
 # Run_HIL: 0 every transport block equal to the Tx, 1 a block missing / failed / different,
 # 2 no packet, 4 control field CRC failed -> results shown; 5 board, 6 setup -> run failed.
-HIL_DIR = APP / "HIL"
+HIL_DIR = APP_SIMULATION / "HIL"
 HIL_LOG = HIL_DIR / "Run_HIL.log"
 HIL_RESULT = HIL_DIR / "HIL_result.json"
 RUN_STEPS_HIL = RUN_STEPS[:2] + [
-    ("Run_HIL", [APP / "Run_HIL.py", "--log", HIL_LOG], {0, 1, 2, 4}),
+    ("Run_HIL", [APP_SIMULATION / "Run_HIL.py", "--log", HIL_LOG], {0, 1, 2, 4}),
 ]
 HIL_STATUS = {0: "every transport block received and equal to the Tx",
               1: "a transport block missing, failed or different from the Tx",
@@ -463,7 +464,7 @@ HIL_STATUS = {0: "every transport block received and equal to the Tx",
 
 
 def hil_mode():
-    """True when the saved Rx path (App/Parameters_HIL.json) is hardware in the loop."""
+    """True when the saved Rx path (App/Simulation/Parameters_HIL.json) is hardware in the loop."""
     try:
         return str(load_json("hil").get("HIL", {}).get("RxPath", "")).upper() == "HIL"
     except (OSError, ValueError):
@@ -537,7 +538,7 @@ def control_output(log_text, hil_lines=None):
 
 
 def hil_result(since):
-    """This run's App/HIL/HIL_result.json, or None."""
+    """This run's App/Simulation/HIL/HIL_result.json, or None."""
     try:
         if HIL_RESULT.stat().st_mtime < since:
             return None
@@ -601,8 +602,8 @@ def set_running(window, running, active_tab, sweep=None):
     window["-SW_STOP_BTN-"].update(disabled=not (running and window.sweep_dir))
 
 
-# ---------- SNR sweep (App/Run_SNR_Sweep.py) ----------
-SWEEP_SCRIPT = Path(__file__).resolve().parent / "Run_SNR_Sweep.py"
+# ---------- SNR sweep (App/Simulation/Run_SNR_Sweep.py) ----------
+SWEEP_SCRIPT = APP_SIMULATION / "Run_SNR_Sweep.py"
 SWEEP_FIELDS = {  # key -> (label, type, min, max)
     "-SW_START-": ("Start SNR", float, -30, 70),
     "-SW_STOP-": ("Stop SNR", float, -30, 70),
@@ -676,7 +677,7 @@ def show_run_result(window, result):
         if result.get("hil"):
             window["-STATUS-"].update(f"HIL run finished: {HIL_STATUS.get(rc, f'exit {rc}')}. "
                                       f"Full output in {TX_LOG.name} and {HIL_LOG.name}; "
-                                      f"every run is listed in HIL/HIL_results.csv.")
+                                      f"every run is listed in App/Simulation/HIL/HIL_results.csv.")
             return
         window["-STATUS-"].update(f"Run finished: {RX_STATUS.get(rc, f'exit {rc}')}. "
                                   f"Full output in {TX_LOG.name} and {RX_LOG.name}.")
@@ -695,7 +696,7 @@ FILES = {
     "defects": CHANNEL_DEFECTS / "Channel_Defects.json",
     "tx": TX / "Parameters_Tx_payload.json",
     "rx": RX / "Parameters_Rx_payload.json",
-    "hil": APP / "Parameters_HIL.json",
+    "hil": APP_SIMULATION / "Parameters_HIL.json",
 }
 
 # file -> [(gui_key, (section, json_key), kind), ...]
@@ -1088,7 +1089,7 @@ def main():
             except ValueError as e:
                 sg.popup_error(str(e), title="Invalid sweep settings")
                 continue
-            out_dir = SWEEP_SCRIPT.parent / "Sweeps" / time.strftime("Sweep_%Y%m%d_%H%M%S")
+            out_dir = APP_SIMULATION / "Sweeps" / time.strftime("Sweep_%Y%m%d_%H%M%S")
             sweep_rows = []
             set_running(window, True, active_tab, sweep=out_dir)
             window["-RES_PAYLOAD-"].update(f"SNR sweep -> {out_dir}\n{SWEEP_TABLE_HEADER}\n")

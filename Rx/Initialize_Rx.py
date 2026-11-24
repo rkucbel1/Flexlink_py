@@ -7,7 +7,7 @@ Steps:
      else via flexlink_paths.py).
   2. Build a Resource_Grid (Construct_Grid/Construct_Resource_Grid.py) from
      PacketLength, RefSignalSpacing and RefSymbolSpacing, and save it to the
-     .h5 file named in File_Rx/ResourceGrid_Rx, next to Construct_Resource_Grid.py.
+     .h5 file named in File_Rx/ResourceGrid_Rx, in the Rx folder (a run output, not in git).
   3. Count the "Ref_P0", "Ref_P1", "Data" and "DC" signals in the grid (codes
      from RG_Get_Number_Of_SigTypes, counted with Resource_Grid.count_of) and
      write them back to the JSON file as NumberOfRefSigs_P0, NumberOfRefSigs_P1,
@@ -311,12 +311,12 @@ def bits_per_data_signal(params: dict[str, Any]) -> tuple[str, int]:
 
 
 def grid_file_path(params: dict[str, Any], grid_module: ModuleType) -> Path:
-    """The .h5 file named in File_Rx/ResourceGrid_Rx, next to Construct_Resource_Grid.py."""
+    """The .h5 file named in File_Rx/ResourceGrid_Rx, in the Rx folder (next to the other Rx outputs)."""
     parent, name = _find_key(params, GRID_FILE_KEY)
     if parent is None or not name:
         name = DEFAULT_GRID_FILE
         log.warning("'%s' not in JSON; using %s", GRID_FILE_KEY, name)
-    return Path(grid_module.__file__).resolve().parent / name
+    return SCRIPT_DIR / name
 
 
 def calculate_data_block_size(params: dict[str, Any]) -> int:

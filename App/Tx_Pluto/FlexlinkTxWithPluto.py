@@ -6,7 +6,7 @@ the transport blocks:
 
   Tx tab        the transmitter settings (the Defined section of Tx/Parameters_Tx_payload.json,
                 same fields as Flexlinksimulation.py's Set Tx tab), the Pluto's radio settings
-                (App/Parameters_Pluto.json) and what to send:
+                (App/Tx_Pluto/Parameters_Pluto.json) and what to send:
                   - Continuous random packets: new random transport blocks in every packet, until
                     Stop
                   - Selected file: the file cut into transport blocks (File_Framing.py, as
@@ -22,13 +22,13 @@ the transport blocks:
 Loopback runs, in a background thread:
     Tx/Initialize_Tx.py -> Tx/Run_Tx_Chain.py --no-defects   (random blocks, reference grid)
     Pluto: SET_PARAMS, the packet's blocks, capture at 40 Msps (pyadi-iio)
-    capture -> 20 Msps, scaled to the simulator's level -> App/Pluto/Loopback_Capture_Rx.h5
+    capture -> 20 Msps, scaled to the simulator's level -> App/Tx_Pluto/Loopback/Loopback_Capture_Rx.h5
     Rx/Initialize_Rx.py -> Rx/Run_Rx_Chain.py --input <capture> (no defects modelled)
 
 Start saves the settings first (as Save does).
 
 Requires: pip install FreeSimpleGUI pyadi-iio (pyadi-iio and the libiio C library for loopback only)
-Run with: python App/FlexlinkTxWithPluto.py
+Run with: python App/Tx_Pluto/FlexlinkTxWithPluto.py
 """
 from __future__ import annotations
 
@@ -44,12 +44,17 @@ from pathlib import Path
 import numpy as np
 import FreeSimpleGUI as sg
 
-APP_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(APP_DIR))
+for _p in Path(__file__).resolve().parents:      # put the project root (flexlink_paths.py) on sys.path
+    if (_p / "flexlink_paths.py").is_file():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+from flexlink_paths import (APP, APP_SIMULATION, APP_TX_PLUTO, BASIC_MODULES, CHANNEL_DEFECTS,  # noqa: E402
+                            PACKET_TRANSMITTER_PC, ROOT, RX, TX, ray_file_name)
+sys.path.insert(0, str(APP_SIMULATION))   # Flexlinksimulation, Flexlink_Plots
 import Flexlinksimulation as FS  # noqa: E402  (JSON link, Tx field lists, result parsing)
-from flexlink_paths import APP, BASIC_MODULES, CHANNEL_DEFECTS, ROOT, RX, TX, ray_file_name  # noqa: E402
 
-PTX_PC = ROOT / "HW_Development" / "Packet_Transmitter" / "PC"
+PTX_PC = PACKET_TRANSMITTER_PC
 for _p in (PTX_PC, TX / "Generate_FileData", BASIC_MODULES / "File_Transfer"):
     sys.path.insert(0, str(_p))
 import ptx_client  # noqa: E402
@@ -63,8 +68,9 @@ RESULTS_FONT = FS.RESULTS_FONT
 TX_JSON = TX / "Parameters_Tx_payload.json"
 RX_JSON = RX / "Parameters_Rx_payload.json"
 CF_JSON = TX / "ControlSignals" / "Parameters_Control_Field.json"
-PLUTO_JSON = APP / "Parameters_Pluto.json"
-PLUTO_DIR = APP / "Pluto"                       # loopback files
+PLUTO_JSON = APP_TX_PLUTO / "Parameters_Pluto.json"
+TEST_FILES_DIR = APP_TX_PLUTO / "Test_Files"     # where Browse starts for "Selected file"
+PLUTO_DIR = APP_TX_PLUTO / "Loopback"           # loopback files (recreated on every loopback run)
 CAPTURE_40 = PLUTO_DIR / "Loopback_Capture_40MHz.npy"
 CAPTURE_RX = PLUTO_DIR / "Loopback_Capture_Rx.h5"
 DEFECTS_OFF = PLUTO_DIR / "Channel_Defects_Off.json"
@@ -73,7 +79,7 @@ FS_PLUTO = 40_000_000                           # the PL transmitter runs 40 Msp
 RX_RATE = 20_000_000                            # the Python Rx chain's rate
 MAX_TRIES = 3                                   # loopback: packets of the capture tried in turn
 
-# ---------- Pluto settings (App/Parameters_Pluto.json) ----------
+# ---------- Pluto settings (App/Tx_Pluto/Parameters_Pluto.json) ----------
 # gui key -> (json key, type, min, max, label); numbers are checked on Save / Start
 PLUTO_FIELDS = {
     "-PL_ADDR-": ("Address", str, None, None, "Pluto Address"),
@@ -146,7 +152,7 @@ send_frame = sg.Frame("Transmission", [
     [sg.Radio("Selected file", "TXMODE", key="-MODE_FILE-", enable_events=True)],
     [sg.Text("File", size=(6, 1), justification="right"),
      sg.Input("", key="-FILE-", size=34), sg.FileBrowse("Browse", key="-FILE_BROWSE-",
-                                                         initial_folder=str(APP / "Test_Files_For_Transfer"))],
+                                                         initial_folder=str(TEST_FILES_DIR))],
     [sg.Text("Send the file", size=(PL_LABEL_W - 6, 1), justification="right"),
      sg.Input("1", key="-FILE_REPEAT-", size=6, justification="right"),
      sg.Text("time(s); 0 = until Stop", font=ITALIC)],
@@ -211,7 +217,7 @@ rx_tab = [
 
 # ---------- Settings: load / save ----------
 def load_pluto() -> dict:
-    """App/Parameters_Pluto.json (the whole file); the defaults if it is not there yet."""
+    """App/Tx_Pluto/Parameters_Pluto.json (the whole file); the defaults if it is not there yet."""
     try:
         data = json.loads(PLUTO_JSON.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -299,7 +305,7 @@ def tx_config(defined: dict) -> R.TxConfig:
 
 def save_settings(values) -> str:
     """Write Parameters_Tx_payload.json (and the shared settings into Parameters_Rx_payload.json,
-    as Flexlinksimulation does) and App/Parameters_Pluto.json. Raises ValueError, nothing written."""
+    as Flexlinksimulation does) and App/Tx_Pluto/Parameters_Pluto.json. Raises ValueError, nothing written."""
     tx, errors = tx_from_values(values)
     pl, errors2 = pluto_from_values(values)
     errors += errors2

@@ -45,7 +45,7 @@ import pd_protocol as pr  # noqa: E402
 from pd_hw_test import Board  # noqa: E402
 
 ROOT = HERE.parents[2]
-DEFAULT_FILE = ROOT / "App" / "CoreBoard" / "EmuSource.cs8"
+DEFAULT_FILE = ROOT / "App" / "Rx_CoreBoard" / "Captures" / "EmuSource.cs8"
 DEFAULT_PARAMS = HERE.parent / "TestVectors" / "rep3.json"
 SPP = 672
 PD_BASE = 0x43C00000

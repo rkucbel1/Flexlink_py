@@ -10,7 +10,7 @@ samples). This script:
   2. STREAM_START: the Zedboard opens its UDP port and itself sends the HTTP "start" to the
      sample source, so the stream comes to the Zedboard:
        default        App/FlexlinkCoreBoardEmulator.py, started here on this PC, plays a capture
-       --coreboard IP the real CoreBoard (configured from App/Parameters_CoreBoard.json)
+       --coreboard IP the real CoreBoard (configured from App/Rx_CoreBoard/Parameters_CoreBoard.json)
   3. polls the results (POLL_RESULTS) and prints once a second: stream rate, losses, ring
      level, packets decoded, transport blocks CRC ok
   4. STREAM_STOP (the Zedboard sends the HTTP "stop"), summary
@@ -49,8 +49,8 @@ from pd_hw_test import Board  # noqa: E402
 
 ROOT = HERE.parents[2]
 EMULATOR = ROOT / "App" / "FlexlinkCoreBoardEmulator.py"
-DEFAULT_FILE = ROOT / "App" / "CoreBoard" / "EmuSource.cs8"
-CB_SETTINGS = ROOT / "App" / "Parameters_CoreBoard.json"
+DEFAULT_FILE = ROOT / "App" / "Rx_CoreBoard" / "Captures" / "EmuSource.cs8"
+CB_SETTINGS = ROOT / "App" / "Rx_CoreBoard" / "Parameters_CoreBoard.json"
 DEFAULT_PARAMS = HERE.parent / "TestVectors" / "rep3.json"
 
 

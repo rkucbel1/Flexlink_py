@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """FlexlinkProcessCoreBoardCapturedWaveform.py -- find and decode the Flexlink packets in a CoreBoard capture.
 
-Input: App/CoreBoard/CoreBoard_Capture.cs8 (+ .json), written by App/FlexlinkCaptureWithCoreBoard.py
+Input: App/Rx_CoreBoard/Captures/CoreBoard_Capture.cs8 (+ .json), written by App/Rx_CoreBoard/FlexlinkCaptureWithCoreBoard.py
 (int8 I/Q at 40 Msps, or 20 Msps, from the ESP32-S31 CoreBoard). At 20 Msps no decimation is needed
 (the Rx chain's rate); the signal's 16.4 MHz fit, and the analog filter follows the sample rate.
 
@@ -20,17 +20,17 @@ Steps, the same path as the Pluto loopback of FlexlinkTxWithPluto.py:
        that lies completely inside the capture. Packet and gap lengths are measured, not assumed.
     3. Rx/Initialize_Rx.py once.
     4. Per packet: cut with 1024 samples of margin (at 20 Msps), low-pass and decimate 40 -> 20 Msps,
-       scale to the simulator's level -> App/CoreBoard/CoreBoard_Packet_Rx.h5, then
+       scale to the simulator's level -> App/Rx_CoreBoard/Results/CoreBoard_Packet_Rx.h5, then
        Rx/Run_Rx_Chain.py --no-model --input <that> (no defects modelled, no Tx comparison: the
        transport blocks come from the other PC). The control field sets the payload settings, so
        this PC's Parameters_Rx_payload.json need not match the transmitter beforehand.
     5. Per packet: CFO, EQ SNR, decision-directed EVM, CRC of every block; file blocks (Selected
-       file mode on the transmitter) are collected in App/CoreBoard/FileTransfer_State and the file
-       is written to App/CoreBoard/Received_Files once complete (size and SHA-256 checked).
+       file mode on the transmitter) are collected in App/Rx_CoreBoard/Results/FileTransfer_State and the file
+       is written to App/Rx_CoreBoard/Results/Received_Files once complete (size and SHA-256 checked).
 
-Results: the console, App/CoreBoard/CoreBoard_Results.txt (the same sections as the Received tab of
-FlexlinkTxWithPluto.py: capture, control field, payload field), App/CoreBoard/CoreBoard_Packets.csv
-(one row per packet) and App/CoreBoard/CoreBoard_Process.log (every Rx chain step's output).
+Results: the console, App/Rx_CoreBoard/Results/CoreBoard_Results.txt (the same sections as the Received tab of
+FlexlinkTxWithPluto.py: capture, control field, payload field), App/Rx_CoreBoard/Results/CoreBoard_Packets.csv
+(one row per packet) and App/Rx_CoreBoard/Results/CoreBoard_Process.log (every Rx chain step's output).
 
 The Rx chain takes a few seconds per packet, so by default the first 20 packets are decoded
 (--max-packets 0: all). When the packets carry a file, every packet is decoded until the file is
@@ -38,11 +38,11 @@ complete.
 
 Usage
 -----
-    python App/FlexlinkProcessCoreBoardCapturedWaveform.py
-    python App/FlexlinkProcessCoreBoardCapturedWaveform.py --max-packets 0         # every packet
-    python App/FlexlinkProcessCoreBoardCapturedWaveform.py --packet 5 --plot       # one packet, plots
-    python App/FlexlinkProcessCoreBoardCapturedWaveform.py --find-only             # packet search only
-    python App/FlexlinkProcessCoreBoardCapturedWaveform.py --no-repair             # without the ring-lap repair
+    python App/Rx_CoreBoard/FlexlinkProcessCoreBoardCapturedWaveform.py
+    python App/Rx_CoreBoard/FlexlinkProcessCoreBoardCapturedWaveform.py --max-packets 0         # every packet
+    python App/Rx_CoreBoard/FlexlinkProcessCoreBoardCapturedWaveform.py --packet 5 --plot       # one packet, plots
+    python App/Rx_CoreBoard/FlexlinkProcessCoreBoardCapturedWaveform.py --find-only             # packet search only
+    python App/Rx_CoreBoard/FlexlinkProcessCoreBoardCapturedWaveform.py --no-repair             # without the ring-lap repair
 
 Exit status: 0 at least one packet decoded with every CRC passing, 1 packets found but none fully
 decoded, 2 no packet found, 3 error.
@@ -61,16 +61,19 @@ from pathlib import Path
 
 import numpy as np
 
-APP_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(APP_DIR))
-sys.path.insert(0, str(APP_DIR.parent))
-from flexlink_paths import APP, BASIC_MODULES, CHANNEL_DEFECTS, CONSTRUCT_GRID, ROOT, RX, TX, ray_file_name  # noqa: E402
+for _p in Path(__file__).resolve().parents:      # put the project root (flexlink_paths.py) on sys.path
+    if (_p / "flexlink_paths.py").is_file():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+from flexlink_paths import APP, APP_SIMULATION, BASIC_MODULES, COREBOARD_CAPTURES, COREBOARD_RESULTS, CHANNEL_DEFECTS, ROOT, RX, TX, ray_file_name  # noqa: E402
 
+sys.path.insert(0, str(APP_SIMULATION))   # Flexlink_Plots
 sys.path.insert(0, str(RX))
 sys.path.insert(0, str(BASIC_MODULES / "File_Transfer"))
 
-CB_DIR = APP / "CoreBoard"
-CAPTURE = CB_DIR / "CoreBoard_Capture.cs8"
+CB_DIR = COREBOARD_RESULTS                       # everything this script writes
+CAPTURE = COREBOARD_CAPTURES / "CoreBoard_Capture.cs8"
 PACKET_RX = CB_DIR / "CoreBoard_Packet_Rx.h5"
 DEFECTS_OFF = CB_DIR / "Channel_Defects_Off.json"
 PROCESS_LOG = CB_DIR / "CoreBoard_Process.log"
@@ -98,7 +101,7 @@ RX_STATUS = {0: "every CRC passed", 1: "a block failed", 2: "no packet detected 
 # ---------- capture ----------
 def load_capture(path: Path) -> tuple[np.ndarray, dict]:
     if not path.is_file():
-        raise FileNotFoundError(f"{path} not found - run App/FlexlinkCaptureWithCoreBoard.py first")
+        raise FileNotFoundError(f"{path} not found - run App/Rx_CoreBoard/FlexlinkCaptureWithCoreBoard.py first")
     raw = np.memmap(path, np.int8, "r")
     if raw.size % 2:
         raw = raw[:-1]
@@ -640,7 +643,7 @@ def evm_decision_directed(since: float) -> dict | None:
         with h5py.File(path, "r") as f:
             g = np.asarray(f["data"][()])
         gname = prm.get("File_Rx", {}).get("ResourceGrid_Rx") or "Resource_Grid_Rx.h5"
-        with h5py.File(CONSTRUCT_GRID / gname, "r") as f:
+        with h5py.File(RX / gname, "r") as f:
             types = np.asarray(f["signal_types"][()])
             code = int(np.asarray(f.attrs.get("Data", 40)))
         if g.dtype.names:

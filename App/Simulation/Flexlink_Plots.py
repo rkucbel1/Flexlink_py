@@ -10,7 +10,7 @@ Both grids are 'data' (PacketLength, 841) complex, one row per OFDM symbol. The
 first N symbols are drawn on top of each other, as in the MATLAB version
     plot(real(ResourceGrid(:,i+1)), imag(ResourceGrid(:,i+1)), 'k.', 'MarkerSize', 10)
 but only the Data signals: the signal types come from
-Construct_Grid/<File_Rx.ResourceGrid_Rx> (written by Initialize_Rx.py), the same
+Rx/<File_Rx.ResourceGrid_Rx> (written by Initialize_Rx.py), the same
 file Equalize_Payload_Grid.py uses.
 
 EVM plots (receive ray 1, after equalization), against the KNOWN transmitted symbols:
@@ -41,7 +41,7 @@ from pathlib import Path
 
 import numpy as np
 
-from flexlink_paths import CHANNEL_DEFECTS, CONSTRUCT_GRID, RX, TX, ray_file_name
+from flexlink_paths import CHANNEL_DEFECTS, RX, TX, ray_file_name
 
 DEFECTS_FILE = CHANNEL_DEFECTS / "Channel_Defects.json"
 TX_PARAMS_FILE = TX / "Parameters_Tx_payload.json"
@@ -109,9 +109,9 @@ def load_data_mask(rx_params: dict) -> np.ndarray:
     """True where the resource grid holds a Data signal, (PacketLength, 841)."""
     import h5py
     name = rx_params.get("File_Rx", {}).get(RESOURCE_GRID_KEY) or DEFAULT_RESOURCE_GRID
-    path = CONSTRUCT_GRID / name
+    path = RX / name
     if not path.is_file():
-        raise FileNotFoundError(f"{path.name} not found in Construct_Grid - run Initialize_Rx.py")
+        raise FileNotFoundError(f"{path.name} not found in Rx - run Initialize_Rx.py")
     with h5py.File(path, "r") as f:
         types = np.asarray(f["signal_types"][()])
         code = int(f.attrs.get("Data", DEFAULT_DATA_CODE))

@@ -191,7 +191,7 @@ boot is used later; the SD card path needs the SD boot jumpers.
 `App/FlexlinkRxVideoWithZedboard.py`:
 
 - Replace or extend the CoreBoard frame with a source choice: CoreBoard / FMCOMMS3.
-- New `App/Parameters_FMCOMMS3.json`: Frequency_MHz (2420), SampleRate (40e6), RFBandwidth_MHz
+- New `App/Rx_FCOMMS3/Parameters_FMCOMMS3.json`: Frequency_MHz (2420), SampleRate (40e6), RFBandwidth_MHz
   (18), GainMode (manual / fast_attack / slow_attack / hybrid), Gain, Port (Rx1A).
 - For FMCOMMS3, send `RADIO_CONFIG` on the TCP connection instead of the HTTP start to the
   CoreBoard. `detector_params` sets `input_stage` from the sample rate; `dc_shift` from step 1.

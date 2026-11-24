@@ -1,7 +1,7 @@
 {
   "HIL": {
     "RxPath": "Simulation",
-    "RxPath_comment": "Simulation (Python Rx chain) or HIL (hardware in the loop: the Zedboard FPGA receiver, App/Run_HIL.py)",
+    "RxPath_comment": "Simulation (Python Rx chain) or HIL (hardware in the loop: the Zedboard FPGA receiver, App/Simulation/Run_HIL.py)",
     "BoardHost": "192.168.50.10",
     "BoardHost_comment": "IP address of the Zedboard (FW/build_firmware.py BOARD_IP); 127.0.0.1 for pd_board_emulator.py",
     "BoardPort": 5001,

@@ -21,7 +21,7 @@ Usage
     python Tx/Generate_FileData/Generate_File_Bitstream.py --file photo.jpg --blocks 7,12,40
 
 Then run Tx/Run_Tx_Chain.py --keep-blocks, Rx/Run_Rx_Chain.py, and Rx/Receive_File.py.
-App/Run_File_Transfer.py does all of that for every packet.
+App/Simulation/Run_File_Transfer.py does all of that for every packet.
 """
 from __future__ import annotations
 

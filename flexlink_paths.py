@@ -17,6 +17,22 @@ RX                = ROOT / "Rx"
 TX                = ROOT / "Tx"
 TX_CONTROL_SIGNALS = TX / "ControlSignals"         # Parameters_Control_Field.json and control field .h5 files
 
+# ---- App: scripts by purpose; parameter JSONs and data folders stay in APP -----
+APP_SIMULATION   = APP / "Simulation"     # Flexlinksimulation.py, Flexlink_Plots.py, Run_*.py
+APP_TX_PLUTO     = APP / "Tx_Pluto"       # FlexlinkTx*WithPluto.py
+APP_RX_COREBOARD = APP / "Rx_CoreBoard"   # CoreBoard capture, emulator, processing, Rx video/MAVLink
+COREBOARD_CAPTURES = APP_RX_COREBOARD / "Captures"   # .cs8 captures (+ .json): capture, emulator, HW tests
+COREBOARD_RESULTS  = APP_RX_COREBOARD / "Results"    # outputs of FlexlinkProcessCoreBoardCapturedWaveform.py
+APP_RX_FCOMMS3   = APP / "Rx_FCOMMS3"     # FlexlinkRx*WithZedboard_FCOMMS3.py
+APP_MAVLINK      = APP / "Mavlink"        # MAVLink modules and their JSON, shared by Tx and Rx apps
+
+# ---- HW_Development: PC-side helpers used by the App scripts ------------------
+HW_DEVELOPMENT        = ROOT / "HW_Development"
+PACKET_DETECTOR       = HW_DEVELOPMENT / "Packet_Detector"
+PACKET_DETECTOR_PC    = PACKET_DETECTOR / "PC"
+PACKET_DETECTOR_FCOMM_PC = HW_DEVELOPMENT / "Packet_Detector_FCOMM" / "PC"
+PACKET_TRANSMITTER_PC = HW_DEVELOPMENT / "Packet_Transmitter" / "PC"
+
 # ---- Flexlink_BasicModules --------------------------------------------------
 BASIC_MODULES    = ROOT / "Flexlink_BasicModules"
 
@@ -34,7 +50,11 @@ LDPC_ENCODER                     = BASIC_MODULES / "LDPC_Encoder"
 LDPC_ENCODER_MATRIX_GENERATION_G = LDPC_ENCODER / "MatrixGeneration_G"
 LDPC_ENCODER_MATRIX_GENERATION_H = LDPC_ENCODER / "MatrixGeneration_H"
 
+EQUALIZER = BASIC_MODULES / "Equalizer"
+
 OFDM_MODULATOR = BASIC_MODULES / "OFDM_Modulator"
+
+PREAMBLE = BASIC_MODULES / "Preamble"
 
 QAM_MAPPER = BASIC_MODULES / "QAM_Mapper"
 

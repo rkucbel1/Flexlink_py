@@ -30,10 +30,10 @@ Progress lines on stdout (for a GUI):
 
 Usage
 -----
-    python App/Run_File_Transfer.py --file photo.jpg
-    python App/Run_File_Transfer.py --file photo.jpg --rounds 6 --seed 7
-    python App/Run_File_Transfer.py --file notes.txt --no-defects        # clean channel
-    python App/Run_File_Transfer.py --file photo.jpg --max-packets 20    # stop early (testing)
+    python App/Simulation/Run_File_Transfer.py --file photo.jpg
+    python App/Simulation/Run_File_Transfer.py --file photo.jpg --rounds 6 --seed 7
+    python App/Simulation/Run_File_Transfer.py --file notes.txt --no-defects        # clean channel
+    python App/Simulation/Run_File_Transfer.py --file photo.jpg --max-packets 20    # stop early (testing)
 
 Exit status: 0 the file came back identical, 1 blocks still missing after the last round,
 3 a step stopped with an error (initialization or the Tx chain), or bad arguments.
@@ -47,12 +47,12 @@ import sys
 import time
 from pathlib import Path
 
-APP = Path(__file__).resolve().parent
-try:
-    sys.path.insert(0, str(APP.parent))
-    from flexlink_paths import BASIC_MODULES, CHANNEL_DEFECTS, RX, TX
-except ImportError:  # pragma: no cover
-    raise
+for _p in Path(__file__).resolve().parents:      # put the project root (flexlink_paths.py) on sys.path
+    if (_p / "flexlink_paths.py").is_file():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+from flexlink_paths import BASIC_MODULES, CHANNEL_DEFECTS, RX, TX  # noqa: E402
 sys.path.insert(0, str(TX / "Generate_FileData"))
 sys.path.insert(0, str(RX))
 sys.path.insert(0, str(BASIC_MODULES / "File_Transfer"))

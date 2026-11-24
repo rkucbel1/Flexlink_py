@@ -62,14 +62,14 @@ From `HW_Development/Packet_Detector/PC`:
 # real CoreBoard (start the Pluto when told)
 python pd_stream_test.py --host 10.42.0.101 --coreboard 10.42.0.133 --seconds 30 --push
 
-# emulator on the PC (plays App/CoreBoard/EmuSource.cs8)
+# emulator on the PC (plays App/Rx_CoreBoard/Captures/EmuSource.cs8)
 python pd_stream_test.py --host 10.42.0.101 --seconds 30 --push
 
 # FPGA receiver regression (no CoreBoard needed; normal LOAD/RUN path)
 python pd_board_regression.py --host 10.42.0.101
 ```
 
-- Radio settings come from `App/Parameters_CoreBoard.json` (2440 MHz, 40 Msps, gain 40).
+- Radio settings come from `App/Rx_CoreBoard/Parameters_CoreBoard.json` (2440 MHz, 40 Msps, gain 40).
 - Without `--push` the script polls every 0.05 s. That still works, but each poll occasionally costs a
   datagram and adds 25–75 ms of latency.
 - Build firmware with `FW/build_firmware.py`, then load with `run_board.tcl`.

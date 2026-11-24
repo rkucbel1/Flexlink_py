@@ -13,6 +13,6 @@
     "Play": 1,
     "Play_comment": "1: play the received video with ffplay",
     "SaveStream": 0,
-    "SaveStream_comment": "1: also save the received stream to App/Video/Received.ts (large)"
+    "SaveStream_comment": "1: also save the received stream to App/Rx_CoreBoard/Video/Received.ts (large)"
   }
 }

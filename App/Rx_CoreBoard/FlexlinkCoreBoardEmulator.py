@@ -18,17 +18,17 @@ the sample rate (59,524 datagrams/s at 40 Msps); --speed runs it slower or faste
 Usage
 -----
     # the emulator (port 80 needs root; any other port is fine for the PC tools and the Zedboard)
-    python App/FlexlinkCoreBoardEmulator.py                                   # App/CoreBoard/CoreBoard_Capture.cs8
-    python App/FlexlinkCoreBoardEmulator.py --file App/CoreBoard/Segment_newfw_3820ms.cs8 --http-port 8080
-    python App/FlexlinkCoreBoardEmulator.py --drop 1e-4 --drop-burst 3 --reorder 1e-4   # network faults
-    python App/FlexlinkCoreBoardEmulator.py --speed 0.1                       # 10 x slower than real time
+    python App/Rx_CoreBoard/FlexlinkCoreBoardEmulator.py                                   # App/Rx_CoreBoard/Captures/CoreBoard_Capture.cs8
+    python App/Rx_CoreBoard/FlexlinkCoreBoardEmulator.py --file App/Rx_CoreBoard/Captures/Segment_newfw_3820ms.cs8 --http-port 8080
+    python App/Rx_CoreBoard/FlexlinkCoreBoardEmulator.py --drop 1e-4 --drop-burst 3 --reorder 1e-4   # network faults
+    python App/Rx_CoreBoard/FlexlinkCoreBoardEmulator.py --speed 0.1                       # 10 x slower than real time
 
     # check it with the capture script, then decode as usual
-    python App/FlexlinkCaptureWithCoreBoard.py --host 127.0.0.1:8080 --seconds 3
-    python App/FlexlinkProcessCoreBoardCapturedWaveform.py
+    python App/Rx_CoreBoard/FlexlinkCaptureWithCoreBoard.py --host 127.0.0.1:8080 --seconds 3
+    python App/Rx_CoreBoard/FlexlinkProcessCoreBoardCapturedWaveform.py
 
     # no HTTP: stream straight to a receiver (e.g. a Zedboard firmware without the HTTP start yet)
-    python App/FlexlinkCoreBoardEmulator.py --stream-to 10.42.0.50:4000 --seconds 10
+    python App/Rx_CoreBoard/FlexlinkCoreBoardEmulator.py --stream-to 10.42.0.50:4000 --seconds 10
 
 The file's sample rate comes from the .json of the same name (as the capture script writes it);
 without one it is taken as 40 Msps, or give --rate (e.g. --rate 20000000 for a 20 Msps segment). A start with another rate is refused, as the samples cannot be re-made.
@@ -55,8 +55,14 @@ from pathlib import Path
 
 import numpy as np
 
-APP_DIR = Path(__file__).resolve().parent
-DEFAULT_FILE = APP_DIR / "CoreBoard" / "CoreBoard_Capture.cs8"
+for _p in Path(__file__).resolve().parents:      # put the project root (flexlink_paths.py) on sys.path
+    if (_p / "flexlink_paths.py").is_file():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+from flexlink_paths import APP, COREBOARD_CAPTURES  # noqa: E402
+
+DEFAULT_FILE = COREBOARD_CAPTURES / "CoreBoard_Capture.cs8"
 
 # ESR2 wire format (as FlexlinkCaptureWithCoreBoard.py)
 MAGIC = b"ESR2"

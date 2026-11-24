@@ -21,12 +21,12 @@ FlexlinkRxMavlinkWithZedboard_CoreBoard.py:
                      transmitter app, 5600 is taken by the Pi's video: use another port there.
   Save MAVLink       the received frames to App/Mavlink/Received.tlog (opens in QGC's Log Replay)
 
-Settings: App/Parameters_FMCOMMS3.json (as the video receiver) and App/Mavlink/Parameters_RxMavlink.json
+Settings: App/Rx_FCOMMS3/Parameters_FMCOMMS3.json (as the video receiver) and App/Mavlink/Parameters_RxMavlink.json
 (shared with the CoreBoard app). Start saves them first (as Save does). The MAVLink part is
 App/Mavlink/Rx_Mavlink.py.
 
 Requires: as FlexlinkRxVideoWithZedboard_FCOMMS3.py
-Run with: python App/FlexlinkRxMavlinkWithZedboard_FCOMMS3.py
+Run with: python App/Rx_FCOMMS3/FlexlinkRxMavlinkWithZedboard_FCOMMS3.py
 """
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ zed_frame = sg.Frame("Zedboard receiver", [
 video_frame = sg.Frame("Video", [
     [sg.Checkbox("Play with ffplay", key="-PLAY-", default=True)],
     [sg.Checkbox("Save the received stream", key="-SAVE_TS-")],
-    [sg.Text(f"   to App/Video/{RX.RECEIVED_TS.name} (about 3 GB an hour at 7 Mbit/s)", font=ITALIC)],
+    [sg.Text(f"   to App/Rx_FCOMMS3/Video/{RX.RECEIVED_TS.name} (about 3 GB an hour at 7 Mbit/s)", font=ITALIC)],
 ], font=H2, vertical_alignment="top", expand_x=True)
 
 gcs_frame = RM.gcs_frame(sg, H2, ITALIC)
@@ -104,7 +104,7 @@ def load_into_window(window) -> None:
 
 
 def save_settings(values) -> tuple[dict, dict]:
-    """App/Parameters_FMCOMMS3.json (RX.save_settings) and App/Mavlink/Parameters_RxMavlink.json.
+    """App/Rx_FCOMMS3/Parameters_FMCOMMS3.json (RX.save_settings) and App/Mavlink/Parameters_RxMavlink.json.
     Raises ValueError, nothing written."""
     rxm, errors = RM.rxm_from_values(values)
     _s, e2 = RX.settings_from_values(values)

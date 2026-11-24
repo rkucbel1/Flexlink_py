@@ -13,23 +13,22 @@ Gigabit Ethernet, no SoapySDR needed:
 It starts the stream, records CaptureSeconds (default 8 s) at 40 Msps, stops the stream and writes
 (always overwriting):
 
-    App/CoreBoard/CoreBoard_Capture.cs8    int8 I,Q,I,Q,... at 40 Msps (lost samples filled with 0)
-    App/CoreBoard/CoreBoard_Capture.json   settings, levels, lost samples, board counters
+    App/Rx_CoreBoard/Captures/CoreBoard_Capture.cs8    int8 I,Q,I,Q,... at 40 Msps (lost samples filled with 0)
+    App/Rx_CoreBoard/Captures/CoreBoard_Capture.json   settings, levels, lost samples, board counters
 
-Start the transmitter (App/FlexlinkTxWithPluto.py on the other PC) within a second or two of
-starting this script. Then decode with App/FlexlinkProcessCoreBoardCapturedWaveform.py.
+Start the transmitter (App/Tx_Pluto/FlexlinkTxWithPluto.py on the other PC) within a second or two of
+starting this script. Then decode with App/Rx_CoreBoard/FlexlinkProcessCoreBoardCapturedWaveform.py.
 
-Settings come from App/Parameters_CoreBoard.json (made with defaults on the first run; the carrier
-defaults to TxLO_MHz of App/Parameters_Pluto.json). Command-line options override them for one
-run; --save writes them back.
+Settings come from App/Rx_CoreBoard/Parameters_CoreBoard.json (made with defaults on the first run).
+Command-line options override them for one run; --save writes them back.
 
 Usage
 -----
-    python App/FlexlinkCaptureWithCoreBoard.py                       # 8 s with the saved settings
-    python App/FlexlinkCaptureWithCoreBoard.py --seconds 10 --gain 30
-    python App/FlexlinkCaptureWithCoreBoard.py --host 192.168.1.50 --save
-    python App/FlexlinkCaptureWithCoreBoard.py --status              # board status only, no change
-    python App/FlexlinkCaptureWithCoreBoard.py --configure           # apply the settings, no capture
+    python App/Rx_CoreBoard/FlexlinkCaptureWithCoreBoard.py                       # 8 s with the saved settings
+    python App/Rx_CoreBoard/FlexlinkCaptureWithCoreBoard.py --seconds 10 --gain 30
+    python App/Rx_CoreBoard/FlexlinkCaptureWithCoreBoard.py --host 192.168.1.50 --save
+    python App/Rx_CoreBoard/FlexlinkCaptureWithCoreBoard.py --status              # board status only, no change
+    python App/Rx_CoreBoard/FlexlinkCaptureWithCoreBoard.py --configure           # apply the settings, no capture
 
 Linux: 40 Msps is ~60,000 UDP datagrams/s (~690 Mbit/s). Raise the socket buffer limit once per
 boot or the PC drops datagrams:   sudo sysctl -w net.core.rmem_max=268435456
@@ -54,13 +53,15 @@ from pathlib import Path
 
 import numpy as np
 
-APP_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(APP_DIR.parent))
-from flexlink_paths import APP  # noqa: E402
+for _p in Path(__file__).resolve().parents:      # put the project root (flexlink_paths.py) on sys.path
+    if (_p / "flexlink_paths.py").is_file():
+        if str(_p) not in sys.path:
+            sys.path.insert(0, str(_p))
+        break
+from flexlink_paths import APP_RX_COREBOARD, COREBOARD_CAPTURES  # noqa: E402
 
-SETTINGS_JSON = APP / "Parameters_CoreBoard.json"
-PLUTO_JSON = APP / "Parameters_Pluto.json"
-OUT_DIR = APP / "CoreBoard"
+SETTINGS_JSON = APP_RX_COREBOARD / "Parameters_CoreBoard.json"
+OUT_DIR = COREBOARD_CAPTURES
 CAPTURE = OUT_DIR / "CoreBoard_Capture.cs8"
 CAPTURE_META = OUT_DIR / "CoreBoard_Capture.json"
 
@@ -100,11 +101,6 @@ def load_settings() -> dict:
     except json.JSONDecodeError as e:
         raise SystemExit(f"Invalid JSON in {SETTINGS_JSON}: line {e.lineno}: {e.msg}")
     sec = data.setdefault("CoreBoard", {})
-    if "Frequency_MHz" not in sec:                       # first run: follow the Pluto's carrier
-        try:
-            sec["Frequency_MHz"] = int(round(json.loads(PLUTO_JSON.read_text())["Pluto"]["TxLO_MHz"]))
-        except (OSError, ValueError, KeyError):
-            pass
     for k, v in DEFAULTS.items():
         sec.setdefault(k, v)
         if f"{k}_comment" in COMMENTS:
@@ -310,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="print the board's status and the settings a capture would apply, change nothing")
     ap.add_argument("--configure", action="store_true",
                     help="apply the settings to the board (no capture) and print its status")
-    ap.add_argument("--out", type=Path, default=CAPTURE, help="capture file (default App/CoreBoard/...cs8)")
+    ap.add_argument("--out", type=Path, default=CAPTURE, help="capture file (default App/Rx_CoreBoard/Captures/...cs8)")
     a = ap.parse_args(argv)
 
     data = load_settings()
@@ -451,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  level: peak {lv['peak']} of 127 ({dbfs(lv['peak']):.1f} dBFS), rms {lv['rms']:.1f} "
           f"({dbfs(lv['rms']):.1f} dBFS), clipped {100 * lv['clip_fraction']:.3f} %, "
           f"DC {lv['dc_i']:+.2f}/{lv['dc_q']:+.2f}" + hint)
-    print("Next: python App/FlexlinkProcessCoreBoardCapturedWaveform.py")
+    print("Next: python App/Rx_CoreBoard/FlexlinkProcessCoreBoardCapturedWaveform.py")
     return 1 if lv["lost_samples"] else 0
 
 

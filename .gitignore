@@ -16,34 +16,27 @@ Docs/*.pdf
 /Tx/ControlSignals/*.h5
 /Tx/Generate_RandomPacketOfData/*.h5
 /Rx/*.h5
-App/Sweeps/
-App/HIL/
+App/Simulation/Sweeps/
+App/Simulation/HIL/
 
 # File transfer: received files, partly received state, worker copies, test files
 Rx/FileTransfer_State/
 Rx/Received_Files/
 App/FileTransfer_Workers/
-App/Test_Files_For_Transfer/
+App/Tx_Pluto/Test_Files/
 
 # CoreBoard (ESP32-S31) captures and processing outputs, recreated by
 # FlexlinkCaptureWithCoreBoard.py / FlexlinkProcessCoreBoardCapturedWaveform.py.
 # Captures are hundreds of MB (GitHub refuses files over 100 MB); one 8 MB segment is kept
 # as a known-good test signal for the emulator and the processing script.
-App/CoreBoard/*.cs8
-!App/CoreBoard/Segment_newfw_3820ms.cs8
-App/CoreBoard/*.zip
-App/CoreBoard/EmuSource.json
-App/CoreBoard/CoreBoard_Capture.json
-App/CoreBoard/CoreBoard_Packet_Rx.h5
-App/CoreBoard/CoreBoard_Packets.csv
-App/CoreBoard/CoreBoard_Results.txt
-App/CoreBoard/Channel_Defects_Off.json
-App/CoreBoard/All_*.txt
-App/CoreBoard/FileTransfer_State/
-App/CoreBoard/Received_Files/
+App/Rx_CoreBoard/Captures/*.cs8
+!App/Rx_CoreBoard/Captures/Segment_newfw_3820ms.cs8
+App/Rx_CoreBoard/Captures/*.zip
+App/Rx_CoreBoard/Captures/*.json
+App/Rx_CoreBoard/Results/
 
 # Pluto loopback outputs (FlexlinkTxWithPluto.py)
-App/Pluto/
+App/Tx_Pluto/Loopback/
 
 # FPGA development (HW_Development). Formerly in Packet_Detector/.gitignore and
 # Packet_Transmitter/.gitignore; this is now the only .gitignore of the repository.
@@ -90,6 +83,7 @@ Thumbs.db
 
 # Video and Mavlink Related
 App/Mavlink/Loopback_Received.tlog
-App/Video/*.ts
+App/Rx_CoreBoard/Video/
+App/Rx_FCOMMS3/Video/
 App/Mavlink/Received.tlog
 
