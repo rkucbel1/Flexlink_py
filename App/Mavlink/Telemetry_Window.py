@@ -143,6 +143,12 @@ class TelemetryWindow:
         ], vertical_alignment="top")
         return [[graphs, values]]
 
+    def _text_color(self) -> str:
+        """The theme's text color as a real color: themes like "SystemDefault" return
+        COLOR_SYSTEM_DEFAULT ("1234567890", meaning: do not set), which tkinter refuses."""
+        c = self.sg.theme_text_color()
+        return "black" if c in (None, "", getattr(self.sg, "COLOR_SYSTEM_DEFAULT", "1234567890")) else c
+
     @property
     def is_open(self) -> bool:
         return self.window is not None
@@ -248,7 +254,7 @@ class TelemetryWindow:
             v["batt"] = f"{ss['voltage_battery'] / 1e3:.2f} V{amps}{pct}"
         for key, _label in VALUE_ROWS:
             w[f"-TV_{key}-"].update(v.get(key, "-"), text_color=(
-                "red" if key == "link" and stale and age is not None else self.sg.theme_text_color()))
+                "red" if key == "link" and stale and age is not None else self._text_color()))
         self._draw_horizon(att, stale and age is not None)
         if gp and gp["hdg"] != 65535:
             self._draw_compass(gp["hdg"] / 100)
@@ -263,7 +269,7 @@ class TelemetryWindow:
             ml.update("")
             for clock, sev, text in msgs:
                 ml.print(f"{clock} {ML.MAV_SEVERITY.get(sev, sev):9s} {text}",
-                         text_color=SEVERITY_COLORS.get(sev, self.sg.theme_text_color()))
+                         text_color=SEVERITY_COLORS.get(sev, self._text_color()))
 
 
 # --------------------------------------------------------------------------- #

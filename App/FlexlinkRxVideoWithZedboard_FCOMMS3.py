@@ -12,7 +12,8 @@ The Zedboard needs no Flexlink parameters: it reads modulation, code and repetit
 packet's control field. The Transmitter line shows that control field (the transmitter's mode).
 
   Settings    App/Parameters_FMCOMMS3.json: the Zedboard's address and port, the AD9361's carrier
-              (the Pluto's TxLO_MHz), sample rate, RF bandwidth, gain, how often the board pushes
+              (the Pluto's TxLO_MHz), sample rate, RF bandwidth, gain control (fast attack by default:
+              Flexlink is TDD, so the signal comes in bursts), how often the board pushes
               results, the DC blocker (6: without it, spurs near 0 Hz cause false triggers)
   Video       play with ffplay (sudo apt install ffmpeg); optionally also save the received
               stream to App/Video/Received.ts (about 3 GB an hour at 7 Mbit/s: off by default)
@@ -78,7 +79,7 @@ SLOT_SAMPLES_NOTE = "the push header's newest position counts input samples (fmc
 
 # ---------- Settings ----------
 FMC_DEFAULTS = {"ZedAddress": "10.42.0.101", "ZedPort": pr.DEFAULT_PORT, "Frequency_MHz": 2420.0,
-                "SampleRate": 40_000_000, "RFBandwidth_MHz": 18.0, "GainMode": "manual", "Gain": 50,
+                "SampleRate": 40_000_000, "RFBandwidth_MHz": 18.0, "GainMode": "fast_attack", "Gain": 50,
                 "Port": 0, "Push_ms": 1.0, "DcShift": 6, "Play": 1, "SaveStream": 0}
 FMC_COMMENTS = {
     "ZedAddress_comment": "IP address of the Zedboard receiver",
@@ -86,8 +87,8 @@ FMC_COMMENTS = {
     "Frequency_MHz_comment": "AD9361 receive carrier, MHz, 70 to 6000 (match TxLO_MHz of the Pluto)",
     "SampleRate_comment": "40000000 (receiver input stage 2, proven) or 20000000 (input stage 1)",
     "RFBandwidth_MHz_comment": "AD9361 analog RF bandwidth, MHz (the signal occupies 16.4 MHz)",
-    "GainMode_comment": "manual, fast_attack, slow_attack or hybrid (the AD9361's gain control)",
-    "Gain_comment": "manual gain, dB (-3 to 71); 50 over the air at a few metres",
+    "GainMode_comment": "fast_attack (default: TDD bursts), slow_attack, hybrid or manual (the AD9361's gain control)",
+    "Gain_comment": "manual gain only, dB (-3 to 71); 50 over the air at a few metres",
     "Port_comment": "AD9361 Rx input: 0 = A balanced (the FMCOMMS3's RX1A SMA)",
     "Push_ms_comment": "the board pushes results at most this often while there are new ones, 0.25 to 7.75 ms",
     "DcShift_comment": "receiver DC blocker: 6 (0 gives false triggers from spurs near 0 Hz)",
@@ -120,7 +121,7 @@ ad_frame = sg.Frame("FMCOMMS3 (AD9361)", [
      sg.Text("40: proven path", font=ITALIC)],
     in_row("RF bandwidth (MHz)", "-AD_BW-", FMC_DEFAULTS["RFBandwidth_MHz"], extra="signal 16.4 MHz"),
     [sg.Text("Gain control", size=(LW, 1), justification="right"),
-     sg.Combo(list(fp.GAIN_MODES), default_value="manual", key="-AD_MODE-", readonly=True, size=12)],
+     sg.Combo(list(fp.GAIN_MODES), default_value="fast_attack", key="-AD_MODE-", readonly=True, size=12)],
     in_row("Gain (dB)", "-AD_GAIN-", FMC_DEFAULTS["Gain"], extra="manual only"),
     [sg.Text("RX1A", font=ITALIC)],
 ], font=H2, vertical_alignment="top", expand_x=True)
@@ -200,7 +201,7 @@ def parse_fields(values, spec: dict) -> tuple[dict, list[str]]:
 def settings_from_values(values) -> tuple[dict, list[str]]:
     s, errors = parse_fields(values, FMC_FIELDS)
     s["SampleRate"] = RATES.get(values["-AD_RATE-"], 40_000_000)
-    s["GainMode"] = values["-AD_MODE-"] if values["-AD_MODE-"] in fp.GAIN_MODES else "manual"
+    s["GainMode"] = values["-AD_MODE-"] if values["-AD_MODE-"] in fp.GAIN_MODES else "fast_attack"
     s["Play"] = int(bool(values["-PLAY-"]))
     s["SaveStream"] = int(bool(values["-SAVE_TS-"]))
     return s, errors
@@ -211,7 +212,7 @@ def load_into_window(window) -> None:
     for gui_key, (key, *_r) in FMC_FIELDS.items():
         window[gui_key].update(str(s[key]))
     window["-AD_RATE-"].update(next((k for k, v in RATES.items() if v == int(s["SampleRate"])), "40 Msps"))
-    window["-AD_MODE-"].update(s["GainMode"] if s["GainMode"] in fp.GAIN_MODES else "manual")
+    window["-AD_MODE-"].update(s["GainMode"] if s["GainMode"] in fp.GAIN_MODES else "fast_attack")
     window["-PLAY-"].update(bool(int(s["Play"])))
     window["-SAVE_TS-"].update(bool(int(s["SaveStream"])))
 
